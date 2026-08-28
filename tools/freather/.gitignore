@@ -1,0 +1,3 @@
+# Runtime output from the serial monitor is local-only.
+serial-monitor/logs/
+serial-monitor/__pycache__/
