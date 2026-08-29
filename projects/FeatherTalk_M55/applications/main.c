@@ -5,12 +5,10 @@
 #include "lvgl.h"
 #include "lv_demos.h"
 #include <feathertalk/version.h>
+#include "ipc/feathertalk_ipc.h"
 
 #if defined(BSP_LVGL_DEMO_VIRTUAL3D_EMOJI)
-#if defined(BSP_LCD_ROTATION_90) || defined(BSP_LCD_ROTATION_270)
-#error "BSP_LVGL_DEMO_VIRTUAL3D_EMOJI does not support LCD rotation 90 or 270 degrees. Use rotation 0 or 180."
-#endif
-#include "virtual3d_emoji_demo_ui.h"
+#error "Virtual3D resources were removed from FeatherTalk_M55; select the Music, Benchmark, or Stress demo."
 #endif
 
 #define LED_PIN_G GET_PIN(16, 6)
@@ -33,8 +31,6 @@
 #define BSP_LVGL_DEMO_NAME "benchmark"
 #elif defined(BSP_LVGL_DEMO_STRESS)
 #define BSP_LVGL_DEMO_NAME "stress"
-#elif defined(BSP_LVGL_DEMO_VIRTUAL3D_EMOJI)
-#define BSP_LVGL_DEMO_NAME "virtual3d_emoji"
 #else
 #define BSP_LVGL_DEMO_NAME "music"
 #endif
@@ -78,8 +74,6 @@ void lv_user_gui_init(void)
     lv_demo_benchmark();
 #elif defined(BSP_LVGL_DEMO_STRESS)
     lv_demo_stress();
-#elif defined(BSP_LVGL_DEMO_VIRTUAL3D_EMOJI)
-    virtual3d_emoji_demo_init();
 #else
     lv_demo_music();
 #endif
@@ -93,13 +87,19 @@ int main(void)
     rt_kprintf("FeatherTalk M55 %s\n", FEATHERTALK_M55_FIRMWARE_VERSION);
     rt_kprintf("IPC ABI %u\n", FEATHERTALK_IPC_ABI_VERSION);
     rt_kprintf("LVGL %s demo start, lcd rotation=%d\n", BSP_LVGL_DEMO_NAME, BSP_LCD_ROTATION_DEGREES);
+    rt_kprintf("Console: M55 diagnostics on uart2; product MSH control stays on M33 uart5\n");
 
     rt_pin_mode(LED_PIN_G, PIN_MODE_OUTPUT);
+    if (feathertalk_ipc_start() != RT_EOK)
+    {
+        rt_kprintf("FeatherTalk M55 IPC responder failed to start\n");
+    }
     m55_lvgl_cpu_cache_enable();
     rt_thread_mdelay(BSP_LCD_STARTUP_STABILIZE_MS);
     lvgl_thread_init();
     rt_thread_mdelay(BSP_LCD_FIRST_FRAME_DELAY_MS);
     m55_lcd_backlight_enable();
+    feathertalk_ipc_set_lvgl_ready();
 
     while (1)
     {

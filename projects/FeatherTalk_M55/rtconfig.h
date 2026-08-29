@@ -364,13 +364,14 @@
 #define BSP_USING_LVGL
 #define LVGL_USING_DEMOS
 #define BSP_LVGL_ENABLE_CPU_CACHE
-#define BSP_LVGL_DEMO_VIRTUAL3D_EMOJI
+#define BSP_LVGL_DEMO_MUSIC
 #define BSP_LVGL_DRAW_BUF_LINES 800
 /* end of Onboard Peripheral Drivers */
 
 /* On-chip Peripheral Drivers */
 
 #define BSP_USING_GPIO
+#define BSP_USING_IPC
 #define BSP_USING_I2C
 #define BSP_USING_HW_I2C0
 #define BSP_USING_SOFT_I2C1

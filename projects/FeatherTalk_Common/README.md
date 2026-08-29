@@ -9,7 +9,9 @@ The initial contract contains:
 - independent M33 and M55 firmware versions;
 - one product version;
 - a versioned IPC ABI;
-- a fixed-width IPC frame header suitable for transport over the platform IPC.
+- a fixed-width 16-byte message suitable for the PSoC E84 IPC Pipe payload;
+- HELLO/HEARTBEAT request and acknowledgement message identifiers;
+- common M33, M55, IPC, LVGL, and peer-online status flags.
 
 Any incompatible IPC layout change must increment
 `FEATHERTALK_IPC_ABI_VERSION`.

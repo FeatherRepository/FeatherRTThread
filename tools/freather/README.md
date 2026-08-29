@@ -86,6 +86,7 @@ $env:RTT_EXEC_PATH = (Resolve-Path `
 - External build runtime: CPython 3.14.7 + SCons 4.10.1 in `build-python/`
 - Build launcher: `build-demo.cmd`
 - Program/verify launcher: `flash-demo.cmd`
+- Dual-core product programmer: `flash-feathertalk.cmd` (M55 first, signed M33 last)
 - Detailed PSE84 instructions: `PSE84_WORKFLOW.md`
 
 Build and program the M33 template without installing tools into the SDK:
@@ -93,6 +94,14 @@ Build and program the M33 template without installing tools into the SDK:
 ```powershell
 .\tools\freather\build-demo.cmd Edgi_Talk_M33_Template
 .\tools\freather\flash-demo.cmd Edgi_Talk_M33_Template
+```
+
+Build and program both FeatherTalk product cores:
+
+```powershell
+.\tools\freather\build-demo.cmd FeatherTalk_M55 -Clean
+.\tools\freather\build-demo.cmd FeatherTalk_M33 -Clean
+.\tools\freather\flash-feathertalk.cmd
 ```
 
 ## Serial monitor

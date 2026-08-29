@@ -5,7 +5,7 @@
 ## Introduction
 
 This product project is derived from **Edgi_Talk_M33_Template** and runs a minimal **RT-Thread** application on the Cortex-M33 core.
-It is intended to initialize the board, boot the Cortex-M55 core, and then stay idle with all optional peripheral demos disabled.
+It initializes the board, boots the Cortex-M55 core, and remains active as the product control and IPC-supervisor core with optional peripheral demos disabled.
 
 The shared Secure M33 firmware package lives under `libraries/components/infineon-pse84-secure-firmware-latest`, while keeping the Template `.config` minimal.
 
@@ -13,6 +13,7 @@ The shared Secure M33 firmware package lives under `libraries/components/infineo
 
 * The project is developed based on the **Edgi-Talk** platform.
 * `SOC_Enable_CM55` is enabled so board initialization starts the M55 core.
+* `SOC_Enable_CM33_DeepSleep` is disabled so M33 continues into RT-Thread and the product MSH after starting M55.
 * AHT20, LSM6DS3, audio, ADC, RTC, SD card, filesystem, LCD, Wi-Fi, and other optional peripheral demos are disabled.
 * External Wi-Fi/audio power control pins are driven low during board initialization.
 
@@ -27,7 +28,7 @@ The shared Secure M33 firmware package lives under `libraries/components/infineo
 ### Runtime Behavior
 
 * After flashing, power on the board to run the example project.
-* M33 initializes RT-Thread, starts M55, prints a short boot message, and then stays idle.
+* M33 initializes RT-Thread, starts M55, runs the IPC supervisor, and keeps the product MSH on UART5.
 * The template does not blink LEDs or start peripheral demos automatically.
 
 ## Notes
@@ -47,7 +48,8 @@ libs/TARGET_APP_KIT_PSE84_EVAL_EPC2/config/design.modus
 ```
 
 * After modification, save the configuration and regenerate the code.
-* To run the product M55 application, flash **FeatherTalk_M33** first. It initializes the board and starts the M55 core.
+* When updating both images, program **FeatherTalk_M55 first** and the signed **FeatherTalk_M33 last**. The final M33 reset initializes the board and starts M55.
+* Use `feather_status` and `feather_ping` on the M33 MSH to inspect or probe M55.
 
 ## Boot Sequence
 

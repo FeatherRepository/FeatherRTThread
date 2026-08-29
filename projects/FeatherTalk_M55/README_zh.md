@@ -5,7 +5,7 @@
 ## 简介
 
 本产品工程由 **Edgi_Talk_M55_LVGL** 派生，提供运行在 **RT-Thread 实时操作系统** 的 **M55 应用核** 上的初始 LVGL 应用。
-当前工程默认启动 **Virtual3D Animated Emoji** 示例，可用于验证 LCD 显示、触摸输入、LVGL 渲染流程以及 M55 侧图形加速相关配置；也可以切换到 LVGL 官方 Music、Benchmark、Stress 等示例，为后续 GUI 应用开发提供基础参考。
+当前工程默认启动 LVGL 官方 **Music Demo**，用于验证 LCD、触摸输入、LVGL 渲染流程及 M55 图形配置。产品工程已移除 SDK 示例中体积较大的 Virtual3D 模型和动画资源。
 
 ## LVGL 简介
 
@@ -56,19 +56,19 @@ LVGL 作为一个开源项目，采用 **MIT License** 开源协议，既适合�
 * 示例功能包括：
 
   * 初始化 **LVGL 9.2** 图形库、LCD 显示驱动和触摸输入驱动
-  * 默认启动 **Virtual3D Animated Emoji** 示例
-  * 支持切换 **lv_demo_music**、**lv_demo_benchmark**、**lv_demo_stress** 等 LVGL 示例
+  * 默认启动官方 **lv_demo_music** 界面
+  * 支持切换 **lv_demo_benchmark** 和 **lv_demo_stress**
+  * 通过 PSoC E84 IPC Pipe 自动响应 M33 的 HELLO 和心跳消息
   * 默认开启 M55 I-Cache/D-Cache，并使用 AXIDMAC 优化 RGB565 区域拷贝
 * 工程结构简洁，便于理解 **显示驱动接口** 和 **LVGL 移植流程**。
 
 ## 示例说明
 
-当前工程通过 `BSP_LVGL_DEMO_*` 配置项选择启动的 LVGL 示例，默认配置为 `BSP_LVGL_DEMO_VIRTUAL3D_EMOJI`。
+当前工程通过 `BSP_LVGL_DEMO_*` 配置项选择启动的 LVGL 示例，默认配置为 `BSP_LVGL_DEMO_MUSIC`。
 
 | 配置项 | 示例 | 说明 |
 | --- | --- | --- |
-| `BSP_LVGL_DEMO_VIRTUAL3D_EMOJI` | Virtual3D Animated Emoji | 当前默认示例。屏幕显示 3D Emoji 动画，支持触摸拖动交互，用于验证 Virtual3D、LVGL 显示刷新和触摸输入链路。该示例仅支持 LCD 旋转 0 度或 180 度。 |
-| `BSP_LVGL_DEMO_MUSIC` | LVGL Music Demo | LVGL 官方音乐界面示例，主要用于验证复杂控件、布局、样式和动画效果。 |
+| `BSP_LVGL_DEMO_MUSIC` | LVGL Music Demo | 默认官方界面，用于验证复杂控件、布局、样式和动画效果。 |
 | `BSP_LVGL_DEMO_BENCHMARK` | LVGL Benchmark Demo | LVGL 官方性能测试示例，可用于观察界面绘制性能、刷新帧率和综合评分。 |
 | `BSP_LVGL_DEMO_STRESS` | LVGL Stress Demo | LVGL 官方压力测试示例，会反复创建、刷新和销毁控件，用于验证渲染稳定性和内存使用情况。 |
 
@@ -87,21 +87,14 @@ LVGL 作为一个开源项目，采用 **MIT License** 开源协议，既适合�
 ### 运行效果
 
 * 烧录完成后，开发板上电即可运行示例工程。
-* 默认配置下，系统会自动启动 **Virtual3D Animated Emoji**，LCD 上显示 3D Emoji 动画，界面标题为 `Virtual3D Animated Emoji`，底部提示为 `Drag the 3D emoji`。
+* 默认配置下，LCD 会自动启动官方 **LVGL Music Demo**。
 * 串口会打印当前启动的示例和 LCD 旋转角度，例如：
 
 ```
-LVGL virtual3d_emoji demo start, lcd rotation=0
+LVGL music demo start, lcd rotation=0
 ```
 
-* 如需查看 Virtual3D 示例状态，可在 MSH 终端执行以下命令：
-
-```
-virtual3d_demo_stat
-virtual3d_render_stat
-```
-
-* 如果切换为 Music、Benchmark 或 Stress 示例，LCD 会显示对应的 LVGL 官方示例界面。
+* 在 M55 UART2 诊断终端执行 `feather_m55_status` 可查看 IPC 和 LVGL 就绪状态。
 
 ## 注意事项
 
@@ -115,7 +108,6 @@ libs/TARGET_APP_KIT_PSE84_EVAL_EPC2/config/design.modus
 ```
 
 * 修改完成后保存配置，并重新生成代码。
-* 当前默认示例 `BSP_LVGL_DEMO_VIRTUAL3D_EMOJI` 不支持 LCD 旋转 90 度或 270 度，请使用 0 度或 180 度；如果需要横屏旋转，请切换到其它 LVGL 示例。
 * 默认配置已开启 `BSP_LVGL_ENABLE_CPU_CACHE` 和 `BSP_LCD_USE_AXIDMAC_AREA_COPY`。如需修改缓存、Framebuffer 或 LCD 刷新方式，请同步检查显示缓冲区一致性。
 * 若显示屏幕无输出，请检查：
 
