@@ -1,0 +1,17 @@
+import rtconfig
+from building import *
+import os
+
+cwd  = GetCurrentDir()
+common_path = os.path.normpath(os.path.join(cwd, '..', '..', 'FeatherTalk_Common', 'include'))
+path = [cwd, common_path]
+src  = Glob('*.c')
+
+group = DefineGroup('Applications', src, depend = [''], CPPPATH = path)
+
+list = os.listdir(cwd)
+for item in list:
+    if os.path.isfile(os.path.join(cwd, item, 'SConscript')):
+        group = group + SConscript(os.path.join(item, 'SConscript'))
+
+Return('group')
