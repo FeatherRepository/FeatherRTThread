@@ -1,0 +1,14 @@
+import rtconfig
+from building import *
+import os
+
+cwd = GetCurrentDir()
+generated_path = os.path.join(cwd, 'assets', 'generated')
+src = Glob('*.c') + Glob(os.path.join('assets', 'generated', '*.c'))
+applications_path = os.path.normpath(os.path.join(cwd, '..'))
+
+group = DefineGroup('FeatherTalk UI', src,
+                    depend = ['FEATHERTALK_USING_UI_SHELL'],
+                    CPPPATH = [cwd, applications_path, generated_path])
+
+Return('group')

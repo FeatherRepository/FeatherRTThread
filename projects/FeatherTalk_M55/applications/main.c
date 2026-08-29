@@ -6,6 +6,9 @@
 #include "lv_demos.h"
 #include <feathertalk/version.h>
 #include "ipc/feathertalk_ipc.h"
+#ifdef FEATHERTALK_USING_UI_SHELL
+#include "ui/feathertalk_ui.h"
+#endif
 
 #if defined(BSP_LVGL_DEMO_VIRTUAL3D_EMOJI)
 #error "Virtual3D resources were removed from FeatherTalk_M55; select the Music, Benchmark, or Stress demo."
@@ -27,7 +30,9 @@
 #define BSP_LCD_ROTATION_DEGREES 0
 #endif
 
-#if defined(BSP_LVGL_DEMO_BENCHMARK)
+#if defined(FEATHERTALK_USING_UI_SHELL)
+#define BSP_LVGL_DEMO_NAME "feathertalk-shell"
+#elif defined(BSP_LVGL_DEMO_BENCHMARK)
 #define BSP_LVGL_DEMO_NAME "benchmark"
 #elif defined(BSP_LVGL_DEMO_STRESS)
 #define BSP_LVGL_DEMO_NAME "stress"
@@ -70,7 +75,9 @@ static void m55_lcd_backlight_enable(void)
 
 void lv_user_gui_init(void)
 {
-#if defined(BSP_LVGL_DEMO_BENCHMARK)
+#if defined(FEATHERTALK_USING_UI_SHELL)
+    (void)feathertalk_ui_init();
+#elif defined(BSP_LVGL_DEMO_BENCHMARK)
     lv_demo_benchmark();
 #elif defined(BSP_LVGL_DEMO_STRESS)
     lv_demo_stress();

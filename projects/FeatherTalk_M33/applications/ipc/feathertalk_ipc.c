@@ -1,6 +1,7 @@
 #include <rtdevice.h>
 #include <rtthread.h>
 #include <string.h>
+#include <time.h>
 
 #include <board.h>
 #include <drv_ipc.h>
@@ -23,6 +24,8 @@ static volatile rt_uint32_t g_peer_status = 0;
 static volatile rt_uint32_t g_tx_count = 0;
 static volatile rt_uint32_t g_rx_count = 0;
 static volatile rt_uint32_t g_error_count = 0;
+static rt_uint8_t g_quick_last_control = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
+static rt_uint8_t g_quick_last_result = FEATHERTALK_QUICK_RESULT_NONE;
 
 static rt_bool_t feathertalk_ipc_send(feathertalk_ipc_message_id_t message_id,
                                      rt_uint32_t sequence)
@@ -54,6 +57,72 @@ static rt_bool_t feathertalk_ipc_send(feathertalk_ipc_message_id_t message_id,
     return RT_TRUE;
 }
 
+static rt_bool_t feathertalk_ipc_send_system_status(rt_uint32_t sequence)
+{
+    edge_rc_frame_t frame;
+    feathertalk_ipc_system_status_t message;
+    time_t wall_clock = 0;
+
+    rt_memset(&frame, 0, sizeof(frame));
+    rt_memset(&message, 0, sizeof(message));
+    message.abi_version = FEATHERTALK_IPC_ABI_VERSION;
+    message.message_id = FEATHERTALK_IPC_MSG_SYSTEM_STATUS;
+    message.sequence = sequence;
+    message.battery_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
+    message.network_state = FEATHERTALK_NETWORK_UNAVAILABLE;
+    message.signal_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
+
+#ifdef BSP_USING_RTC
+    message.flags |= FEATHERTALK_SYSTEM_RTC_PRESENT;
+    wall_clock = time(RT_NULL);
+    if (wall_clock >= (time_t)1577836800)
+    {
+        message.unix_time = (uint32_t)wall_clock;
+        message.flags |= FEATHERTALK_SYSTEM_TIME_VALID;
+    }
+#endif
+
+    rt_memcpy(frame.channel, &message, sizeof(message));
+    frame.seq = sequence;
+    if (rt_device_write(g_ipc_tx, 0, &frame, 1) != 1)
+    {
+        g_error_count++;
+        return RT_FALSE;
+    }
+
+    g_tx_count++;
+    return RT_TRUE;
+}
+
+static rt_bool_t feathertalk_ipc_send_quick_status(rt_uint32_t sequence)
+{
+    edge_rc_frame_t frame;
+    feathertalk_ipc_quick_status_t message;
+
+    rt_memset(&frame, 0, sizeof(frame));
+    rt_memset(&message, 0, sizeof(message));
+    message.abi_version = FEATHERTALK_IPC_ABI_VERSION;
+    message.message_id = FEATHERTALK_IPC_MSG_QUICK_STATUS;
+    message.sequence = sequence;
+    /* Product drivers are not enabled yet. Capability bits deliberately stay
+       clear so the M55 UI exposes the controls as unavailable, never as fake
+       off states. */
+    message.wifi_signal_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
+    message.brightness_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
+    message.rotation = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
+    message.last_control = g_quick_last_control;
+    message.result = g_quick_last_result;
+    rt_memcpy(frame.channel, &message, sizeof(message));
+    frame.seq = sequence;
+    if (rt_device_write(g_ipc_tx, 0, &frame, 1) != 1)
+    {
+        g_error_count++;
+        return RT_FALSE;
+    }
+    g_tx_count++;
+    return RT_TRUE;
+}
+
 static void feathertalk_ipc_receive(void)
 {
     edge_rc_frame_t frame;
@@ -66,6 +135,19 @@ static void feathertalk_ipc_receive(void)
         if (message.abi_version != FEATHERTALK_IPC_ABI_VERSION)
         {
             g_error_count++;
+            continue;
+        }
+
+        if (message.message_id == FEATHERTALK_IPC_MSG_QUICK_COMMAND)
+        {
+            feathertalk_ipc_quick_command_t command;
+            rt_memcpy(&command, frame.channel, sizeof(command));
+            g_rx_count++;
+            g_quick_last_control = command.control;
+            g_quick_last_result = command.control < FEATHERTALK_QUICK_COUNT ?
+                                  FEATHERTALK_QUICK_RESULT_UNAVAILABLE :
+                                  FEATHERTALK_QUICK_RESULT_INVALID;
+            (void)feathertalk_ipc_send_quick_status(command.sequence);
             continue;
         }
 
@@ -119,6 +201,8 @@ static void feathertalk_ipc_thread_entry(void *parameter)
 
             g_force_hello = RT_FALSE;
             (void)feathertalk_ipc_send(id, sequence);
+            (void)feathertalk_ipc_send_system_status(sequence);
+            (void)feathertalk_ipc_send_quick_status(sequence);
             last_tx_ms = now;
         }
 

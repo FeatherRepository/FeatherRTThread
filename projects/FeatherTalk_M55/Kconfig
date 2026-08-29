@@ -32,3 +32,26 @@ source "$RTT_DIR/Kconfig"
 source "$PKGS_DIR/Kconfig"
 source "$RTT_DIR/../libraries/M55_Config/Kconfig"
 source "$RTT_DIR/../libraries/components/CherryUSB-1.6.0/Kconfig.rtt"
+
+menu "FeatherTalk Product"
+
+config FEATHERTALK_USING_UI_SHELL
+    bool "Enable FeatherTalk Windows Phone style UI shell"
+    depends on BSP_USING_LVGL
+    default y
+    help
+        Build the product-owned 480 x 800 shell, bounded page router, and
+        application registry instead of starting an upstream LVGL demo.
+
+config FEATHERTALK_UI_TEST_MODE
+    bool "Enable automatic FeatherTalk UI interaction test"
+    depends on FEATHERTALK_USING_UI_SHELL
+    default n
+    help
+        Start an LVGL-thread test sequencer after boot. It exercises Shell,
+        Alert, notifications, Search, every current interactive control,
+        Start/All Apps, preferences, business pages, route limits, and object
+        release diagnostics.
+        Keep this disabled in production firmware.
+
+endmenu

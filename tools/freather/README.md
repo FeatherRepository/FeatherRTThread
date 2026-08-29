@@ -104,6 +104,24 @@ Build and program both FeatherTalk product cores:
 .\tools\freather\flash-feathertalk.cmd
 ```
 
+## UI icon generation
+
+- Editable source: `projects/FeatherTalk_M55/applications/ui/assets-src/`
+- Converter: `ui-svg-icon-convert.py` (Python standard library only)
+- Launcher: `build-ui-icons.cmd`
+- Output: LVGL 9.2 A8 descriptors in `applications/ui/assets/generated/`
+
+Regenerate all neutral product icons at 24, 32, and 48 pixels:
+
+```powershell
+.\tools\freather\build-ui-icons.cmd
+```
+
+The converter intentionally supports only the repository's constrained SVG
+geometry. Unsupported SVG features fail the build instead of being silently
+discarded. Generated files are compiled into the M55 project by the product
+UI `SConscript`; the SDK-native tool directories remain untouched.
+
 ## Serial monitor
 
 - Runtime: bundled CPython 3.14.7

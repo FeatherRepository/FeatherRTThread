@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "sourceFormat": "constrained-svg-currentColor",
+  "generatedFormat": "LVGL-9.2-A8",
+  "sizes": [24, 32, 48],
+  "reference": {
+    "repository": "https://github.com/fbiego/windows-10-mobile-lvgl",
+    "localPath": "../../../../../../windows-10-mobile-lvgl",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2024 Felix Biego",
+    "policy": "Functional semantics and layout role were referenced. FeatherTalk icons were redrawn as neutral product artwork; third-party brand marks are not copied."
+  },
+  "icons": [
+    {"id": "back", "group": "navigation", "reference": "squareline/assets/wp_back.png"},
+    {"id": "home", "group": "navigation", "reference": "squareline/assets/windows_logo.png", "redesign": "neutral home outline"},
+    {"id": "search", "group": "navigation", "reference": "squareline/assets/wp_search.png"},
+    {"id": "wifi", "group": "status", "reference": "squareline/assets/wifi_ic.png"},
+    {"id": "wifi_off", "group": "status", "reference": "functional disconnected state", "redesign": "neutral slashed Wi-Fi outline"},
+    {"id": "wifi_weak", "group": "status", "reference": "functional signal strength", "redesign": "one-level Wi-Fi outline"},
+    {"id": "wifi_medium", "group": "status", "reference": "functional signal strength", "redesign": "two-level Wi-Fi outline"},
+    {"id": "battery", "group": "status", "reference": "squareline/assets/battery_ic.png"},
+    {"id": "cellular", "group": "status", "reference": "squareline/assets/cellular_ic.png"},
+    {"id": "bluetooth", "group": "status", "reference": "squareline/assets/bluetooth_ic.png"},
+    {"id": "system", "group": "apps", "reference": "squareline/assets/wp_system.png", "redesign": "dual-core chip"},
+    {"id": "settings", "group": "apps", "reference": "squareline/assets/wp_settings.png", "redesign": "personalization sliders"},
+    {"id": "media", "group": "apps", "reference": "squareline/assets/groove_ic.png", "redesign": "neutral media player"},
+    {"id": "messages", "group": "apps", "reference": "squareline/assets/message_ic.png"},
+    {"id": "files", "group": "apps", "reference": "squareline/assets/file_ic.png"},
+    {"id": "about", "group": "apps", "reference": "functional information control", "redesign": "neutral information outline"},
+    {"id": "play", "group": "controls", "reference": "functional control"},
+    {"id": "pause", "group": "controls", "reference": "functional control"},
+    {"id": "previous", "group": "controls", "reference": "functional control"},
+    {"id": "next", "group": "controls", "reference": "squareline/assets/wp_next.png"},
+    {"id": "refresh", "group": "controls", "reference": "functional control"},
+    {"id": "airplane", "group": "controls", "reference": "squareline/assets/airplane_ic.png"},
+    {"id": "location", "group": "controls", "reference": "squareline/assets/location_ic.png"},
+    {"id": "brightness", "group": "controls", "reference": "functional system control", "redesign": "neutral sun outline"},
+    {"id": "rotation", "group": "controls", "reference": "functional system control", "redesign": "neutral device rotation outline"}
+  ]
+}

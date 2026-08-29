@@ -365,6 +365,8 @@
 #define LVGL_USING_DEMOS
 #define BSP_LVGL_ENABLE_CPU_CACHE
 #define BSP_LVGL_DEMO_MUSIC
+#define FEATHERTALK_USING_UI_SHELL
+#define FEATHERTALK_UI_TEST_MODE
 #define BSP_LVGL_DRAW_BUF_LINES 800
 /* end of Onboard Peripheral Drivers */
 
