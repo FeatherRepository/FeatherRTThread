@@ -97,3 +97,46 @@ the board/demo documentation.
 On the hardware used to validate this workflow, `COM17` (`VID:PID 04B4:F155`)
 worked directly: `help` listed the shell commands, `version` reported
 RT-Thread 5.0.2, and `ps` listed the live `tshell` and application threads.
+
+## 5. PyOCD programming route (supplementary, development use)
+
+The PyOCD route supplements OpenOCD for development automation. It required a
+set of board-specific workarounds that now live in this directory:
+
+- `cmsis-packs/Infineon.PSE8xxx_DFP.1.1.0-smif-default.pack`: the official DFP
+  with the SMIF/SMIF_S flash algorithms flipped to `default="1"`, so pyOCD
+  builds the external flash regions (the stock DFP marks them non-default).
+- `pyocd_pse84_patch.py`: runtime patches loaded by the flash driver:
+  - DP BASEPTR0 address fix and APACC page enumeration for the PSE84 DPv3
+    (generic pyOCD discovery misses the core APs),
+  - FLM sector-range intersection guard,
+  - address-adaptive AHB5-AP HNONSEC switching (secure SRAM vs NS SRAM),
+  - flash region sector-size repair for the SMIF_S/RRAM_S regions.
+- `pyocd_flash_pse84.py`: argparse driver (connect, program, verify, reset).
+- `flash-demo-pyocd.ps1` / `.cmd`: full wrapper. It FIRST runs a short OpenOCD
+  pre-warm (`init; reset halt; resume`) and kills it without `shutdown`; the
+  KitProg3 firmware brings SWD up with its custom acquire sequence, which
+  pyOCD cannot trigger on a freshly powered board (No ACK). Then pyOCD takes
+  over the probe.
+
+```powershell
+.\tools\freather\flash-demo-pyocd.cmd Edgi_Talk_M33_Template
+```
+
+Requirements and known limits:
+
+- pyOCD 0.45.1 lives in `tools\freather\pyocd-lib` (pip-installable
+  alternative to the LFS-stored `pyocd\` copy); the bundled CPython in
+  `serial-monitor\python` runs it.
+- Large DAP block transfers (`DAP_TransferBlock`) wedge the KitProg3
+  firmware; the driver enables `cmsis_dap.limit_packets` and disables
+  deferred transfers to stay on the safe path. Expect a slower flash
+  (minutes, not seconds).
+- If a flash session dies abnormally the KitProg3 DAP can hang; recovery is
+  a USB cable replug (a libusb device reset does not revive the firmware).
+- After programming, the target may already be in RT-Thread deep sleep, so
+  the in-pyOCD reset can fail with No ACK. Reset via OpenOCD
+  (`init; reset run; shutdown`) or the board reset button instead; the new
+  firmware boots normally.
+- Production flashing should still use `flash-demo.cmd` (OpenOCD): it is
+  faster and does not depend on the patches above.

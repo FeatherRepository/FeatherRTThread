@@ -1,3 +1,6 @@
 # Runtime output from the serial monitor is local-only.
 serial-monitor/logs/
 serial-monitor/__pycache__/
+
+# PyOCD route: pip-installed dependencies stay local (recreated via uv/pip).
+pyocd-lib/
