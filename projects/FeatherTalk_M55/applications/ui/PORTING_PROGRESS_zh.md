@@ -1,6 +1,6 @@
 # FeatherTalk Windows Phone UI 移植进度
 
-更新时间：2026-08-29
+更新时间：2026-08-30
 
 本文档以“代码完成、自动测试覆盖、真实双核板验证”作为完成标准。没有硬件数据源的功能必须显示为不可用，不允许用虚构数据代替。
 
@@ -8,7 +8,7 @@
 |---|---|---|
 | Shell 骨架 | 已完成、已板测 | Home、状态栏、导航栏、Alert 和通知快捷面板均可交互 |
 | 系统通知与快捷面板（P0） | 已完成、已板测 | 跟手/距离速度吸附、真实快捷状态、通知队列、完整关闭路径和全量自动测试 |
-| 桌面数据模型 | 已完成、已板测 | App 注册表、Start、All Apps、Home/Back/Search 均有自动测试 |
+| 桌面数据模型 | 已完成、已板测 | App 注册表、公共/私有 Tile 属性、动态内容策略、Start 编辑、All Apps、Home/Back/Search 均有自动测试 |
 | 路由与生命周期 | 已完成、已板测 | push/pop/home、深度 8、溢出拒绝、资源释放和对象泄漏检查 |
 | 主题与偏好 | 已完成、已板测 | 强调色、Tile 透明度、背景选择及内存偏好后端 |
 | 资源策略 | 已完成、已板测 | SVG 源、A8 三档生成、统一图标 API、RGB565/ARGB8888 规则和许可证清单 |
@@ -154,6 +154,145 @@
 - 使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 烧录并校验 clean 产物：M55 写入 864,256 字节、校验 862,560 字节；M33 写入 167,936 字节、校验 160,536 字节。
 - 自动测试新增状态栏双无线对象、四档 Wi-Fi 图标映射和不可伪造连接/信号三项断言。最终结果为 `198 PASS / 0 FAIL / 103 actions`，耗时 50,229 ms；最终采样为 50 FPS、路由对象增量 0、IPC err=0。
 - 板端回归日志：`tools/freather/serial-monitor/logs/radio-status-clean-board.log`；最终状态：`tools/freather/serial-monitor/logs/radio-status-clean-status.log`。
+
+## 2026-08-29 UI 背光硬件闭环
+
+- 通知快捷面板的亮度滑块保持 `0..100%` 用户范围，但线性映射到 M55 `pwm18` 通道 0 的 `50..100%` 物理占空比；周期保持 200,000 ns（5 kHz）。因此 UI 最低亮度仍有物理 50% 亮度，不再允许日常操作把屏幕直接调黑。
+- 修复了 LCD 驱动启动时实际设置 80%，而 UI 缓存初值为 100% 的状态不一致。产品 UI 不再只相信缓存：读取和设置后均通过 `PWM_CMD_GET` 读取实际 period/pulse 并换算百分比；读回失败时才使用最近缓存值。该实现仅位于 FeatherTalk 产品层，没有改动 SDK 原生 PWM/LCD 驱动。
+- 首轮现场验证暴露出寄存器读回的盲区：`board.c` 为上电时序把 P20_6 临时设为 GPIO，`applications/main.c` 又在第一帧后把它固定为 GPIO 高电平，因此 TCPWM 占空比虽在变化却无法到达面板。现保留 P15_7 背光电源的延时开启，并在第一帧后用 BSP 生成配置把 P20_6 恢复到 `TCPWM0 line 265`；UI 可用性还会核对真实 HSIOM，状态命令报告 `pwm-routed=1`，以后该故障会直接使自动测试失败。
+- 自动测试完整覆盖物理启动 80%（映射为 UI 60%）、快捷按钮 UI 30%、滑块 UI 65%、UI 最低 0%（物理 50%）、恢复 65%，并在测试结束恢复 UI/物理 100%。最终结果为 `203 PASS / 0 FAIL / 105 actions`，耗时 51,101 ms。
+- M55 `-Clean` 构建通过：text=862,008、data=3,768、bss=4,305,628 字节；HEX 2,435,306 字节，SHA-256 `63B5DE5A54537CD2FD35292400847079A46E7558136AF652CC7D86034875FF93`。
+- 使用 Infineon Customized OpenOCD 5.19.0.4782 和 KitProg3 `0D141868022E2400` 完成双核写入与校验：M55 写入 868,352 字节、校验 865,776 字节；M33 写入 167,936 字节、校验 160,536 字节。
+- 测试结束后又用 MSH 直接确认新的安全下限：period=200,000、pulse=100,000、Duty=50%，随后恢复 pulse=200,000；UI 路由状态保持 `pwm-routed=1`、IPC err=0。
+- 安全范围完整回归日志：`tools/freather/serial-monitor/logs/brightness-safe-range-board.log`；50% 物理下限读回：`brightness-safe-min-pwm.log`；最终恢复记录：`brightness-safe-restore.log`。
+
+## 2026-08-29 Start Tile 应用模型与桌面编辑
+
+- `ft_app_descriptor_t` 不再只包含应用名、图标和 `wide_tile`。现在明确拆分 `ft_tile_common_properties_t` 与 `ft_tile_private_properties_t`：公共层包含名称、列/行跨度、单 Tile 透明度和背景图案；私有层由应用提供图标、是否循环、周期、动态内容回调及上下文。
+- Start 桌面为每个描述符创建独立运行时模型。公共属性可以在不修改应用页面的情况下改变；最终透明度为单 Tile 透明度与全局主题透明度的乘积。动态内容回调现在接收一个透明 LVGL 内容宿主，应用可自行创建和更新宿主内的任意控件；Media 和 Messages 已作为动态文字示例，System 保持 M33 外部状态驱动，后续 Gallery 可直接在同一接口中创建 `lv_image` 并切换图片帧。
+- 普通短按使用 LVGL `LV_EVENT_SHORT_CLICKED` 打开应用；只有 `LV_EVENT_LONG_PRESSED` 才进入编辑态并显示轻微呼吸缩放动画。不能使用 `CLICKED` 代替短按，因为 LVGL 在长按松手后同样可能发送 `CLICKED`。四个手柄圆心精确落在 Tile 外轮廓四角；左上角使用 LVGL 线段直接绘制单一、居中的四向移动符号，右上、左下、右下是居中的斜向双向缩放符号，不依赖字体字形或新的位图资源。
+- 移动开始时，选中 Tile 使用 `LV_OBJ_FLAG_FLOATING` 脱离 Flex 布局并跟随触点，同时原位置放入等尺寸占位符。占位符随触点越过其他 Tile 中心而实时重排，因此所有兄弟 Tile 会立即让位；松手后浮动对象替换占位符并吸附到合法顺序。
+- 缩放拖动期间使用连续像素尺寸并触发 Flex 实时重排；松手时按当前响应式布局的列宽、基础行高和间距取整。列跨度限制为当前设备的 `tile_columns`，行跨度限制为 1..3，因此布局不会保存与 480×800 绑定的绝对尺寸。
+- 点选中 Tile、点桌面空白、切换 All Apps 或执行 Home/Back 会退出编辑并恢复滚动。自动测试新增公共/私有描述符、长按编辑、四手柄、占位符排序、2×2 缩放、兄弟重排、名称/透明度/图案修改、应用动态帧和默认布局恢复检查。
+- UI 事件层修复了两处问题：应用跳转曾监听长按后也会产生的 `CLICKED`；手柄曾监听 `LV_EVENT_ALL` 并在判断事件类型前无条件选中 Tile。现在应用只响应 `SHORT_CLICKED`，Tile 只响应 `LONG_PRESSED`，手柄只注册 `PRESSED/PRESSING/RELEASED/PRESS_LOST` 且仅在 `PRESSED` 中选中。
+- 第二次板上排查确认仅修 UI 事件仍不够。ST7123/ST7102 在 `0x0010` bit 3 给出新坐标帧，读完坐标表后会清除 INT；原 BSP 却在读完后用已经清除的 INT 判断是否抬手，因此静止手指会立即形成伪释放，LVGL 永远累积不到长按时间。驱动现按每槽 Valid 位与非零 Touch Intensity 双条件确认触点；没有新帧时保持上次状态，释放需连续 3 个坐标帧确认，并过滤 3 px 内的静止抖动。LVGL 长按阈值明确设为 500 ms，滚动阈值由 10 px 提升至 18 px。
+- `feather_ui_status` 新增 Tile 编辑态、选中序号以及触摸 `frames/held/press/release` 计数。修复后的无人触摸基线为 `frames=0 held=0 press=0 release=0`，没有幽灵触摸；页面 Home、路由深度 1、`editing=0 selected=-1`。
+- M55 最终 `-Clean` 构建通过：text=876,784、data=3,768、bss=4,307,548 字节；HEX 2,476,857 字节，SHA-256 `E8AE2A5CE19420B4C4BD3812F73E522BF5F90E85027128611637ADA4B9C86597`。
+- 使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 烧录并校验该 clean M55 产物：写入 884,736 字节、校验 880,552 字节。M33 代码未变化，板上继续运行已签名并验证的 ABI 4 镜像。
+- 最终全量自动测试为 `221 PASS / 0 FAIL / 114 actions`，耗时 51,510 ms；Tile 专项检查单独 `PRESSED` 不编辑也不跳转，`LONG_PRESSED` 才选中，随后 `PRESS_LOST + CLICKED` 仍保持编辑且路由深度为 1。其余移动、重排、缩放、吸附、属性、动态帧和默认恢复测试全部通过；最终路由对象增量为 0。
+- 最终状态为 55 FPS、刷新 2,813 次、当前堆 133,528 / 1,441,752 字节、峰值 459,784 字节、对象峰值 172、IPC err=0；页面为 Home、路由深度 1、亮度 100%、`pwm-routed=1`。
+- 完整 clean 板端日志：`tools/freather/serial-monitor/logs/touch-long-press-driver-clean-board.log`；最终状态：`tools/freather/serial-monitor/logs/touch-long-press-driver-clean-status.log`。
+
+## 2026-08-29 Start Tile 边界与手柄视觉修复
+
+- 缩放上限不再只使用屏幕总列数。每次按下缩放手柄都会读取当前 Tile 与桌面可见内容区的绝对坐标，计算从当前位置到右、下边界仍可容纳的完整列/行跨度；连续像素缩放和松手后的网格吸附都受同一上限约束。达到边界后停止增长，不再为了满足拖动距离把选中 Tile 强制换到下一行或下一列。
+- 四个可见手柄由 36 px 缩小为当前 480×800 配置下的 29 px 奇数直径，圆心因此可精确对齐 Tile 角点；额外 8 px 的不可见点击扩展保留约 45 px 的触摸命中范围。Tile 和桌面容器允许手柄越界绘制，圆圈不会再被压进矩形内部。
+- 移动图标不再叠加两组字体 `↔`。现在由 LVGL `lv_draw_line()` 绘制一组共享中心的水平/垂直轴和四个外向箭头；三个缩放图标也使用同一绘制路径生成斜向双箭头，图形中心直接取圆形手柄的几何中心，不再受字体旋转基点影响。
+- 自动测试新增 `tile.handles.geometry`，逐一检查手柄为 25..35 px 的等宽奇数圆、没有残留字体子对象，且圆心与对应 Tile 角点误差不超过 1 px；新增 `tile.resize.boundary`，对当前最右 Tile 施加超大拖动并确认 X/Y 起点不变、右边缘不越界、列跨度不超过本次手势上限。
+- 最终 M55 `-Clean` 构建通过：text=879,352、data=3,768、bss=4,307,564 字节；HEX 2,484,086 字节，SHA-256 `AF4AF1D354A67B8BC533CEC82FA3ADE3829B0E4AEC3AB0273057ABE9BBA14E2A`。
+- 使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 烧录并校验 clean M55：写入 884,736 字节、校验 883,120 字节。M33 未改动，继续使用板上已验证的 ABI 4 镜像。
+- clean 板端全量测试为 `223 PASS / 0 FAIL / 114 actions`，耗时 54,878 ms；新增两项断言与原有长按、移动、重排、缩放、全部页面和资源释放检查均通过。最终状态为 52 FPS、刷新 3,219 次、堆 122,504 / 1,441,752 字节、峰值 368,120 字节、对象峰值 142、路由对象增量 0、IPC err=0。
+- 完整日志：`tools/freather/serial-monitor/logs/tile-boundary-handle-clean-board.log`；最终状态：`tools/freather/serial-monitor/logs/tile-boundary-handle-clean-status.log`。
+
+## 2026-08-29 Start Tile 扩展绘制与显存验证
+
+- 显示链路已按实际实现核对：LVGL 使用两个 160 行局部绘制缓冲区和 `LV_DISPLAY_RENDER_MODE_PARTIAL`，脏区最终合入 LCD 驱动的常驻 RGB565 `graphics_storage`。该显存位于运行时地址 `0x263A5000`，可见区域 480×800、物理 stride 512 像素，总长度 819,200 字节，再由 GFXSS/MIPI 扫描到面板。
+- 使用 OpenOCD 直接读取上述常驻显存。修复前稳定抓帧 `tools/freather/serial-monitor/logs/tile-render-stable-before-fix.png` 已在送屏前出现四角圆圈仅剩局部圆弧，证明截断不是 LCD 或 MIPI 传输造成。根因是仅设置 `LV_OBJ_FLAG_OVERFLOW_VISIBLE`，但 Tile/父容器扩展绘制尺寸仍为 0；LVGL 的父级裁剪与脏区失效都不会覆盖圆圈伸出对象边界的区域。
+- Tile 和桌面容器现响应 `LV_EVENT_REFR_EXT_DRAW_SIZE`，按响应式比例报告 32 px 扩展绘制区，并在创建后刷新扩展尺寸。手柄显示/隐藏前后均使整个 Tile 失效；退出编辑时先隐藏手柄再移除边框，避免角点基准先内缩而遗留旧像素。自动测试的 `tile.handles.geometry` 同时断言 Tile 与容器实际扩展绘制尺寸达到要求。
+- 同一常驻显存的修复后稳定抓帧 `tools/freather/serial-monitor/logs/tile-render-stable-after-fix.png` 显示四个完整圆圈和居中的箭头；手柄隐藏后的 `tools/freather/serial-monitor/logs/tile-render-hidden-after-fix.png` 中原四角区域已恢复桌面背景，没有绘制残留。
+- 撤掉临时抓帧等待逻辑后，正式 M55 `-Clean` 构建通过：text=879,592、data=3,768、bss=4,307,564 字节；HEX 2,484,761 字节，SHA-256 `6504741BE483A3D6267B5A2534B44E6831B293B4CFD57F9FDC6B9EFD7674A53D`。
+- 使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 烧录并校验正式 M55 镜像：写入 884,736 字节、校验 883,360 字节。板端全量自动测试为 `223 PASS / 0 FAIL / 114 actions`，耗时 54,681 ms；最终为 51 FPS、刷新 1,853 次、当前堆 122,744 / 1,441,752 字节、峰值 492,312 字节、对象峰值 142、路由对象增量 0、IPC err=0。
+- 正式回归日志：`tools/freather/serial-monitor/logs/tile-ext-draw-clean-board.log`；最终状态：`tools/freather/serial-monitor/logs/tile-ext-draw-clean-status.log`。
+
+## 2026-08-29 Start Tile 前景层级与双轴锚定缩放
+
+- 先前只把四个手柄移动到 Tile 自己的子对象末尾；同一桌面容器中创建时间更晚的兄弟 Tile 仍在选中 Tile 之后绘制，因此越过边界的圆圈可能被相邻 Tile 覆盖。现在长按进入编辑态时立即创建等尺寸 Flex 占位符，把选中 Tile 设为 `LV_OBJ_FLAG_FLOATING` 并移动到容器最后一个子对象。选中 Tile、边框和四个手柄在整个编辑期间始终最后绘制，移动或缩放结束也继续保持前景，只有退出编辑时才以占位符的逻辑序号重新并回布局。
+- 占位符不只服务移动。缩放过程中它同步接收选中 Tile 的连续像素尺寸并驱动所有兄弟 Tile 实时回流，而前景 Tile 保持独立坐标，因此层级提升不会破坏原有“其他标签跟随让位”的行为。
+- 三个缩放角改为标准对角锚定：右上角只移动右边和上边，固定左边与下边；左下角只移动左边和下边，固定右边与上边；右下角只移动右边和下边，固定左边与上边。每次手势分别按其固定对边计算到桌面四周的可用宽高，达到边界后仅停止对应轴增长，不改变另外两条边，也不强制换行扩展。
+- `tile.handles.geometry` 现在同时断言选中 Tile 具有 `FLOATING` 标志、占位符有效且选中 Tile 是容器最后绘制的子对象。新增 `tile.resize.anchors` 使用真实 2×2 Tile 分别拖动 TR/BL/BR 三个角，逐像素检查宽高变化以及两条对边坐标完全不变。
+- 正式 M55 `-Clean` 构建通过：text=881,192、data=3,768、bss=4,307,564 字节；HEX 2,489,261 字节，SHA-256 `111FEBFD53A22C5D34D2E0D0D0ACA21939D33BC83258B82D8900DFE68A47D426`。
+- 使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 烧录并校验：写入 888,832 字节、校验 884,960 字节。clean 板端全量测试为 `224 PASS / 0 FAIL / 114 actions`，耗时 55,032 ms；最终为 51 FPS、刷新 1,881 次、当前堆 122,776 / 1,441,752 字节、峰值 591,472 字节、对象峰值 142、路由对象增量 0、IPC err=0。
+- 正式回归日志：`tools/freather/serial-monitor/logs/tile-foreground-anchor-clean-board.log`；最终状态：`tools/freather/serial-monitor/logs/tile-foreground-anchor-clean-status.log`。
+
+## 2026-08-29 Start Tile 二维就近吸附
+
+- 原移动逻辑只寻找距离指针最近的兄弟 Tile，再用指针位于该兄弟前半或后半来推断逻辑序号。Flex 自动换行后，逻辑序号和屏幕二维距离并不等价，因此把小 Tile 拖到桌面底部时，可能被上方较早出现的空位吸走。
+- 新的吸附解析器枚举全部合法插入序号，每次让现有占位符经过真实 Flex 布局后读取其屏幕中心，并选择与被拖动 Tile 中心欧氏距离平方最小的候选。等距离时优先选择相对原序号移动较少的候选，避免边界位置无意义抖动。这样只有上方空位在几何上确实更近时才会吸附到上方；靠近底部释放会保留在最近的下方合法落点。
+- 候选枚举全部发生在同一个 LVGL 输入事件内，显示刷新只会看到最终选中的占位符位置；兄弟 Tile 仍由占位符驱动实时回流。该方案选择的是当前 Flex 桌面能够形成的最近合法落点，不引入脱离布局的永久自由坐标。
+- 新增 `tile.move.nearest` 板端测试：从真实 Flex 候选中取得最下方落点的实际屏幕中心作为释放目标，验证二维解析器选择该下方落点而不是上方空位，并在测试结束后恢复原序号。
+- 正式 M55 `-Clean` 构建通过：text=881,440、data=3,768、bss=4,307,564 字节；HEX 2,489,952 字节，SHA-256 `786761224FE90EA8A04E677612B9F9E2D5A7711A5DA6D7884F1ADE8CADC4E3B2`。
+- 使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 烧录并校验：写入 888,832 字节、校验 885,208 字节。clean 板端全量测试为 `225 PASS / 0 FAIL / 114 actions`，耗时 54,940 ms；最终为 50 FPS、刷新 1,965 次、当前堆 122,776 / 1,441,752 字节、峰值 591,472 字节、对象峰值 142、路由对象增量 0、IPC err=0。
+- 正式回归日志：`tools/freather/serial-monitor/logs/tile-nearest-slot-clean-board.log`；最终状态：`tools/freather/serial-monitor/logs/tile-nearest-slot-clean-status.log`。
+
+## 2026-08-29 Start Tile 交互结束整体收敛
+
+- 此前移动结束只把前景 Tile 放到占位符坐标；缩放结束则只固定选中 Tile 和占位符的最终尺寸，没有强制执行最终 Flex 布局，也没有把前景 Tile 对齐到换行后的占位符。缩放触发换行时，选中 Tile 可能仍停在手势锚点，而其他 Tile 已按占位符排列，导致整个桌面没有形成一致的最终状态。
+- 移动和缩放现在共用 `tile_settle_layout_for_edit()`：释放后先删除临时占位符、移除选中 Tile 的 `FLOATING` 标志，把真实 Tile 插入占位符的最终逻辑序号，并强制完成一次 Flex 布局。这一步让全部真实 Tile 同时落到最终位置。
+- 整体布局收敛后，再以选中 Tile 的最终尺寸和序号重建占位符，把同一个 Tile 提升为容器最后绘制的前景对象并精确对齐占位符，然后恢复呼吸动画。选中边框和四角手柄继续保留，用户不需要重新长按；再次强制布局时全部 Tile 坐标保持不变。
+- 新增 `tile.move.settled` 与 `tile.resize.settled` 板端断言，同时检查：交互状态已经结束、选中 Tile 与占位符的位置和尺寸一致、选中 Tile 仍为最后绘制的 `FLOATING` 对象、呼吸动画仍注册，以及全部真实 Tile 在再次强制 Flex 布局后坐标不发生变化。
+- 正式 M55 `-Clean` 构建通过：text=882,592、data=3,768、bss=4,307,564 字节；HEX 2,493,192 字节，SHA-256 `EE3AA8400D7001201FFDEECB51886B7DF45DC3D4E3FE625548918B750763B389`。
+- 使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 烧录并校验：M55 写入 888,832 字节、校验 886,360 字节。clean 板端全量测试为 `227 PASS / 0 FAIL / 114 actions`，耗时 55,139 ms；最终为 50 FPS、刷新 2,332 次、当前堆 122,776 / 1,441,752 字节、峰值 591,472 字节、对象峰值 142、路由对象增量 0、IPC err=0。
+- 正式回归日志：`tools/freather/serial-monitor/logs/tile-settle-clean-board.log`；最终状态：`tools/freather/serial-monitor/logs/tile-settle-clean-status.log`。
+
+## 2026-08-29 Start Tile 行列坑位吸附
+
+- 上一版虽然比较了占位符的真实二维坐标，但候选仍然只是“把占位符插入哪个逻辑序号”。例如三列桌面第二行第三列明明有对齐空位，序列中紧随其后的两列宽 Tile 却会提前换行；单独改变占位符序号无法让后面的窄 Tile 局部补位，因此中间坑位不会成为候选，实际体验仍可能退化成只在上/下或左/右极端之间跳转。
+- 新解析器直接枚举桌面的行列对齐坑位。每个候选先在栈上建立占用图，保留目标坑位，再按照当前稳定顺序安置其他 Tile；后面的窄 Tile 可以填补宽 Tile 前面的局部空位。随后按行列顺序模拟 LVGL Flex 的换行、行高、间距和滚动偏移，得到占位符真正会出现的屏幕中心，全程不修改 LVGL 对象。
+- 选择规则首先最小化“拖动 Tile 中心到候选实际中心”的二维距离；距离相同时再最小化所有兄弟 Tile 的总位移平方，避免为了等价坑位制造大范围重排。选出唯一方案后才更新一次子对象顺序并执行一次真实布局，因此中间行、中间列与四周坑位地位相同，同时不会把候选试算过程推送到屏幕。
+- `tile.move.nearest` 已改为专门覆盖该缺陷：在包含两列宽 Tile 的真实桌面顺序中，把 1×1 Tile 的目标中心放到第二行第三列，断言占位符 X/Y 都精确对齐该中间坑位，并且其 Y 严格位于顶部和底部 Tile 之间。该测试在旧的仅插入序号算法下无法成立。
+- 正式 M55 `-Clean` 构建通过：text=885,992、data=3,768、bss=4,307,564 字节；HEX 2,502,761 字节，SHA-256 `0EF67C4A1D808B1590D1325B3358B3017819DCB38CAEDB6C902EB7B250BC07DB`。
+- 使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 烧录并校验：M55 写入 892,928 字节、校验 889,760 字节。clean 板端全量测试为 `227 PASS / 0 FAIL / 114 actions`，耗时 55,246 ms；最终为 51 FPS、刷新 1,930 次、当前堆 122,776 / 1,441,752 字节、峰值 591,120 字节、对象峰值 142、路由对象增量 0、IPC err=0。
+- 正式回归日志：`tools/freather/serial-monitor/logs/tile-pit-snap-clean-board.log`；最终状态：`tools/freather/serial-monitor/logs/tile-pit-snap-clean-status.log`。
+
+## 2026-08-30 Start Tile 显式网格、确认式移动与碰撞让位
+
+- Start 桌面已从 LVGL Flex 自动紧凑布局切换为响应式显式网格。每个 Tile 持有独立的 `grid_column/grid_row` 与列、行跨度；候选位置覆盖桌面全部合法行列坑位，不再由子对象序号、上/下极端或预先算好的单一路径决定。中间、边缘、空坑和已占用坑位都可以成为移动目标。
+- 移动采用两阶段确认状态机。自由拖动且中心尚未进入坑位确认半径时，占位吸附框隐藏，全部兄弟 Tile 保持手势开始时的位置；进入最近坑位的确认半径后吸附框才出现，松手则强制确认离手指最近的坑位。已占用坑位同样允许确认；只有确认发生后，与目标矩形冲突的 Tile 才寻找最近空坑并执行 180 ms ease-out 吸附动画，未冲突 Tile 不动。候选坐标判定前会强制刷新本帧 LVGL 布局，避免读取上一帧坐标而提前让位。
+- 缩放继续保持连续跟手，但把“当前像素覆盖跨度”和“松手后的取整跨度”分开计算。拉伸边缘真正进入相邻网格单元时才建立占用，只有被覆盖的 Tile 立即让位；没有冲突的 Tile 始终保持基线坑位，缩回使冲突消失时原 Tile 可动画返回。TR/BL/BR 三个手柄各自固定两条对边，列/行跨度仍受当前桌面可见边界约束，不会强制换行或换列扩大。
+- 让位解析器先把未冲突 Tile 作为不可移动障碍，再只为冲突集合按二维距离寻找最近完整空矩形；最终模型增加成对重叠检查。吸附动画修复了 LVGL 对象坐标已经包含 `translate` 时又重复相加的问题，连续重定向不会产生双倍位移、跳跃或残影。
+- 自动测试新增并强化 `tile.move`、`tile.move.nearest`、`tile.resize.collision`、`tile.resize.reflow` 与专用默认网格恢复：覆盖未确认阶段不重排、吸附框确认后覆盖已占用坑位并让位、任意中间/边缘/占用坑位、仅碰撞 Tile 带动画迁移、非碰撞 Tile 原位、最终无重叠以及选中 Tile 保持前景和呼吸动画。
+- M55 干净构建通过：text=889,800、data=3,768、bss=4,307,644 字节；HEX 2,513,471 字节，SHA-256 `D36D1C31C84A7DADAC5D608CFAFC9CA9F53CFB4706C3383CB011F3DA9FC5BE0B`。
+- 使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 完成双核烧录及校验：M55 写入 897,024 字节、校验 893,568 字节；M33 写入 167,936 字节、校验 160,536 字节。最终板端全量测试为 `228 PASS / 0 FAIL / 114 actions`，耗时 54,777 ms；最终为 50 FPS、刷新 2,664 次、当前堆 122,936 / 1,441,752 字节、峰值 590,232 字节、对象峰值 142、路由对象增量 0 / 2,336 字节、IPC err=0。
+- 最终回归日志：`tools/freather/serial-monitor/logs/tile-explicit-grid-confirmed-snap-final-board.log`；最终状态：`tools/freather/serial-monitor/logs/tile-explicit-grid-confirmed-snap-final-status.log`。
+
+## 2026-08-30 Start Tile 热路径与导航栏交界修复
+
+- 交互卡顿来自同一个 `PRESSING` 热路径内的重复事务：指针仍在同一确认坑位时会再次运行占用求解、删除并重启动画、强制刷新布局；缩放即使像素尺寸和覆盖网格没有变化，也会再次执行碰撞解析。现在移动仅在确认坑位变化时提交网格事务，缩放仅在尺寸变化时更新几何、在覆盖单元集合变化时解析让位；已经朝同一目标运行的吸附动画不会重启。指针位置直接按手势起点计算，不再逐样本读取一次完整布局。
+- 内容区现在明确作为状态栏与导航栏之间的硬裁剪视口。Tile 和桌面容器仍保留扩展绘制区以显示四角手柄，但任何子对象都不能越过内容区边界污染导航栏接缝。
+- 通过 OpenOCD 读取 M55 常驻 RGB565 显存 `0x263A5000`（480×800 可见区、512 像素 stride）定位到左下角所谓“脏块”中的实际文字为 LVGL 默认性能监视器。它是系统层上合法存在的半透明控件，位置恰好跨在 Start 内容与导航栏边缘，并不是 LCD/MIPI 推屏残留。产品初始化现调用 `lv_sysmon_hide_performance()` 隐藏该覆盖层；FPS、刷新次数、堆、对象和路由指标仍由 `feather_ui_status` 输出。
+- 修复后显存全屏抓帧 `tools/freather/serial-monitor/logs/tile-seam-perf-overlay-hidden.png` 与底部 100 行裁剪 `tile-seam-perf-overlay-hidden-seam.png` 显示：内容区和导航栏蓝色边线连续，左下角性能文字与黑色背景消失，边界没有旧帧矩形残留。修复前对照为 `tile-seam-performance-final.png`。
+- 最终 M55 `-Clean` 构建通过：text=890,224、data=3,768、bss=4,307,668 字节；HEX 2,514,657 字节，SHA-256 `6F0A7190B1F093764AD8D805F03EB366455EB0FAA599D97D7881772B1F98B777`。
+- 使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 重新烧录并校验 clean 产物：M55 写入 897,024 字节、校验 893,992 字节；M33 写入 167,936 字节、校验 160,536 字节。
+- clean 板端全量测试为 `228 PASS / 0 FAIL / 114 actions`，耗时 54,869 ms。最终状态为 54 FPS、刷新 3,695 次、当前堆 122,936 / 1,441,752 字节、峰值 591,320 字节、对象峰值 142、路由对象增量 0 / 2,336 字节、IPC err=0。
+- 完整回归日志：`tools/freather/serial-monitor/logs/tile-seam-hotpath-clean-board.log`；最终状态：`tools/freather/serial-monitor/logs/tile-seam-hotpath-clean-status.log`。
+
+### 现场复核：FLOATING 滚动坐标与真实接缝残块
+
+- 上述性能监视器结论只解释了左下角的一类覆盖物，并没有覆盖用户随后指出的新残块。再次直接读取常驻显存后，`tile-seam-live-dirty-1.rgb565` 明确记录到 `x=16..463、y=727..731` 的 448×5 像素强调色旧块：2240 个像素全部为 RGB565 `0x03DA`，位置在导航栏顶线 `y=736` 上方。这证明新现象确实是 Tile 内容的旧帧残留。
+- 根因是编辑态 Tile 为保持最高绘制层级而使用了 `LV_OBJ_FLAG_FLOATING`，但移动起点仍来自 `lv_obj_get_x/y()`。LVGL 9.2 的取坐标接口会给浮动子对象加上父容器滚动量，而 `lv_obj_set_pos()` 对浮动子对象使用不带滚动量的本地坐标；Start 页面滚动后两种坐标混用，Tile 会跳离触点，并反复触及内容区硬裁剪边缘。
+- 现在浮动对象统一使用 `style_x/style_y` 作为手势本地坐标；进入浮动层和吸附网格时通过 `grid_object_x/y()` 显式抵消桌面滚动量。移动、缩放或滚动事务结束以及最终吸附动画完成时，只执行一次 `tile_repair_viewport()`，既清理硬裁剪边缘暴露区域，也避免回到逐触摸样本整页重绘的卡顿路径。
+- 新增板端回归 `tile.move.scrolled`：先把 About Tile 放到第 8 行并产生约 502 px 的真实桌面滚动，再检查提升为浮动层前后屏幕坐标不变，以及 19×13 px 指针位移与 Tile 位移完全一致。该断言通过。
+- 修复后的稳定显存抓帧为 `tools/freather/serial-monitor/logs/tile-scroll-coordinate-seam-v2-stable.rgb565`（全屏 PNG 与接缝裁剪同名）。原 2240 像素矩形中强调色和非黑像素均为 0，`y=720..735` 全部为黑色，`y=736` 仅保留 480 像素导航栏顶线。
+- 最终 M55 `-Clean` 构建通过：text=891,656、data=3,768、bss=4,307,668 字节；HEX 2,518,691 字节，SHA-256 `96B9A9AB338A258B1C77A58B1348D9643CEC7A2653E8BE0895208057D23D2B04`。使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 重新写入 M55 897,024 字节并校验 895,424 字节；M33 镜像未改变，先前写入 167,936 字节并校验 160,536 字节。
+- clean 镜像板端全量测试为 `229 PASS / 0 FAIL / 114 actions`，耗时 54,299 ms。最终状态为 54 FPS、刷新 3,606 次、当前堆 122,712 / 1,441,752 字节、峰值 591,472 字节、对象峰值 142、路由对象增量 0 / 2,112 字节、IPC err=0。完整回归日志：`tools/freather/serial-monitor/logs/tile-scroll-coordinate-seam-clean-board.log`；最终状态：`tile-scroll-coordinate-seam-clean-status.log`。
+
+## 2026-08-30 通知下拉热路径优化与真实帧统计
+
+- 复核确认下滑卡顿不是单纯的合理降帧。LVGL 每 18 ms 对按住状态发送一次 `PRESSING`，旧代码即使触点 Y 没有变化也重复调用 `lv_obj_set_y()` 和遮罩透明度设置；480×700 的遮罩改变透明度会使接近整个内容区失效，同时 480×460 的复杂面板移动会合并旧、新区域。当前软件绘制后端下，这会形成明显过绘制。
+- 手势热路径现在只在面板 Y 真正变化时提交位置更新，相同坐标直接计入 skipped；遮罩按 12 个进度等级变化，面板仍连续跟手，但整屏 alpha 层不再按每个像素重绘。拖动和 180 ms 回弹期间暂停一秒状态、Live Tile 与快捷控制刷新，避免后台刷新插入手势帧。
+- 通知模型新增单调 revision。无数据变化时，打开空通知或已读队列不会再执行 `lv_obj_clean()` 并重建全部卡片；push/remove/首次 mark-read/clear 才更新 revision。快捷开关、状态栏无线状态、普通标签和外部 Live Tile 均增加值相等短路，避免每秒重复提交相同样式和文本。
+- 原 `FPS` 统计实际计数 `LV_EVENT_REFR_READY`；启用 LVGL 性能监视后，即使没有无效区，该事件仍随 18 ms 定时器发生，因此空闲时约 55 不能代表真实显示帧率。现统计分别记录实际 `RENDER_READY` 的 present FPS、调度 refresh Hz、render/flush 总数、刷出像素、每秒像素量和最后/峰值 render 时间。空闲板端结果 `present-fps=0、refresh-hz=55` 是正确含义：没有新画面送出，但调度器正常运行。
+- 自动测试新增 `notification.render.cached`、`notification.drag.dedup`、`notification.mask.quantized` 和 `metrics.present`。最终 clean 板端结果为 `233 PASS / 0 FAIL / 114 actions`，耗时 50,955 ms；测试状态中的 shade 计数为 `drag=5、applied=4、skipped=1、render=19/6`，证明重复触点和 6 次无变化重建请求被挡住。最终 IPC err=0，堆 123,224 / 1,441,752 字节、峰值 591,960 字节、对象峰值 142、路由对象增量 0 / 2,528 字节。
+- 最终 M55 `-Clean` 构建：text=894,336、data=3,768、bss=4,307,780 字节；HEX 2,526,222 字节，SHA-256 `69A6BBA4DDEEF0228A8C3ABA1D20A2FABAA92453FBC91A3993AFB09EB963B6D1`。Infineon Customized OpenOCD 5.19.0.4782 写入 M55 901,120 字节并校验 898,104 字节；M33 写入 167,936 字节并校验 160,536 字节。
+- 完整回归日志：`tools/freather/serial-monitor/logs/shade-perf-optimized-clean-board.log`；最终状态：`tools/freather/serial-monitor/logs/shade-perf-optimized-clean-status.log`。
+
+## 2026-08-30 设置应用信息架构与板级能力筛选
+
+- 将参考照片仅作为 Windows Phone 风格的信息架构参考，没有照搬其手机功能。Settings 从单页个性化表单升级为“设置主页 + 本地搜索 + 路由子页”：主页提供固定覆盖式软键盘、收起键、名称/摘要/关键字过滤，以及 4 个真正可配置的分类入口；子页继续使用已有的有界路由，因此 Back 返回设置主页、Home 返回桌面，资源释放仍由统一生命周期管理。
+- 分类收紧为显示与亮度、Wi-Fi、蓝牙和个性化。通知队列仍归通知下拉面板管理，存储状态归 Files，系统诊断和 About 保持独立应用；没有可修改后端的 RTC/语言/键盘也不占用设置入口。参考照片里的蜂窝网络、SIM、电话、移动热点、VPN、NFC、账户和应用卸载同样没有入口。Wi-Fi、蓝牙从 ABI 4 读取 M33 capability/enabled/connected 与 Wi-Fi 信号；驱动未启用时明确显示服务不可用并禁用操作，绝不伪造开关成功。
+- 显示子页直接复用 M55 `pwm18` 平台适配器，滑条写入后读取实际亮度，仍保持 UI 0~100% 映射到面板安全 50~100% 占空比；原有强调色、Tile 透明度、背景选择完整迁移到 Personalization 子页。新增独立的显示器+亮度与调色板 SVG 图标，Wi-Fi、蓝牙继续使用其专用无线图标，不再用齿轮或系统图标代替分类语义。
+- 自动测试新增 Settings 分类数量/范围、搜索 `wifi`、键盘覆盖几何与收起、4 个分类逐页 push/pop、亮度从 65% 实写到可稳定回读的 30% 后恢复、全部个性化控件和最终 transient slot 释放检查。
+- 最终 M55 clean 构建通过：text=908,968、data=3,768、bss=4,307,828 字节；HEX 2,567,381 字节，SHA-256 `90BD54EAF695FD559995EF846A463730A9D1A50FFAF7E12EC5D749A1C5F10581`。Infineon Customized OpenOCD 5.19.0.4782 写入 917,504 字节并校验 912,736 字节。板端完整自动化为 `255 PASS / 0 FAIL / 122 actions`，耗时 56,613 ms；最终 route 对象增量 0、堆 122,872 / 1,441,752 字节、对象峰值 155，M55 IPC tx/rx/err=19/57/0。完整日志：`tools/freather/serial-monitor/logs/settings-scope-icons-clean-board.log`；UI 状态：`settings-scope-icons-clean-status.log`；IPC 状态：`settings-scope-icons-ipc-status.log`。
 
 ## 已知边界
 

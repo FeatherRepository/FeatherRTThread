@@ -40,6 +40,8 @@ static const ft_icon_sources_t s_icon_sources[FT_ICON_COUNT] =
     FT_ICON_SOURCES(location),
     FT_ICON_SOURCES(brightness),
     FT_ICON_SOURCES(rotation),
+    FT_ICON_SOURCES(display),
+    FT_ICON_SOURCES(personalization),
 };
 
 const lv_image_dsc_t *ft_icon_source(ft_icon_id_t icon_id, uint16_t size)

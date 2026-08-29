@@ -35,6 +35,8 @@
     {"id": "airplane", "group": "controls", "reference": "squareline/assets/airplane_ic.png"},
     {"id": "location", "group": "controls", "reference": "squareline/assets/location_ic.png"},
     {"id": "brightness", "group": "controls", "reference": "functional system control", "redesign": "neutral sun outline"},
-    {"id": "rotation", "group": "controls", "reference": "functional system control", "redesign": "neutral device rotation outline"}
+    {"id": "rotation", "group": "controls", "reference": "functional system control", "redesign": "neutral device rotation outline"},
+    {"id": "display", "group": "settings", "reference": "functional display setting", "redesign": "neutral monitor with brightness symbol"},
+    {"id": "personalization", "group": "settings", "reference": "functional appearance setting", "redesign": "neutral color palette"}
   ]
 }

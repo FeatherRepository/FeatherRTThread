@@ -16,7 +16,6 @@
 
 #define LED_PIN_G GET_PIN(16, 6)
 #define LCD_BL_GPIO_NUM GET_PIN(15, 7)
-#define BL_PWM_DISP_CTRL GET_PIN(20, 6)
 
 #ifndef BSP_LCD_STARTUP_STABILIZE_MS
 #define BSP_LCD_STARTUP_STABILIZE_MS 1500U
@@ -68,9 +67,16 @@ static void m55_lvgl_cpu_cache_enable(void)
 static void m55_lcd_backlight_enable(void)
 {
     rt_pin_mode(LCD_BL_GPIO_NUM, PIN_MODE_OUTPUT);
-    rt_pin_mode(BL_PWM_DISP_CTRL, PIN_MODE_OUTPUT);
     rt_pin_write(LCD_BL_GPIO_NUM, PIN_HIGH);
-    rt_pin_write(BL_PWM_DISP_CTRL, PIN_HIGH);
+
+    /*
+     * en_gpio() holds P20_6 as a GPIO while the display power rails settle.
+     * Hand the pin back to TCPWM0 line 265 after the first frame; otherwise
+     * pwm18 changes only the counter registers and cannot reach the panel.
+     */
+    Cy_GPIO_Pin_Init(CYBSP_DISP_BACKLIGHT_PWM_PORT,
+                     CYBSP_DISP_BACKLIGHT_PWM_PIN,
+                     &CYBSP_DISP_BACKLIGHT_PWM_config);
 }
 
 void lv_user_gui_init(void)

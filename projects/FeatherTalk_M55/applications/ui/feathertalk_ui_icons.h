@@ -32,6 +32,8 @@ typedef enum
     FT_ICON_LOCATION,
     FT_ICON_BRIGHTNESS,
     FT_ICON_ROTATION,
+    FT_ICON_DISPLAY,
+    FT_ICON_PERSONALIZATION,
     FT_ICON_COUNT
 } ft_icon_id_t;
 

@@ -24,6 +24,7 @@ void ft_notifications_init(void);
 uint32_t ft_notifications_push(const char *source, const char *title, const char *body);
 size_t ft_notifications_count(void);
 size_t ft_notifications_unread_count(void);
+uint32_t ft_notifications_revision(void);
 bool ft_notifications_get(size_t index, ft_notification_t *notification);
 bool ft_notifications_remove(uint32_t id);
 void ft_notifications_mark_all_read(void);

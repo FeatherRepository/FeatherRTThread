@@ -14,6 +14,7 @@
 #define FT_BACKGROUND_SLOTS  16U
 #define FT_DEFAULT_ACCENT    0x0078D7UL
 #define FT_NOTIFICATION_MASK_OPA 110U
+#define FT_NOTIFICATION_MASK_STEPS 12U
 
 typedef struct
 {
@@ -25,6 +26,12 @@ typedef struct
     bool connected;
     uint8_t value;
     uint8_t signal_percent;
+    bool rendered;
+    bool rendered_available;
+    bool rendered_enabled;
+    bool rendered_connected;
+    uint8_t rendered_value;
+    uint8_t rendered_signal_percent;
 } ft_quick_view_t;
 
 typedef struct
@@ -56,20 +63,42 @@ static lv_obj_t *s_brightness_value;
 static ft_quick_view_t s_quick_views[FEATHERTALK_QUICK_COUNT];
 static bool s_notification_visible;
 static bool s_notification_dragging;
+static bool s_notification_animating;
 static bool s_notification_drag_moved;
 static bool s_notification_suppress_click;
+static uint8_t s_notification_mask_level;
 static int32_t s_notification_press_y;
 static int32_t s_notification_start_y;
 static int32_t s_notification_last_pointer_y;
 static int32_t s_notification_velocity_y;
 static uint32_t s_notification_press_ms;
 static uint32_t s_notification_last_sample_ms;
+static uint32_t s_notification_render_revision;
+static uint32_t s_notification_drag_samples;
+static uint32_t s_notification_drag_applied;
+static uint32_t s_notification_drag_skipped;
+static uint32_t s_notification_mask_applied;
+static uint32_t s_notification_mask_skipped;
+static uint32_t s_notification_render_count;
+static uint32_t s_notification_render_skipped;
 static lv_obj_t *s_alert;
 static lv_obj_t *s_alert_button;
 
 static void notification_settle(bool visible);
 static void notification_render(void);
 static void quick_views_refresh(void);
+
+static bool label_set_text_changed(lv_obj_t *label, const char *text)
+{
+    const char *current;
+    if (label == RT_NULL || !lv_obj_is_valid(label) ||
+        !lv_obj_check_type(label, &lv_label_class)) return false;
+    if (text == RT_NULL) text = "";
+    current = lv_label_get_text(label);
+    if (current != RT_NULL && strcmp(current, text) == 0) return false;
+    lv_label_set_text(label, text);
+    return true;
+}
 
 static void apply_accent(ft_accent_slot_t *slot)
 {
@@ -294,6 +323,14 @@ static void status_icon_state(lv_obj_t *icon, bool available, bool enabled,
 static void status_radio_refresh(const feathertalk_quick_status_t *status,
                                  bool valid)
 {
+    static bool rendered;
+    static bool rendered_wifi_available;
+    static bool rendered_wifi_enabled;
+    static bool rendered_wifi_connected;
+    static bool rendered_bluetooth_available;
+    static bool rendered_bluetooth_enabled;
+    static bool rendered_bluetooth_connected;
+    static uint8_t rendered_signal = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
     bool wifi_available = valid &&
         (status->capabilities & FEATHERTALK_QUICK_CAP_WIFI) != 0U;
     bool wifi_enabled = wifi_available &&
@@ -307,11 +344,28 @@ static void status_radio_refresh(const feathertalk_quick_status_t *status,
     bool bluetooth_connected = bluetooth_enabled &&
         (status->connected & FEATHERTALK_QUICK_CAP_BLUETOOTH) != 0U;
     uint8_t signal = valid ? status->wifi_signal_percent : FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
+
+    if (rendered && rendered_wifi_available == wifi_available &&
+        rendered_wifi_enabled == wifi_enabled &&
+        rendered_wifi_connected == wifi_connected &&
+        rendered_bluetooth_available == bluetooth_available &&
+        rendered_bluetooth_enabled == bluetooth_enabled &&
+        rendered_bluetooth_connected == bluetooth_connected &&
+        rendered_signal == signal) return;
+
     s_status_wifi_icon_id = wifi_signal_icon(wifi_connected, signal);
     ft_icon_set(s_status_wifi, s_status_wifi_icon_id, ft_layout_icon_size(24U));
     status_icon_state(s_status_wifi, wifi_available, wifi_enabled, wifi_connected);
     status_icon_state(s_status_bluetooth, bluetooth_available,
                       bluetooth_enabled, bluetooth_connected);
+    rendered = true;
+    rendered_wifi_available = wifi_available;
+    rendered_wifi_enabled = wifi_enabled;
+    rendered_wifi_connected = wifi_connected;
+    rendered_bluetooth_available = bluetooth_available;
+    rendered_bluetooth_enabled = bluetooth_enabled;
+    rendered_bluetooth_connected = bluetooth_connected;
+    rendered_signal = signal;
 }
 
 static void quick_view_apply(feathertalk_quick_control_t control)
@@ -319,6 +373,32 @@ static void quick_view_apply(feathertalk_quick_control_t control)
     ft_quick_view_t *view = &s_quick_views[control];
     char state[28];
     if (view->button == RT_NULL || !lv_obj_is_valid(view->button)) return;
+    if (view->rendered && view->rendered_available == view->available &&
+        view->rendered_enabled == view->enabled &&
+        view->rendered_connected == view->connected &&
+        view->rendered_value == view->value &&
+        view->rendered_signal_percent == view->signal_percent) return;
+
+    if (control == FEATHERTALK_QUICK_BRIGHTNESS)
+    {
+        if (s_brightness_slider != RT_NULL && lv_obj_is_valid(s_brightness_slider))
+        {
+            if (view->available)
+                lv_obj_remove_state(s_brightness_slider, LV_STATE_DISABLED);
+            else
+                lv_obj_add_state(s_brightness_slider, LV_STATE_DISABLED);
+            if (lv_slider_get_value(s_brightness_slider) != view->value)
+                lv_slider_set_value(s_brightness_slider, view->value, LV_ANIM_OFF);
+        }
+        if (s_brightness_value != RT_NULL && lv_obj_is_valid(s_brightness_value))
+        {
+            char value[12];
+            lv_snprintf(value, sizeof(value), "%u%%", view->value);
+            (void)label_set_text_changed(s_brightness_value,
+                                         view->available ? value : "Unavailable");
+        }
+    }
+
     if (!view->available)
     {
         lv_obj_add_state(view->button, LV_STATE_DISABLED);
@@ -368,6 +448,12 @@ static void quick_view_apply(feathertalk_quick_control_t control)
         else
             lv_label_set_text(view->state_label, view->enabled ? "On" : "Off");
     }
+    view->rendered = true;
+    view->rendered_available = view->available;
+    view->rendered_enabled = view->enabled;
+    view->rendered_connected = view->connected;
+    view->rendered_value = view->value;
+    view->rendered_signal_percent = view->signal_percent;
 }
 
 static void quick_views_refresh(void)
@@ -386,20 +472,6 @@ static void quick_views_refresh(void)
             view->enabled = view->value > 0U;
             view->connected = false;
             view->signal_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
-            if (s_brightness_slider != RT_NULL && lv_obj_is_valid(s_brightness_slider))
-            {
-                if (view->available)
-                    lv_obj_remove_state(s_brightness_slider, LV_STATE_DISABLED);
-                else
-                    lv_obj_add_state(s_brightness_slider, LV_STATE_DISABLED);
-                lv_slider_set_value(s_brightness_slider, view->value, LV_ANIM_OFF);
-            }
-            if (s_brightness_value != RT_NULL && lv_obj_is_valid(s_brightness_value))
-            {
-                char value[12];
-                lv_snprintf(value, sizeof(value), "%u%%", view->value);
-                lv_label_set_text(s_brightness_value, view->available ? value : "Unavailable");
-            }
         }
         else
         {
@@ -455,14 +527,14 @@ static void status_timer_cb(lv_timer_t *timer)
     uint32_t minutes;
     char bar[56];
     char system_text[256];
-    char metrics_text[192];
+    char metrics_text[256];
     char tile[64];
     const char *battery = "--";
     const char *network = "unavailable";
     char battery_value[8];
     char network_value[40];
 
-    LV_UNUSED(timer);
+    if (timer != RT_NULL && (s_notification_dragging || s_notification_animating)) return;
     ft_metrics_get(&metrics);
     if (feathertalk_ipc_get_system_status(&status) == RT_EOK)
     {
@@ -512,13 +584,19 @@ static void status_timer_cb(lv_timer_t *timer)
                     (unsigned long)(minutes / 60U), (unsigned long)(minutes % 60U));
     }
     lv_snprintf(metrics_text, sizeof(metrics_text),
-                "M55 UI: %lu FPS, %lu refreshes\nHeap: %lu/%lu bytes, peak %lu\n"
-                "UI objects peak: %lu\nLast route delta: objects %ld, heap %ld",
-                (unsigned long)metrics.fps, (unsigned long)metrics.refresh_count,
+                "M55 UI: present %lu FPS, scheduler %lu Hz\n"
+                "Frames %lu, flush %lu, %lu pixels/s\nRender %lu ms, peak %lu ms\n"
+                "Heap: %lu/%lu bytes, peak %lu\nUI objects peak: %lu\n"
+                "Last route delta: objects %ld, heap %ld",
+                (unsigned long)metrics.fps, (unsigned long)metrics.refresh_fps,
+                (unsigned long)metrics.render_count, (unsigned long)metrics.flush_count,
+                (unsigned long)metrics.flushed_pixels_per_second,
+                (unsigned long)metrics.render_time_last_ms,
+                (unsigned long)metrics.render_time_max_ms,
                 (unsigned long)metrics.heap_used, (unsigned long)metrics.heap_total,
                 (unsigned long)metrics.heap_max_used, (unsigned long)metrics.peak_ui_objects,
                 (long)metrics.last_route_object_delta, (long)metrics.last_route_heap_delta);
-    lv_label_set_text(s_status_uptime, bar);
+    (void)label_set_text_changed(s_status_uptime, bar);
     ft_pages_update_system_status(system_text, metrics_text);
     ft_pages_live_tile_update(tile);
     quick_views_refresh();
@@ -553,48 +631,77 @@ static void notification_mask_update(int32_t panel_y)
 {
     int32_t span;
     int32_t progress;
+    uint8_t level;
     uint8_t opacity;
     if (s_notification_mask == RT_NULL || !lv_obj_is_valid(s_notification_mask)) return;
     span = notification_open_y() - notification_closed_y();
+    if (span <= 0) return;
     progress = panel_y - notification_closed_y();
     if (progress < 0) progress = 0;
     if (progress > span) progress = span;
-    if (progress == 0)
+    level = progress == 0 ? 0U :
+            (uint8_t)(((uint32_t)progress * FT_NOTIFICATION_MASK_STEPS +
+                       (uint32_t)span - 1U) / (uint32_t)span);
+    if (level > FT_NOTIFICATION_MASK_STEPS) level = FT_NOTIFICATION_MASK_STEPS;
+    if (level == s_notification_mask_level)
     {
-        if (!s_notification_visible) lv_obj_add_flag(s_notification_mask, LV_OBJ_FLAG_HIDDEN);
+        s_notification_mask_skipped++;
         return;
     }
-    opacity = (uint8_t)((progress * FT_NOTIFICATION_MASK_OPA) / span);
-    lv_obj_remove_flag(s_notification_mask, LV_OBJ_FLAG_HIDDEN);
+    s_notification_mask_level = level;
+    s_notification_mask_applied++;
+    if (level == 0U)
+    {
+        lv_obj_add_flag(s_notification_mask, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    opacity = (uint8_t)(((uint32_t)level * FT_NOTIFICATION_MASK_OPA) /
+                        FT_NOTIFICATION_MASK_STEPS);
+    if (lv_obj_has_flag(s_notification_mask, LV_OBJ_FLAG_HIDDEN))
+        lv_obj_remove_flag(s_notification_mask, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_bg_opa(s_notification_mask, opacity, LV_PART_MAIN);
 }
 
 static void notification_anim_y_cb(void *object, int32_t value)
 {
-    lv_obj_set_y((lv_obj_t *)object, value);
+    lv_obj_t *panel = (lv_obj_t *)object;
+    if (notification_current_y() != value) lv_obj_set_y(panel, value);
     notification_mask_update(value);
 }
 
 static void notification_anim_completed_cb(lv_anim_t *animation)
 {
     LV_UNUSED(animation);
+    s_notification_animating = false;
     if (!s_notification_visible && s_notification_mask != RT_NULL)
+    {
         lv_obj_add_flag(s_notification_mask, LV_OBJ_FLAG_HIDDEN);
+        s_notification_mask_level = 0U;
+    }
 }
 
 static void notification_anim(bool visible)
 {
     lv_anim_t animation;
+    int32_t current = notification_current_y();
     int32_t target = visible ? notification_open_y() : notification_closed_y();
     lv_anim_delete(s_notification_panel, notification_anim_y_cb);
-    if (visible) notification_mask_update(notification_current_y() + 1);
+    s_notification_animating = false;
+    if (current == target)
+    {
+        notification_mask_update(target);
+        notification_anim_completed_cb(RT_NULL);
+        return;
+    }
+    if (visible) notification_mask_update(current + 1);
     lv_anim_init(&animation);
     lv_anim_set_var(&animation, s_notification_panel);
     lv_anim_set_exec_cb(&animation, notification_anim_y_cb);
-    lv_anim_set_values(&animation, notification_current_y(), target);
+    lv_anim_set_values(&animation, current, target);
     lv_anim_set_duration(&animation, 180U);
     lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
     lv_anim_set_completed_cb(&animation, notification_anim_completed_cb);
+    s_notification_animating = true;
     lv_anim_start(&animation);
 }
 
@@ -613,6 +720,7 @@ static void notification_drag_begin_at(int32_t pointer_y, uint32_t now)
 {
     if (s_notification_panel == RT_NULL || !lv_obj_is_valid(s_notification_panel)) return;
     lv_anim_delete(s_notification_panel, notification_anim_y_cb);
+    s_notification_animating = false;
     s_notification_dragging = true;
     s_notification_drag_moved = false;
     s_notification_press_y = pointer_y;
@@ -636,6 +744,7 @@ static void notification_drag_update_at(int32_t pointer_y, uint32_t now)
     uint32_t elapsed;
     int32_t y;
     if (!s_notification_dragging) return;
+    s_notification_drag_samples++;
     total_motion = pointer_y - s_notification_press_y;
     threshold = ft_layout_px(6);
     if (threshold < 4) threshold = 4;
@@ -653,7 +762,13 @@ static void notification_drag_update_at(int32_t pointer_y, uint32_t now)
     if (total_motion >= threshold || total_motion <= -threshold)
         s_notification_drag_moved = true;
     y = notification_clamp_y(s_notification_start_y + total_motion);
+    if (y == notification_current_y())
+    {
+        s_notification_drag_skipped++;
+        return;
+    }
     lv_obj_set_y(s_notification_panel, y);
+    s_notification_drag_applied++;
     notification_mask_update(y);
 }
 
@@ -805,9 +920,18 @@ static void notification_clear_cb(lv_event_t *event)
 static void notification_render(void)
 {
     char summary[40];
+    uint32_t revision = ft_notifications_revision();
     size_t count = ft_notifications_count();
     size_t unread = ft_notifications_unread_count();
     size_t i;
+    if (s_notification_list != RT_NULL && lv_obj_is_valid(s_notification_list) &&
+        s_notification_render_revision == revision)
+    {
+        s_notification_render_skipped++;
+        return;
+    }
+    s_notification_render_revision = revision;
+    s_notification_render_count++;
     notification_badge_update();
     if (s_notification_summary != RT_NULL && lv_obj_is_valid(s_notification_summary))
     {
@@ -847,7 +971,7 @@ static void notification_render(void)
         lv_obj_set_style_bg_color(card, lv_color_hex(item.unread ? 0x292929 : 0x202020), LV_PART_MAIN);
         lv_obj_set_style_border_width(card, item.unread ? 2 : 0, LV_PART_MAIN);
         lv_obj_set_style_border_side(card, LV_BORDER_SIDE_LEFT, LV_PART_MAIN);
-        lv_obj_set_style_border_color(card, s_accent, LV_PART_MAIN);
+        ft_ui_register_accent(card, FT_ACCENT_BORDER);
         lv_obj_set_style_radius(card, ft_layout_px(4), LV_PART_MAIN);
         lv_obj_set_style_pad_all(card, ft_layout_px(10), LV_PART_MAIN);
         lv_obj_set_style_pad_row(card, ft_layout_px(3), LV_PART_MAIN);
@@ -1083,6 +1207,10 @@ void ft_ui_test_notification_reset(void)
     ft_notifications_clear();
     notification_render();
 }
+uint32_t ft_ui_test_notification_drag_applied(void) { return s_notification_drag_applied; }
+uint32_t ft_ui_test_notification_drag_skipped(void) { return s_notification_drag_skipped; }
+uint32_t ft_ui_test_notification_mask_applied(void) { return s_notification_mask_applied; }
+uint32_t ft_ui_test_notification_render_count(void) { return s_notification_render_count; }
 lv_obj_t *ft_ui_test_get_alert_button(void)
 {
     return (s_alert_button != RT_NULL && lv_obj_is_valid(s_alert_button)) ? s_alert_button : RT_NULL;
@@ -1118,12 +1246,32 @@ int feathertalk_ui_init(void)
 
     display = lv_display_get_default();
     if (display == RT_NULL) return -RT_ERROR;
+#if LV_USE_SYSMON && LV_USE_PERF_MONITOR
+    /* FeatherTalk reports FPS, refresh count and memory through its status
+     * command.  LVGL's default bottom-left debug label overlaps the product
+     * navigation bar and looks like a stale dirty block, so keep the metrics
+     * backend but hide that screen-system-layer label. */
+    lv_sysmon_hide_performance(display);
+#endif
+    result = ft_platform_touch_configure();
+    rt_kprintf("[FeatherTalk UI] touch input: %s (long-press=500ms scroll-limit=18px)\n",
+               result == RT_EOK ? "ready" : "unavailable");
     ft_layout_init(display);
     layout = ft_layout_get();
     s_accent = lv_color_hex(FT_DEFAULT_ACCENT);
     s_page_background = lv_color_black();
     ft_preferences_init();
     ft_notifications_init();
+    s_notification_render_revision = 0U;
+    s_notification_mask_level = 0U;
+    s_notification_animating = false;
+    s_notification_drag_samples = 0U;
+    s_notification_drag_applied = 0U;
+    s_notification_drag_skipped = 0U;
+    s_notification_mask_applied = 0U;
+    s_notification_mask_skipped = 0U;
+    s_notification_render_count = 0U;
+    s_notification_render_skipped = 0U;
     screen = lv_screen_active();
     lv_obj_clean(screen);
     ft_ui_style_page(screen);
@@ -1172,6 +1320,10 @@ int feathertalk_ui_init(void)
 
     content = lv_obj_create(screen);
     ft_ui_style_page(content);
+    /* This object is the hard clip viewport between the status and navigation
+     * bars.  Tile handles may overflow their local desktop container, but the
+     * content subtree must never draw through the navigation seam. */
+    lv_obj_remove_flag(content, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_set_width(content, lv_pct(100));
     lv_obj_set_height(content, 0);
     lv_obj_set_flex_grow(content, 1);
@@ -1269,7 +1421,7 @@ int feathertalk_ui_init(void)
     s_brightness_slider = lv_slider_create(brightness_row);
     lv_obj_set_width(s_brightness_slider, 0);
     lv_obj_set_flex_grow(s_brightness_slider, 1);
-    lv_slider_set_range(s_brightness_slider, 5, 100);
+    lv_slider_set_range(s_brightness_slider, 0, 100);
     lv_slider_set_value(s_brightness_slider, ft_platform_get_brightness(), LV_ANIM_OFF);
     lv_obj_add_event_cb(s_brightness_slider, brightness_changed_cb,
                         LV_EVENT_VALUE_CHANGED, RT_NULL);
@@ -1325,6 +1477,7 @@ static int feather_ui_status(void)
     const ft_ui_layout_t *layout = ft_layout_get();
     feathertalk_system_status_t system_status;
     feathertalk_quick_status_t quick_status;
+    size_t selected_tile = ft_tiles_selected();
     rt_kprintf("FeatherTalk UI: initialized=%d page=%d route-depth=%lu accent=#%06lx objects=%lu overflow=%lu\n",
                s_ui_initialized ? 1 : 0,
                (int)ft_router_current_page(),
@@ -1359,13 +1512,29 @@ static int feather_ui_status(void)
                    quick_status.rotation, quick_status.result);
     else
         rt_kprintf("FeatherTalk UI quick IPC: unavailable\n");
-    rt_kprintf("FeatherTalk UI shade: y=%ld mask=%d notifications=%lu unread=%lu brightness=%u\n",
+    rt_kprintf("FeatherTalk UI shade: y=%ld mask=%d notifications=%lu unread=%lu "
+               "brightness=%u pwm-routed=%d\n",
                s_notification_panel != RT_NULL ? (long)notification_current_y() : 0L,
                s_notification_mask != RT_NULL &&
                !lv_obj_has_flag(s_notification_mask, LV_OBJ_FLAG_HIDDEN) ? 1 : 0,
                (unsigned long)ft_notifications_count(),
                (unsigned long)ft_notifications_unread_count(),
-               ft_platform_get_brightness());
+               ft_platform_get_brightness(),
+               ft_platform_brightness_available() ? 1 : 0);
+    rt_kprintf("FeatherTalk UI shade perf: drag=%lu applied=%lu skipped=%lu "
+               "mask=%lu/%lu render=%lu/%lu revision=%lu\n",
+               (unsigned long)s_notification_drag_samples,
+               (unsigned long)s_notification_drag_applied,
+               (unsigned long)s_notification_drag_skipped,
+               (unsigned long)s_notification_mask_applied,
+               (unsigned long)s_notification_mask_skipped,
+               (unsigned long)s_notification_render_count,
+               (unsigned long)s_notification_render_skipped,
+               (unsigned long)ft_notifications_revision());
+    rt_kprintf("FeatherTalk UI tiles: editing=%d selected=%ld\n",
+               ft_tiles_editing() ? 1 : 0,
+               selected_tile == SIZE_MAX ? -1L : (long)selected_tile);
+    ft_platform_touch_print_status();
     ft_metrics_print_status();
 #ifdef FEATHERTALK_UI_TEST_MODE
     ft_ui_test_print_status();

@@ -75,7 +75,16 @@ enum
 #define ST7102_Read_Start_Position          0x10
 #define ST7102_CHECK_SUM         0x80FF
 
+typedef struct
+{
+    rt_uint32_t coordinate_frames;
+    rt_uint32_t held_reports;
+    rt_uint32_t press_reports;
+    rt_uint32_t release_reports;
+} st7102_touch_diagnostics_t;
+
 int rt_hw_ST7102_init(const char *name, struct rt_touch_config *cfg);
 int rt_hw_ST7102_port(void);
 rt_err_t ST7102_get_single_touch(rt_int16_t *touch_x, rt_int16_t *touch_y);
+void ST7102_get_diagnostics(st7102_touch_diagnostics_t *diagnostics);
 #endif

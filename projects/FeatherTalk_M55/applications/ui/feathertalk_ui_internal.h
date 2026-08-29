@@ -19,6 +19,10 @@ typedef enum
     FT_PAGE_MESSAGES,
     FT_PAGE_FILES,
     FT_PAGE_ABOUT,
+    FT_PAGE_SETTINGS_DISPLAY,
+    FT_PAGE_SETTINGS_WIFI,
+    FT_PAGE_SETTINGS_BLUETOOTH,
+    FT_PAGE_SETTINGS_PERSONALIZATION,
     FT_PAGE_COUNT
 } ft_page_id_t;
 
@@ -35,9 +39,29 @@ typedef struct
 typedef struct
 {
     const char *name;
-    ft_icon_id_t icon;
+    uint8_t column_span;
+    uint8_t row_span;
+    uint8_t opacity;
+    ft_icon_id_t pattern_icon;
+} ft_tile_common_properties_t;
+
+typedef void (*ft_tile_live_content_cb_t)(lv_obj_t *content_host,
+                                          uint32_t frame, void *context);
+
+typedef struct
+{
+    ft_icon_id_t app_icon;
+    bool loop_enabled;
+    uint32_t loop_period_ms;
+    ft_tile_live_content_cb_t live_content;
+    void *live_context;
+} ft_tile_private_properties_t;
+
+typedef struct
+{
     ft_page_id_t page_id;
-    bool wide_tile;
+    ft_tile_common_properties_t tile;
+    ft_tile_private_properties_t app;
 } ft_app_descriptor_t;
 
 typedef enum
@@ -75,7 +99,15 @@ typedef struct
 typedef struct
 {
     uint32_t fps;
+    uint32_t refresh_fps;
     uint32_t refresh_count;
+    uint32_t render_count;
+    uint32_t flush_count;
+    uint32_t flushes_per_second;
+    uint32_t flushed_pixels;
+    uint32_t flushed_pixels_per_second;
+    uint32_t render_time_last_ms;
+    uint32_t render_time_max_ms;
     uint32_t heap_total;
     uint32_t heap_used;
     uint32_t heap_max_used;
@@ -100,6 +132,14 @@ void ft_pages_apply_preferences(void);
 void ft_pages_update_system_status(const char *system_text, const char *metrics_text);
 void ft_pages_live_tile_update(const char *line);
 
+int ft_tiles_create(lv_obj_t *container, const ft_app_descriptor_t *apps, size_t count);
+void ft_tiles_exit_edit(void);
+void ft_tiles_apply_opacity(uint8_t global_opacity);
+void ft_tiles_set_external_text(ft_page_id_t page_id, const char *text);
+void ft_tiles_set_live_loop(ft_page_id_t page_id, bool enabled);
+bool ft_tiles_editing(void);
+size_t ft_tiles_selected(void);
+
 void ft_preferences_init(void);
 const ft_ui_preferences_t *ft_preferences_get(void);
 void ft_preferences_set_accent(uint32_t rgb);
@@ -114,6 +154,33 @@ void ft_metrics_route_check(void);
 void ft_metrics_print_status(void);
 
 #ifdef FEATHERTALK_UI_TEST_MODE
+lv_obj_t *ft_tiles_test_get_object(size_t index);
+bool ft_tiles_test_editing(void);
+size_t ft_tiles_test_selected(void);
+size_t ft_tiles_test_handle_count(void);
+bool ft_tiles_test_handle_geometry(void);
+bool ft_tiles_test_move(size_t app_index, size_t target_index);
+bool ft_tiles_test_move_nearest(size_t app_index);
+bool ft_tiles_test_move_scrolled(size_t app_index);
+bool ft_tiles_test_layout_settled(void);
+bool ft_tiles_test_resize(size_t app_index, uint8_t columns, uint8_t rows);
+bool ft_tiles_test_resize_collision(void);
+bool ft_tiles_test_resize_boundary(void);
+bool ft_tiles_test_resize_anchors(size_t app_index);
+size_t ft_tiles_test_order(size_t app_index);
+uint8_t ft_tiles_test_columns(size_t app_index);
+uint8_t ft_tiles_test_rows(size_t app_index);
+bool ft_tiles_test_layout_valid(void);
+bool ft_tiles_test_restore_layout(void);
+bool ft_tiles_test_set_common(size_t app_index, const char *name,
+                              uint8_t opacity, ft_icon_id_t pattern_icon);
+const char *ft_tiles_test_name(size_t app_index);
+uint8_t ft_tiles_test_opacity(size_t app_index);
+ft_icon_id_t ft_tiles_test_pattern(size_t app_index);
+const char *ft_tiles_test_live_text(size_t app_index);
+bool ft_tiles_test_live_advance(size_t app_index);
+bool ft_tiles_test_live_enabled(size_t app_index);
+
 lv_obj_t *ft_ui_test_get_nav_button(ft_nav_button_id_t button_id);
 lv_obj_t *ft_ui_test_get_status_bar(void);
 lv_obj_t *ft_ui_test_get_notification_panel(void);
@@ -139,11 +206,24 @@ size_t ft_ui_test_notification_count(void);
 size_t ft_ui_test_notification_unread(void);
 bool ft_ui_test_notification_remove(size_t index);
 void ft_ui_test_notification_reset(void);
+uint32_t ft_ui_test_notification_drag_applied(void);
+uint32_t ft_ui_test_notification_drag_skipped(void);
+uint32_t ft_ui_test_notification_mask_applied(void);
+uint32_t ft_ui_test_notification_render_count(void);
 lv_obj_t *ft_ui_test_get_alert_button(void);
 bool ft_ui_test_notification_is_visible(void);
 lv_obj_t *ft_pages_test_get_start_button(size_t app_index);
 lv_obj_t *ft_pages_test_get_apps_button(size_t app_index);
 lv_obj_t *ft_pages_test_get_accent_button(size_t color_index);
+lv_obj_t *ft_pages_test_get_settings_search_box(void);
+lv_obj_t *ft_pages_test_get_settings_keyboard_hide(void);
+bool ft_pages_test_settings_keyboard_visible(void);
+bool ft_pages_test_settings_keyboard_overlay_ok(void);
+lv_obj_t *ft_pages_test_get_settings_result(size_t index);
+size_t ft_pages_test_settings_count(void);
+size_t ft_pages_test_settings_visible_count(void);
+ft_page_id_t ft_pages_test_settings_page_id(size_t index);
+lv_obj_t *ft_pages_test_get_settings_brightness(void);
 lv_obj_t *ft_pages_test_get_media_button(void);
 const char *ft_pages_test_get_media_label(void);
 bool ft_pages_test_media_is_playing(void);
@@ -173,6 +253,32 @@ lv_obj_t *ft_pages_test_get_files_refresh_button(void);
 uint32_t ft_pages_test_message_count(void);
 uint32_t ft_pages_test_files_refresh_count(void);
 bool ft_pages_test_transient_slots_clear(void);
+bool ft_pages_test_tile_editing(void);
+size_t ft_pages_test_tile_selected(void);
+size_t ft_pages_test_tile_handle_count(void);
+bool ft_pages_test_tile_handle_geometry(void);
+bool ft_pages_test_tile_move(size_t app_index, size_t target_index);
+bool ft_pages_test_tile_move_nearest(size_t app_index);
+bool ft_pages_test_tile_move_scrolled(size_t app_index);
+bool ft_pages_test_tile_layout_settled(void);
+bool ft_pages_test_tile_resize(size_t app_index, uint8_t columns, uint8_t rows);
+bool ft_pages_test_tile_resize_collision(void);
+bool ft_pages_test_tile_resize_boundary(void);
+bool ft_pages_test_tile_resize_anchors(size_t app_index);
+size_t ft_pages_test_tile_order(size_t app_index);
+uint8_t ft_pages_test_tile_columns(size_t app_index);
+uint8_t ft_pages_test_tile_rows(size_t app_index);
+bool ft_pages_test_tile_layout_valid(void);
+bool ft_pages_test_tile_restore_layout(void);
+bool ft_pages_test_tile_set_common(size_t app_index, const char *name,
+                                   uint8_t opacity, ft_icon_id_t pattern_icon);
+const char *ft_pages_test_tile_name(size_t app_index);
+uint8_t ft_pages_test_tile_opacity(size_t app_index);
+ft_icon_id_t ft_pages_test_tile_pattern(size_t app_index);
+const char *ft_pages_test_tile_live_text(size_t app_index);
+bool ft_pages_test_tile_live_advance(size_t app_index);
+bool ft_pages_test_tile_live_enabled(size_t app_index);
+void ft_pages_test_tile_exit_edit(void);
 
 void ft_ui_test_start(void);
 void ft_ui_test_print_status(void);

@@ -123,21 +123,16 @@ static int16_t pre_x[ST7102_MAX_TOUCH] = {-1, -1, -1, -1, -1};
 static int16_t pre_y[ST7102_MAX_TOUCH] = {-1, -1, -1, -1, -1};
 static int16_t pre_w[ST7102_MAX_TOUCH] = {-1, -1, -1, -1, -1};
 static rt_uint8_t s_tp_dowm[ST7102_MAX_TOUCH];
+static rt_uint8_t s_release_candidate[ST7102_MAX_TOUCH];
 static struct rt_touch_data *read_data;
 static rt_size_t s_touch_read_len = 0;
+static st7102_touch_diagnostics_t s_touch_diagnostics;
 
 #define ST7102_READ_BUF_MAX (8 * ST7102_MAX_TOUCH)
 #define ST7102_READ_LEN_FALLBACK1 32
 #define ST7102_READ_LEN_FALLBACK2 16
-
-#ifndef ST7102_IRQ_ACTIVE_LEVEL
-#define ST7102_IRQ_ACTIVE_LEVEL PIN_LOW
-#endif
-
-static rt_bool_t ST7102_irq_is_active(void)
-{
-    return rt_pin_read(ST7102_IRQ_PIN) == ST7102_IRQ_ACTIVE_LEVEL;
-}
+#define ST7102_RELEASE_CONFIRM_FRAMES 3U
+#define ST7102_POSITION_DEADBAND       3
 
 static void ST7102_touch_up(void *buf, int8_t id)
 {
@@ -160,6 +155,7 @@ static void ST7102_touch_up(void *buf, int8_t id)
     pre_x[id] = -1;
     pre_y[id] = -1;
     pre_w[id] = -1;
+    s_release_candidate[id] = 0U;
 }
 
 static void ST7102_touch_down(void *buf, int8_t id, int16_t x, int16_t y, int16_t w)
@@ -186,8 +182,42 @@ static void ST7102_touch_down(void *buf, int8_t id, int16_t x, int16_t y, int16_
     pre_w[id] = w;
 }
 
+static int16_t ST7102_position_filter(int16_t previous, int16_t current)
+{
+    int16_t difference;
+    if (previous < 0) return current;
+    difference = current >= previous ? current - previous : previous - current;
+    return difference <= ST7102_POSITION_DEADBAND ? previous : current;
+}
+
+static rt_size_t ST7102_report_held_touches(void *buf, rt_size_t max_points)
+{
+    rt_size_t id;
+    rt_size_t touch_num = 0;
+
+    if (max_points > ST7102_MAX_TOUCH) max_points = ST7102_MAX_TOUCH;
+    read_data = (struct rt_touch_data *)buf;
+    for (id = 0; id < max_points; id++)
+    {
+        if (s_tp_dowm[id] != 0U)
+        {
+            read_data[id].event = RT_TOUCH_EVENT_MOVE;
+            read_data[id].width = pre_w[id];
+            read_data[id].x_coordinate = pre_x[id];
+            read_data[id].y_coordinate = pre_y[id];
+            read_data[id].track_id = id;
+            touch_num++;
+        }
+        else
+        {
+            read_data[id].event = RT_TOUCH_EVENT_NONE;
+        }
+    }
+    if (touch_num > 0U) s_touch_diagnostics.held_reports++;
+    return touch_num;
+}
+
 rt_uint8_t read_buf[8 * ST7102_MAX_TOUCH] = {0};
-rt_uint8_t Last_read_buf[8 * ST7102_MAX_TOUCH] = {0};
 #define LED_RED GET_PIN(16, 7)
 static rt_size_t ST7102_read_point(struct rt_touch_device *touch, void *buf, rt_size_t read_num)
 {
@@ -198,12 +228,7 @@ static rt_size_t ST7102_read_point(struct rt_touch_device *touch, void *buf, rt_
 
     int16_t input_x = 0;
     int16_t input_y = 0;
-    int16_t Last_input_x = 0;
-    int16_t Last_input_y = 0;
-
     static uint16_t count = 0;
-    static uint16_t Last_Touch_Intn = 0;
-    static uint16_t Touch_Intn = 0;
 
     cmd[0] = (rt_uint8_t)((ST7102_Read_Start_Position >> 8) & 0xFF);
     cmd[1] = (rt_uint8_t)(ST7102_Read_Start_Position & 0xFF);
@@ -233,7 +258,7 @@ static rt_size_t ST7102_read_point(struct rt_touch_device *touch, void *buf, rt_
         else
         {
             LOG_D("read point failed\n");
-            read_num = 0;
+            touch_num = ST7102_report_held_touches(buf, max_points);
             goto exit_;
         }
     }
@@ -250,40 +275,46 @@ static rt_size_t ST7102_read_point(struct rt_touch_device *touch, void *buf, rt_
         max_points = ST7102_MAX_TOUCH;
     }
 
+    /* ST7123/ST7102 report data is frame based.  Reading the coordinate table
+     * clears INT, so INT sampled after the read is not a finger-down signal.
+     * Bit 3 at 0x0010 says whether this transaction contains a new coordinate
+     * frame.  Between frames retain the previous contact state; a fresh frame
+     * with no Valid bits is the release report. */
+    if ((read_buf[0] & 0x08U) == 0U)
+    {
+        touch_num = ST7102_report_held_touches(buf, max_points);
+        goto exit_;
+    }
+    s_touch_diagnostics.coordinate_frames++;
+
     for (count = 0; count < max_points; count++)
     {
-        if (read_buf[0x09 + count * 7] > 0 && read_buf[0] == 0x08)
+        if ((read_buf[0x04 + count * 7] & 0x80U) != 0U &&
+            read_buf[0x09 + count * 7] > 0U)
         {
-            Last_input_x = (Last_read_buf[(7 * count) + 0x04] & 0x3F) << 8 | Last_read_buf[(7 * count) + 0x05];
-            Last_input_y = (Last_read_buf[(7 * count) + 0x06] & 0x3F) << 8 | Last_read_buf[(7 * count) + 0x07];
-            Last_Touch_Intn = Last_read_buf[(7 * count) + 0x09];
-
             input_x = (read_buf[(7 * count) + 0x04] & 0x3F) << 8 | read_buf[(7 * count) + 0x05];
             input_y = (read_buf[(7 * count) + 0x06] & 0x3F) << 8 | read_buf[(7 * count) + 0x07];
-            Touch_Intn = read_buf[(7 * count) + 0x09];
-
-            if (Last_input_x == input_x && Last_input_y == input_y && Last_Touch_Intn == Touch_Intn)
-            {
-                if (ST7102_irq_is_active())
-                {
-                    ST7102_touch_down(buf, count, input_x, input_y, 0);
-                    touch_num++;
-                }
-                else
-                {
-                    ST7102_touch_up(buf, count);
-                }
-            }
-            else
-            {
-                // rt_kprintf("X = %d, Y = %d\n", input_x, input_y);
-                ST7102_touch_down(buf, count, input_x, input_y, 0); /* Assume width=0 as not provided */
-                touch_num++;
-            }
+            input_x = ST7102_position_filter(pre_x[count], input_x);
+            input_y = ST7102_position_filter(pre_y[count], input_y);
+            s_release_candidate[count] = 0U;
+            ST7102_touch_down(buf, count, input_x, input_y, 0);
+            touch_num++;
+            s_touch_diagnostics.press_reports++;
         }
         else
         {
-            ST7102_touch_up(buf, count);
+            if (s_tp_dowm[count] != 0U &&
+                ++s_release_candidate[count] < ST7102_RELEASE_CONFIRM_FRAMES)
+            {
+                ST7102_touch_down(buf, count, pre_x[count], pre_y[count], pre_w[count]);
+                touch_num++;
+                s_touch_diagnostics.held_reports++;
+            }
+            else
+            {
+                if (s_tp_dowm[count] != 0U) s_touch_diagnostics.release_reports++;
+                ST7102_touch_up(buf, count);
+            }
         }
     }
 
@@ -291,7 +322,6 @@ static rt_size_t ST7102_read_point(struct rt_touch_device *touch, void *buf, rt_
     {
         ST7102_touch_up(buf, count);
     }
-    rt_memcpy(Last_read_buf, read_buf, 8 * ST7102_MAX_TOUCH);
     if (read_buf[0] != 0)
     {
         rt_err_t clear_result = ST7102_write_reg8(&ST7102_client, ST7102_READ_STATUS, 0);
@@ -310,6 +340,11 @@ static rt_size_t ST7102_read_point(struct rt_touch_device *touch, void *buf, rt_
     }
 exit_:
     return touch_num;
+}
+
+void ST7102_get_diagnostics(st7102_touch_diagnostics_t *diagnostics)
+{
+    if (diagnostics != RT_NULL) *diagnostics = s_touch_diagnostics;
 }
 
 static rt_err_t ST7102_control(struct rt_touch_device *touch, int cmd, void *arg)

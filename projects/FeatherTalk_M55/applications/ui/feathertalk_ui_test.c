@@ -30,6 +30,8 @@ typedef enum
     FT_TEST_QUICK_UNAVAILABLE_CLICK,
     FT_TEST_QUICK_BRIGHTNESS_CLICK,
     FT_TEST_QUICK_BRIGHTNESS_SLIDER,
+    FT_TEST_QUICK_BRIGHTNESS_MINIMUM,
+    FT_TEST_QUICK_BRIGHTNESS_RESTORE,
     FT_TEST_QUEUE_ADD,
     FT_TEST_QUEUE_OPEN,
     FT_TEST_QUEUE_OPEN_VERIFY,
@@ -62,6 +64,14 @@ typedef enum
     FT_TEST_ROOT_APPS_VERIFY,
     FT_TEST_ROOT_BACK,
     FT_TEST_ROOT_BACK_VERIFY,
+    FT_TEST_TILE_MODEL,
+    FT_TEST_TILE_LONG_PRESS,
+    FT_TEST_TILE_LONG_PRESS_VERIFY,
+    FT_TEST_TILE_MOVE,
+    FT_TEST_TILE_RESIZE,
+    FT_TEST_TILE_PROPERTIES,
+    FT_TEST_TILE_LIVE,
+    FT_TEST_TILE_RESTORE,
     FT_TEST_START_OPEN,
     FT_TEST_PAGE_CONTROLS,
     FT_TEST_START_BACK,
@@ -97,6 +107,8 @@ static uint32_t s_start_ms;
 static bool s_step_period_active;
 static uint32_t s_message_before;
 static uint32_t s_files_before;
+static uint32_t s_shade_render_before;
+static uint8_t s_settings_brightness_before;
 static uint8_t s_lifecycle_wait_steps;
 
 static void test_record(bool passed, const char *action, const char *detail)
@@ -132,6 +144,12 @@ static bool test_event(lv_obj_t *control, lv_event_code_t code,
 static bool test_click(lv_obj_t *control, const char *action, const char *detail)
 {
     return test_event(control, LV_EVENT_CLICKED, action, detail);
+}
+
+static bool test_short_click(lv_obj_t *control, const char *action,
+                             const char *detail)
+{
+    return test_event(control, LV_EVENT_SHORT_CLICKED, action, detail);
 }
 
 static bool test_alert_close(const char *action)
@@ -175,25 +193,117 @@ static void run_settings_test(void)
     size_t accent_count = ft_pages_test_accent_count();
     size_t opacity_count = ft_pages_test_opacity_count();
     size_t background_count = ft_pages_test_background_count();
+    const size_t preference_base = 9U;
     char detail[24];
-    if (s_control_index < accent_count)
+    if (s_control_index == 0U)
     {
-        uint32_t expected = ft_pages_test_accent_rgb(s_control_index);
-        lv_snprintf(detail, sizeof(detail), "accent[%lu]", (unsigned long)s_control_index);
-        (void)test_click(ft_pages_test_get_accent_button(s_control_index), "settings.click", detail);
+        test_record(ft_pages_test_settings_count() == 4U &&
+                    ft_pages_test_settings_visible_count() == 4U,
+                    "settings.categories", "4 configurable entries");
+        test_record(ft_pages_test_settings_page_id(0U) == FT_PAGE_SETTINGS_DISPLAY &&
+                    ft_pages_test_settings_page_id(1U) == FT_PAGE_SETTINGS_WIFI &&
+                    ft_pages_test_settings_page_id(2U) == FT_PAGE_SETTINGS_BLUETOOTH &&
+                    ft_pages_test_settings_page_id(3U) == FT_PAGE_SETTINGS_PERSONALIZATION,
+                    "settings.scope", "only board-backed configuration");
+    }
+    else if (s_control_index == 1U)
+    {
+        (void)test_click(ft_pages_test_get_settings_search_box(),
+                         "settings.search.focus", RT_NULL);
+        test_record(ft_pages_test_settings_keyboard_visible() &&
+                    ft_pages_test_settings_keyboard_overlay_ok(),
+                    "settings.keyboard", "fixed overlay");
+    }
+    else if (s_control_index == 2U)
+    {
+        lv_textarea_set_text(ft_pages_test_get_settings_search_box(), "wifi");
+        (void)test_event(ft_pages_test_get_settings_search_box(), LV_EVENT_VALUE_CHANGED,
+                         "settings.search.filter", "wifi");
+        test_record(ft_pages_test_settings_visible_count() == 1U,
+                    "settings.search.result", "one Wi-Fi category");
+    }
+    else if (s_control_index == 3U)
+    {
+        (void)test_click(ft_pages_test_get_settings_keyboard_hide(),
+                         "settings.keyboard.hide", RT_NULL);
+        test_record(!ft_pages_test_settings_keyboard_visible(),
+                    "settings.keyboard", "hidden");
+        lv_textarea_set_text(ft_pages_test_get_settings_search_box(), "");
+        (void)lv_obj_send_event(ft_pages_test_get_settings_search_box(),
+                                LV_EVENT_VALUE_CHANGED, RT_NULL);
+        test_record(ft_pages_test_settings_visible_count() == 4U,
+                    "settings.search.clear", "all categories restored");
+    }
+    else if (s_control_index == 4U)
+    {
+        s_settings_brightness_before = ft_ui_test_brightness();
+        (void)test_click(ft_pages_test_get_settings_result(0U),
+                         "settings.open", "Display & brightness");
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS_DISPLAY &&
+                    ft_router_depth() == 3U &&
+                    ft_pages_test_get_settings_brightness() != RT_NULL,
+                    "settings.route", "display detail");
+    }
+    else if (s_control_index == 5U)
+    {
+        uint8_t actual;
+        lv_slider_set_value(ft_pages_test_get_settings_brightness(), 30, LV_ANIM_OFF);
+        (void)test_event(ft_pages_test_get_settings_brightness(), LV_EVENT_VALUE_CHANGED,
+                         "settings.brightness", "30%");
+        actual = ft_ui_test_brightness();
+        test_record(actual == 30U,
+                    "settings.brightness.state", "real PWM readback");
+        lv_slider_set_value(ft_pages_test_get_settings_brightness(),
+                            s_settings_brightness_before, LV_ANIM_OFF);
+        (void)lv_obj_send_event(ft_pages_test_get_settings_brightness(),
+                                LV_EVENT_VALUE_CHANGED, RT_NULL);
+        (void)ft_router_back();
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS &&
+                    ft_router_depth() == 2U,
+                    "settings.back", "detail -> settings");
+    }
+    else if (s_control_index >= 6U && s_control_index <= 7U)
+    {
+        size_t category_index = s_control_index - 5U;
+        ft_page_id_t expected = ft_pages_test_settings_page_id(category_index);
+        lv_snprintf(detail, sizeof(detail), "category[%lu]",
+                    (unsigned long)category_index);
+        (void)test_click(ft_pages_test_get_settings_result(category_index),
+                         "settings.open", detail);
+        test_record(ft_router_current_page() == expected && ft_router_depth() == 3U,
+                    "settings.route", detail);
+        (void)ft_router_back();
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS &&
+                    ft_router_depth() == 2U,
+                    "settings.back", detail);
+    }
+    else if (s_control_index == 8U)
+    {
+        (void)test_click(ft_pages_test_get_settings_result(3U),
+                         "settings.open", "Personalization");
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS_PERSONALIZATION &&
+                    ft_router_depth() == 3U,
+                    "settings.route", "personalization detail");
+    }
+    else if (s_control_index < preference_base + accent_count)
+    {
+        size_t index = s_control_index - preference_base;
+        uint32_t expected = ft_pages_test_accent_rgb(index);
+        lv_snprintf(detail, sizeof(detail), "accent[%lu]", (unsigned long)index);
+        (void)test_click(ft_pages_test_get_accent_button(index), "settings.click", detail);
         test_record(preferences->accent_rgb == expected, "settings.accent", detail);
     }
-    else if (s_control_index < accent_count + opacity_count)
+    else if (s_control_index < preference_base + accent_count + opacity_count)
     {
-        size_t index = s_control_index - accent_count;
+        size_t index = s_control_index - preference_base - accent_count;
         uint8_t expected = ft_pages_test_opacity_value(index);
         lv_snprintf(detail, sizeof(detail), "opacity[%lu]", (unsigned long)index);
         (void)test_click(ft_pages_test_get_opacity_button(index), "settings.click", detail);
         test_record(preferences->tile_opa == expected, "settings.opacity", detail);
     }
-    else if (s_control_index < accent_count + opacity_count + background_count)
+    else if (s_control_index < preference_base + accent_count + opacity_count + background_count)
     {
-        size_t index = s_control_index - accent_count - opacity_count;
+        size_t index = s_control_index - preference_base - accent_count - opacity_count;
         lv_snprintf(detail, sizeof(detail), "background[%lu]", (unsigned long)index);
         (void)test_click(ft_pages_test_get_background_button(index), "settings.click", detail);
         test_record(preferences->background == (ft_background_mode_t)index,
@@ -201,6 +311,8 @@ static void run_settings_test(void)
     }
     else
     {
+        if (ft_router_current_page() == FT_PAGE_SETTINGS_PERSONALIZATION)
+            (void)ft_router_back();
         finish_page_controls();
         return;
     }
@@ -288,7 +400,7 @@ static void run_page_control_test(const ft_app_descriptor_t *app)
     else if (app->page_id == FT_PAGE_FILES) run_files_test();
     else
     {
-        test_record(current_app_is(app), "page.content", app->name);
+        test_record(current_app_is(app), "page.content", app->tile.name);
         finish_page_controls();
     }
 }
@@ -322,6 +434,7 @@ static void ui_test_timer_cb(lv_timer_t *timer)
                     layout->status_bar_height + layout->nav_bar_height < layout->screen_height,
                     "layout.current", detail);
         ft_ui_test_notification_reset();
+        s_shade_render_before = ft_ui_test_notification_render_count();
         ft_metrics_route_baseline();
         s_test_phase = FT_TEST_NOTIFY_SHOW;
         break;
@@ -335,6 +448,8 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         test_record(ft_ui_test_notification_y() == ft_layout_get()->status_bar_height,
                     "notification.position", "fully open");
         test_record(ft_ui_test_notification_mask_visible(), "notification.mask", "visible");
+        test_record(ft_ui_test_notification_render_count() == s_shade_render_before,
+                    "notification.render.cached", "empty queue was not rebuilt");
         s_test_phase = FT_TEST_NOTIFY_DRAG_CLOSE;
         break;
     case FT_TEST_NOTIFY_DRAG_CLOSE:
@@ -342,12 +457,22 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         int32_t open_y = ft_layout_get()->status_bar_height;
         int32_t closed_y = -ft_layout_get()->notification_height;
         int32_t pointer_y = open_y + ft_layout_px(80);
+        int32_t target_y = pointer_y - ft_layout_px(100);
+        uint32_t applied_before = ft_ui_test_notification_drag_applied();
+        uint32_t skipped_before = ft_ui_test_notification_drag_skipped();
+        uint32_t mask_before = ft_ui_test_notification_mask_applied();
         s_action_count++;
         ft_ui_test_notification_drag_begin(pointer_y);
-        ft_ui_test_notification_drag_move(pointer_y - ft_layout_px(100));
+        ft_ui_test_notification_drag_move(target_y);
         test_record(ft_ui_test_notification_y() < open_y &&
                     ft_ui_test_notification_y() > closed_y,
                     "notification.follow", "upward intermediate Y");
+        ft_ui_test_notification_drag_move(target_y);
+        test_record(ft_ui_test_notification_drag_applied() == applied_before + 1U &&
+                    ft_ui_test_notification_drag_skipped() == skipped_before + 1U,
+                    "notification.drag.dedup", "same pointer Y caused no redraw");
+        test_record(ft_ui_test_notification_mask_applied() <= mask_before + 1U,
+                    "notification.mask.quantized", "mask updated at most once");
         ft_ui_test_notification_drag_end();
         s_test_phase = FT_TEST_NOTIFY_DRAG_CLOSE_VERIFY;
         break;
@@ -422,6 +547,8 @@ static void ui_test_timer_cb(lv_timer_t *timer)
                     "status.wifi.signal", "off / weak / medium / strong assets");
         test_record(ft_ui_test_quick_available(FEATHERTALK_QUICK_BRIGHTNESS),
                     "quick.brightness", "real PWM available");
+        test_record(ft_ui_test_brightness() == 60U,
+                    "quick.brightness.initial", "80% duty maps to UI 60%");
         test_record(!ft_ui_test_quick_available(FEATHERTALK_QUICK_WIFI) &&
                     !ft_ui_test_quick_available(FEATHERTALK_QUICK_BLUETOOTH) &&
                     !ft_ui_test_quick_available(FEATHERTALK_QUICK_ROTATION),
@@ -447,7 +574,7 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         break;
     case FT_TEST_QUICK_BRIGHTNESS_CLICK:
         (void)test_click(ft_ui_test_get_quick_button(FEATHERTALK_QUICK_BRIGHTNESS),
-                         "quick.brightness", "100 -> 30");
+                         "quick.brightness", "current -> 30");
         test_record(ft_ui_test_brightness() == 30U, "quick.brightness.state", "30%");
         s_test_phase = FT_TEST_QUICK_BRIGHTNESS_SLIDER;
         break;
@@ -456,6 +583,21 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         (void)test_event(ft_ui_test_get_brightness_slider(), LV_EVENT_VALUE_CHANGED,
                          "quick.brightness.slider", "65");
         test_record(ft_ui_test_brightness() == 65U, "quick.brightness.state", "65%");
+        s_test_phase = FT_TEST_QUICK_BRIGHTNESS_MINIMUM;
+        break;
+    case FT_TEST_QUICK_BRIGHTNESS_MINIMUM:
+        lv_slider_set_value(ft_ui_test_get_brightness_slider(), 0, LV_ANIM_OFF);
+        (void)test_event(ft_ui_test_get_brightness_slider(), LV_EVENT_VALUE_CHANGED,
+                         "quick.brightness.slider", "0");
+        test_record(ft_ui_test_brightness() == 0U, "quick.brightness.state",
+                    "UI minimum / hardware 50% duty");
+        s_test_phase = FT_TEST_QUICK_BRIGHTNESS_RESTORE;
+        break;
+    case FT_TEST_QUICK_BRIGHTNESS_RESTORE:
+        lv_slider_set_value(ft_ui_test_get_brightness_slider(), 65, LV_ANIM_OFF);
+        (void)test_event(ft_ui_test_get_brightness_slider(), LV_EVENT_VALUE_CHANGED,
+                         "quick.brightness.slider", "restore 65");
+        test_record(ft_ui_test_brightness() == 65U, "quick.brightness.state", "restored 65%");
         s_test_phase = FT_TEST_QUEUE_ADD;
         break;
     case FT_TEST_QUEUE_ADD:
@@ -643,6 +785,122 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         break;
     case FT_TEST_ROOT_BACK_VERIFY:
         test_record(home_start_is_ready(), "tileview.state", "start");
+        s_test_phase = FT_TEST_TILE_MODEL;
+        break;
+    case FT_TEST_TILE_MODEL:
+        test_record(apps[0].tile.column_span == 2U && apps[0].tile.row_span == 1U &&
+                    apps[0].tile.opacity == 255U &&
+                    apps[0].app.app_icon == FT_ICON_SYSTEM,
+                    "tile.model.common", "System 2x1 / opacity / icon");
+        test_record(apps[FT_UI_TEST_MEDIA_INDEX].app.loop_enabled &&
+                    apps[FT_UI_TEST_MEDIA_INDEX].app.live_content != RT_NULL &&
+                    apps[FT_UI_TEST_MEDIA_INDEX].app.loop_period_ms > 0U,
+                    "tile.model.private", "Media owns looping content");
+        test_record(ft_pages_test_tile_layout_valid(), "tile.layout", "initial grid valid");
+        s_test_phase = FT_TEST_TILE_LONG_PRESS;
+        break;
+    case FT_TEST_TILE_LONG_PRESS:
+    {
+        lv_obj_t *tile = ft_pages_test_get_start_button(0U);
+        (void)test_event(tile, LV_EVENT_PRESSED,
+                         "tile.press", "wait for long-press threshold");
+        test_record(!ft_pages_test_tile_editing() && ft_router_depth() == 1U,
+                    "tile.press.guard", "press alone opens nothing");
+        (void)test_event(tile, LV_EVENT_LONG_PRESSED,
+                         "tile.long_press", "System edit mode");
+        /* Real pointers can report PRESS_LOST before the post-long-press CLICKED.
+         * Neither event is allowed to cancel edit mode or launch the app. */
+        (void)test_event(tile, LV_EVENT_PRESS_LOST,
+                         "tile.long_press.lost", "retain edit selection");
+        (void)test_event(tile, LV_EVENT_CLICKED,
+                         "tile.long_press.click", "ignore post-long click");
+        s_test_phase = FT_TEST_TILE_LONG_PRESS_VERIFY;
+        break;
+    }
+    case FT_TEST_TILE_LONG_PRESS_VERIFY:
+        test_record(ft_pages_test_tile_editing() &&
+                    ft_pages_test_tile_selected() == 0U &&
+                    ft_router_depth() == 1U,
+                    "tile.edit", "selected System / app not opened");
+        test_record(ft_pages_test_tile_handle_count() == 4U,
+                    "tile.handles", "move + three diagonal resize handles");
+        test_record(ft_pages_test_tile_handle_geometry(),
+                    "tile.handles.geometry", "foreground circles centered on four corners");
+        s_test_phase = FT_TEST_TILE_MOVE;
+        break;
+    case FT_TEST_TILE_MOVE:
+        s_action_count++;
+        test_record(ft_pages_test_tile_move(0U, 2U),
+                    "tile.move", "pending stays still; confirmed occupied pit reflows");
+        test_record(ft_pages_test_tile_layout_valid(), "tile.reflow", "only confirmed conflicts move");
+        test_record(ft_pages_test_tile_layout_settled(),
+                    "tile.move.settled", "all Tiles final; selected animation continues");
+        test_record(ft_pages_test_tile_move_nearest(1U),
+                    "tile.move.nearest", "middle / edge / occupied pits selectable");
+        test_record(ft_pages_test_tile_move_scrolled(5U),
+                    "tile.move.scrolled", "foreground Tile remains under pointer after scroll");
+        s_test_phase = FT_TEST_TILE_RESIZE;
+        break;
+    case FT_TEST_TILE_RESIZE:
+        s_action_count++;
+        test_record(ft_pages_test_tile_resize(FT_UI_TEST_MEDIA_INDEX, 2U, 2U) &&
+                    ft_pages_test_tile_columns(FT_UI_TEST_MEDIA_INDEX) == 2U &&
+                    ft_pages_test_tile_rows(FT_UI_TEST_MEDIA_INDEX) == 2U,
+                    "tile.resize", "Media snapped to 2x2");
+        test_record(ft_pages_test_tile_resize_collision(),
+                    "tile.resize.collision",
+                    "covered Tiles animate to nearest free pits; others stay");
+        test_record(ft_pages_test_tile_layout_settled(),
+                    "tile.resize.settled", "all Tiles final; selected animation continues");
+        test_record(ft_pages_test_tile_layout_valid(), "tile.resize.reflow",
+                    "all siblings remain in grid");
+        test_record(ft_pages_test_tile_resize_boundary(),
+                    "tile.resize.boundary", "clamped in current row / desktop bounds");
+        test_record(ft_pages_test_tile_resize_anchors(FT_UI_TEST_MEDIA_INDEX),
+                    "tile.resize.anchors", "TR/BL/BR keep opposite edges fixed");
+        s_test_phase = FT_TEST_TILE_PROPERTIES;
+        break;
+    case FT_TEST_TILE_PROPERTIES:
+        s_action_count++;
+        test_record(ft_pages_test_tile_set_common(1U, "Settings+", 192U,
+                                                   FT_ICON_SETTINGS) &&
+                    strcmp(ft_pages_test_tile_name(1U), "Settings+") == 0 &&
+                    ft_pages_test_tile_opacity(1U) == 192U &&
+                    ft_pages_test_tile_pattern(1U) == FT_ICON_SETTINGS,
+                    "tile.properties", "name / opacity / pattern mutable");
+        s_test_phase = FT_TEST_TILE_LIVE;
+        break;
+    case FT_TEST_TILE_LIVE:
+    {
+        char before[48];
+        const char *text = ft_pages_test_tile_live_text(FT_UI_TEST_MEDIA_INDEX);
+        before[0] = '\0';
+        if (text != RT_NULL)
+        {
+            rt_strncpy(before, text, sizeof(before) - 1U);
+            before[sizeof(before) - 1U] = '\0';
+        }
+        s_action_count++;
+        test_record(ft_pages_test_tile_live_enabled(FT_UI_TEST_MEDIA_INDEX) &&
+                    ft_pages_test_tile_live_advance(FT_UI_TEST_MEDIA_INDEX),
+                    "tile.live", "application advances its own frame");
+        text = ft_pages_test_tile_live_text(FT_UI_TEST_MEDIA_INDEX);
+        test_record(text != RT_NULL && strcmp(before, text) != 0,
+                    "tile.live.content", "Media frame changed");
+        s_test_phase = FT_TEST_TILE_RESTORE;
+        break;
+    }
+    case FT_TEST_TILE_RESTORE:
+        s_action_count++;
+        (void)ft_pages_test_tile_set_common(1U, "Settings", 255U, FT_ICON_COUNT);
+        (void)ft_pages_test_tile_resize(FT_UI_TEST_MEDIA_INDEX, 1U, 1U);
+        (void)ft_pages_test_tile_restore_layout();
+        test_record(!ft_pages_test_tile_editing() &&
+                    ft_pages_test_tile_order(0U) == 0U &&
+                    ft_pages_test_tile_columns(FT_UI_TEST_MEDIA_INDEX) == 1U &&
+                    ft_pages_test_tile_rows(FT_UI_TEST_MEDIA_INDEX) == 1U &&
+                    ft_pages_test_tile_layout_valid(),
+                    "tile.restore", "defaults restored / edit closed");
         s_app_index = 0U;
         s_test_phase = FT_TEST_START_OPEN;
         break;
@@ -653,8 +911,9 @@ static void ui_test_timer_cb(lv_timer_t *timer)
             s_test_phase = FT_TEST_LIFECYCLE_RELEASE_VERIFY;
             break;
         }
-        (void)test_click(ft_pages_test_get_start_button(s_app_index), "start.click", app->name);
-        test_record(current_app_is(app), "router.push", app->name);
+        (void)test_short_click(ft_pages_test_get_start_button(s_app_index),
+                               "start.short_click", app->tile.name);
+        test_record(current_app_is(app), "router.push", app->tile.name);
         s_control_index = 0U;
         s_test_phase = FT_TEST_PAGE_CONTROLS;
         break;
@@ -664,7 +923,8 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         break;
     case FT_TEST_START_BACK:
         (void)test_click(ft_ui_test_get_nav_button(FT_NAV_BACK), "nav.back", "from page");
-        test_record(home_start_is_ready(), "router.pop", app != RT_NULL ? app->name : "unknown");
+        test_record(home_start_is_ready(), "router.pop",
+                    app != RT_NULL ? app->tile.name : "unknown");
         s_app_index++;
         s_test_phase = FT_TEST_START_OPEN;
         break;
@@ -722,16 +982,16 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         s_test_phase = FT_TEST_LIST_OPEN;
         break;
     case FT_TEST_LIST_OPEN:
-        (void)test_click(ft_pages_test_get_apps_button(s_app_index), "apps.click", app->name);
-        test_record(current_app_is(app), "router.push", app->name);
+        (void)test_click(ft_pages_test_get_apps_button(s_app_index), "apps.click", app->tile.name);
+        test_record(current_app_is(app), "router.push", app->tile.name);
         s_test_phase = FT_TEST_LIST_HOME;
         break;
     case FT_TEST_LIST_HOME:
-        (void)test_click(ft_ui_test_get_nav_button(FT_NAV_HOME), "nav.home", app->name);
+        (void)test_click(ft_ui_test_get_nav_button(FT_NAV_HOME), "nav.home", app->tile.name);
         s_test_phase = FT_TEST_LIST_HOME_VERIFY;
         break;
     case FT_TEST_LIST_HOME_VERIFY:
-        test_record(home_start_is_ready(), "router.home", app->name);
+        test_record(home_start_is_ready(), "router.home", app->tile.name);
         s_app_index++;
         s_test_phase = FT_TEST_LIST_SHOW;
         break;
@@ -768,6 +1028,10 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         ft_metrics_route_check();
         ft_metrics_get(&metrics);
         test_record(metrics.last_route_object_delta == 0, "route.objects", "no object leak");
+        test_record(metrics.refresh_count >= metrics.render_count &&
+                    metrics.flush_count >= metrics.render_count &&
+                    metrics.flushed_pixels > 0U,
+                    "metrics.present", "render/flush/pixel counters active");
         rt_kprintf("[UI-TEST] route heap delta=%ld bytes (allocator high-water is reported, not asserted)\n",
                    (long)metrics.last_route_heap_delta);
         s_test_phase = FT_TEST_FINISH;
