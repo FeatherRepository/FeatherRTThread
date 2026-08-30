@@ -885,9 +885,11 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         s_test_phase = FT_TEST_ROOT_APPS_SHOW;
         break;
     case FT_TEST_ROOT_APPS_SHOW:
+        test_record(ft_pages_test_home_swipe_ready(), "tileview.gesture",
+                    "horizontal touch scrolling enabled");
         s_action_count++;
         ft_pages_show_all_apps();
-        test_record(true, "tileview.swipe", "all apps");
+        test_record(true, "tileview.api", "show all apps");
         s_test_phase = FT_TEST_ROOT_APPS_VERIFY;
         break;
     case FT_TEST_ROOT_APPS_VERIFY:

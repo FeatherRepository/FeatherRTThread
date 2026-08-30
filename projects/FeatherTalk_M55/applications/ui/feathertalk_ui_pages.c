@@ -465,6 +465,7 @@ static lv_obj_t *create_start_tile(lv_obj_t *tileview)
     lv_obj_set_style_pad_row(tiles, layout->tile_gap, LV_PART_MAIN);
     lv_obj_set_flex_flow(tiles, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_add_flag(tiles, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(tiles, LV_OBJ_FLAG_SCROLL_CHAIN_HOR);
     lv_obj_set_scroll_dir(tiles, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(tiles, LV_SCROLLBAR_MODE_AUTO);
     (void)ft_apps_get(&app_count);
@@ -498,6 +499,7 @@ static lv_obj_t *create_apps_tile(lv_obj_t *tileview)
     lv_obj_set_style_pad_row(list, ft_layout_px(4), LV_PART_MAIN);
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLL_CHAIN_HOR);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
     (void)ft_apps_get(&app_count);
     for (i = 0U; i < app_count; i++)
@@ -528,6 +530,9 @@ static lv_obj_t *create_home_page(lv_obj_t *parent)
 {
     track_object(&s_home_tileview, lv_tileview_create(parent));
     ft_ui_style_page(s_home_tileview);
+    /* ft_ui_style_page() deliberately disables scrolling for ordinary pages.
+     * A TileView is itself the horizontal pager, so restore that capability. */
+    lv_obj_add_flag(s_home_tileview, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(s_home_tileview, LV_SCROLLBAR_MODE_OFF);
     (void)create_start_tile(s_home_tileview);
     (void)create_apps_tile(s_home_tileview);
@@ -2279,6 +2284,15 @@ bool ft_pages_test_start_is_active(void)
 { return s_home_tileview != RT_NULL && lv_obj_is_valid(s_home_tileview) && lv_tileview_get_tile_active(s_home_tileview) == s_start_tile; }
 bool ft_pages_test_apps_is_active(void)
 { return s_home_tileview != RT_NULL && lv_obj_is_valid(s_home_tileview) && lv_tileview_get_tile_active(s_home_tileview) == s_apps_tile; }
+bool ft_pages_test_home_swipe_ready(void)
+{
+    lv_dir_t direction;
+    if (s_home_tileview == RT_NULL || !lv_obj_is_valid(s_home_tileview) ||
+        !lv_obj_has_flag(s_home_tileview, LV_OBJ_FLAG_SCROLLABLE))
+        return false;
+    direction = lv_obj_get_scroll_dir(s_home_tileview);
+    return (direction & (LV_DIR_LEFT | LV_DIR_RIGHT)) != 0;
+}
 size_t ft_pages_test_accent_count(void) { return FT_ACCENT_COUNT; }
 uint32_t ft_pages_test_accent_rgb(size_t i) { return i < FT_ACCENT_COUNT ? s_accent_rgb[i] : 0U; }
 #endif

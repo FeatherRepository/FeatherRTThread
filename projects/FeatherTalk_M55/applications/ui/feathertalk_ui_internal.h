@@ -264,6 +264,7 @@ const char *ft_pages_test_get_media_label(void);
 bool ft_pages_test_media_is_playing(void);
 bool ft_pages_test_start_is_active(void);
 bool ft_pages_test_apps_is_active(void);
+bool ft_pages_test_home_swipe_ready(void);
 size_t ft_pages_test_accent_count(void);
 uint32_t ft_pages_test_accent_rgb(size_t color_index);
 lv_obj_t *ft_pages_test_get_opacity_button(size_t index);
