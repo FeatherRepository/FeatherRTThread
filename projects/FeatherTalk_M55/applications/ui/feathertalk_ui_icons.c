@@ -18,7 +18,7 @@ static const ft_icon_sources_t s_icon_sources[FT_ICON_COUNT] =
     FT_ICON_SOURCES(system),
     FT_ICON_SOURCES(settings),
     FT_ICON_SOURCES(media),
-    FT_ICON_SOURCES(messages),
+    FT_ICON_SOURCES(gallery),
     FT_ICON_SOURCES(files),
     FT_ICON_SOURCES(about),
     FT_ICON_SOURCES(back),
@@ -55,6 +55,7 @@ static const ft_icon_sources_t s_icon_sources[FT_ICON_COUNT] =
     FT_ICON_SOURCES(tile_pattern),
     FT_ICON_SOURCES(flash_device),
     FT_ICON_SOURCES(sd_device),
+    FT_ICON_SOURCES(wallpaper),
 };
 
 const lv_image_dsc_t *ft_icon_source(ft_icon_id_t icon_id, uint16_t size)

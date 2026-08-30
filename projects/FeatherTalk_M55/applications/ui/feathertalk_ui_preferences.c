@@ -1,11 +1,80 @@
 #include <rtthread.h>
+#include <string.h>
+#include "feathertalk_storage.h"
 #include "feathertalk_ui_internal.h"
+#include "feathertalk_ui_preferences_store.h"
 
 #define FT_DEFAULT_ACCENT_RGB 0x0078D7UL
 #define FT_DEFAULT_TILE_OPA   255U
 #define FT_DEFAULT_TIMEZONE_MINUTES 480
 
 static ft_ui_preferences_t s_preferences;
+static ft_ui_preferences_t s_test_snapshot;
+static bool s_test_active;
+static bool s_wallpaper_media_known;
+static bool s_wallpaper_media_ready;
+
+static void preferences_defaults(ft_ui_preferences_t *preferences)
+{
+    memset(preferences, 0, sizeof(*preferences));
+    preferences->accent_rgb = FT_DEFAULT_ACCENT_RGB;
+    preferences->tile_opa = FT_DEFAULT_TILE_OPA;
+    preferences->background = FT_BACKGROUND_BLACK;
+    preferences->use_24_hour = true;
+    preferences->timezone_offset_minutes = FT_DEFAULT_TIMEZONE_MINUTES;
+    preferences->language = FT_LANGUAGE_ZH_CN;
+    preferences->revision = 1U;
+}
+
+static void preferences_to_payload(const ft_ui_preferences_t *preferences,
+                                   ft_preferences_store_payload_t *payload)
+{
+    memset(payload, 0, sizeof(*payload));
+    payload->accent_rgb = preferences->accent_rgb;
+    payload->tile_opa = preferences->tile_opa;
+    payload->background = (uint8_t)preferences->background;
+    payload->use_24_hour = preferences->use_24_hour;
+    payload->timezone_offset_minutes = preferences->timezone_offset_minutes;
+    payload->language = (uint8_t)preferences->language;
+    rt_strncpy(payload->wallpaper_path, preferences->wallpaper_path,
+               sizeof(payload->wallpaper_path) - 1U);
+}
+
+static void preferences_from_payload(const ft_preferences_store_payload_t *payload,
+                                     ft_ui_preferences_t *preferences)
+{
+    memset(preferences, 0, sizeof(*preferences));
+    preferences->accent_rgb = payload->accent_rgb;
+    preferences->tile_opa = payload->tile_opa;
+    preferences->background = (ft_background_mode_t)payload->background;
+    preferences->use_24_hour = payload->use_24_hour;
+    preferences->timezone_offset_minutes = payload->timezone_offset_minutes;
+    preferences->language = (ft_language_t)payload->language;
+    rt_strncpy(preferences->wallpaper_path, payload->wallpaper_path,
+               sizeof(preferences->wallpaper_path) - 1U);
+    preferences->revision = 1U;
+}
+
+static void persist_preferences(void)
+{
+    ft_preferences_store_payload_t payload;
+    preferences_to_payload(&s_preferences, &payload);
+    if (ft_preferences_store_update(&payload) != RT_EOK)
+        rt_kprintf("[FeatherTalk UI] preference update was not queued\n");
+}
+
+static bool wallpaper_media_ready(const char *path)
+{
+    ft_storage_device_info_t info;
+    int result;
+    if (path == RT_NULL || path[0] == '\0') return false;
+    result = strncmp(path, "/flash/", 7U) == 0 ?
+             ft_storage_get_flash_info(&info) :
+             strncmp(path, "/sdcard/", 8U) == 0 ?
+             ft_storage_get_device_info(&info) : -RT_EINVAL;
+    return result == RT_EOK && info.present && info.mounted &&
+           !info.usb_exported && !info.busy;
+}
 
 static uint32_t background_rgb(void)
 {
@@ -32,20 +101,38 @@ static uint32_t background_rgb(void)
 
 static void apply_preferences(void)
 {
+    bool custom = s_preferences.background == FT_BACKGROUND_CUSTOM &&
+                  s_preferences.wallpaper_path[0] != '\0';
     ft_ui_set_accent(s_preferences.accent_rgb);
     ft_ui_set_page_background(background_rgb());
+    s_wallpaper_media_ready = custom &&
+        wallpaper_media_ready(s_preferences.wallpaper_path);
+    s_wallpaper_media_known = true;
+    ft_ui_set_page_wallpaper(s_wallpaper_media_ready ?
+                             s_preferences.wallpaper_path : RT_NULL);
     ft_pages_apply_preferences();
 }
 
 void ft_preferences_init(void)
 {
-    s_preferences.accent_rgb = FT_DEFAULT_ACCENT_RGB;
-    s_preferences.tile_opa = FT_DEFAULT_TILE_OPA;
-    s_preferences.background = FT_BACKGROUND_BLACK;
-    s_preferences.use_24_hour = true;
-    s_preferences.timezone_offset_minutes = FT_DEFAULT_TIMEZONE_MINUTES;
-    s_preferences.language = FT_LANGUAGE_ZH_CN;
-    s_preferences.revision = 1U;
+    ft_ui_preferences_t defaults;
+    ft_preferences_store_payload_t default_payload;
+    ft_preferences_store_payload_t loaded_payload;
+    int result;
+
+    preferences_defaults(&defaults);
+    preferences_to_payload(&defaults, &default_payload);
+    loaded_payload = default_payload;
+    result = ft_preferences_store_init(&default_payload, &loaded_payload);
+    if (result == RT_EOK)
+    {
+        preferences_from_payload(&loaded_payload, &s_preferences);
+    }
+    else
+    {
+        s_preferences = defaults;
+        rt_kprintf("[FeatherTalk UI] preference store unavailable: %d\n", result);
+    }
     apply_preferences();
 }
 
@@ -56,16 +143,23 @@ const ft_ui_preferences_t *ft_preferences_get(void)
 
 void ft_preferences_set_accent(uint32_t rgb)
 {
-    s_preferences.accent_rgb = rgb & 0xFFFFFFUL;
+    rgb &= 0xFFFFFFUL;
+    if (s_preferences.accent_rgb == rgb) return;
+    s_preferences.accent_rgb = rgb;
     s_preferences.revision++;
     apply_preferences();
+    persist_preferences();
 }
 
 void ft_preferences_set_tile_opa(uint8_t opa)
 {
+    if (opa < FT_PREFERENCES_STORE_TILE_OPA_MIN)
+        opa = FT_PREFERENCES_STORE_TILE_OPA_MIN;
+    if (s_preferences.tile_opa == opa) return;
     s_preferences.tile_opa = opa;
     s_preferences.revision++;
     ft_pages_apply_preferences();
+    persist_preferences();
 }
 
 void ft_preferences_set_background(ft_background_mode_t background)
@@ -74,9 +168,11 @@ void ft_preferences_set_background(ft_background_mode_t background)
     {
         return;
     }
+    if (s_preferences.background == background) return;
     s_preferences.background = background;
     s_preferences.revision++;
     apply_preferences();
+    persist_preferences();
 }
 
 void ft_preferences_set_24_hour(bool enabled)
@@ -86,6 +182,7 @@ void ft_preferences_set_24_hour(bool enabled)
     s_preferences.revision++;
     ft_pages_apply_preferences();
     ft_ui_preferences_changed();
+    persist_preferences();
 }
 
 void ft_preferences_set_timezone(int16_t offset_minutes)
@@ -96,6 +193,7 @@ void ft_preferences_set_timezone(int16_t offset_minutes)
     s_preferences.revision++;
     ft_pages_apply_preferences();
     ft_ui_preferences_changed();
+    persist_preferences();
 }
 
 void ft_preferences_set_language(ft_language_t language)
@@ -105,6 +203,54 @@ void ft_preferences_set_language(ft_language_t language)
     s_preferences.revision++;
     ft_pages_apply_preferences();
     ft_ui_preferences_changed();
+    persist_preferences();
+}
+
+void ft_preferences_set_wallpaper_file(const char *path)
+{
+    ft_ui_preferences_t candidate = s_preferences;
+    ft_preferences_store_payload_t payload;
+
+    if (path == RT_NULL || path[0] == '\0' ||
+        (strncmp(path, "/flash/", 7U) != 0 &&
+         strncmp(path, "/sdcard/", 8U) != 0))
+        return;
+    rt_strncpy(candidate.wallpaper_path, path,
+               sizeof(candidate.wallpaper_path) - 1U);
+    candidate.wallpaper_path[sizeof(candidate.wallpaper_path) - 1U] = '\0';
+    candidate.background = FT_BACKGROUND_CUSTOM;
+    preferences_to_payload(&candidate, &payload);
+    if (!ft_preferences_store_payload_valid(&payload)) return;
+    if (s_preferences.background == FT_BACKGROUND_CUSTOM &&
+        strcmp(s_preferences.wallpaper_path, candidate.wallpaper_path) == 0)
+        return;
+    s_preferences = candidate;
+    s_preferences.revision++;
+    apply_preferences();
+    persist_preferences();
+}
+
+bool ft_preferences_wallpaper_available(void)
+{
+    return s_preferences.wallpaper_path[0] != '\0';
+}
+
+void ft_preferences_refresh_wallpaper(void)
+{
+    bool custom = s_preferences.background == FT_BACKGROUND_CUSTOM &&
+                  s_preferences.wallpaper_path[0] != '\0';
+    bool ready = custom && wallpaper_media_ready(s_preferences.wallpaper_path);
+    if (!s_wallpaper_media_known || ready != s_wallpaper_media_ready)
+    {
+        s_wallpaper_media_known = true;
+        s_wallpaper_media_ready = ready;
+        ft_ui_set_page_wallpaper(ready ? s_preferences.wallpaper_path : RT_NULL);
+    }
+}
+
+int ft_preferences_flush(void)
+{
+    return ft_preferences_store_flush();
 }
 
 const char *ft_preferences_text(const char *zh_cn, const char *en_us)
@@ -145,5 +291,31 @@ void ft_preferences_format_clock(uint32_t seconds, bool utc_time,
 
 void ft_preferences_reset(void)
 {
-    ft_preferences_init();
+    uint32_t revision = s_preferences.revision + 1U;
+    preferences_defaults(&s_preferences);
+    s_preferences.revision = revision;
+    apply_preferences();
+    ft_ui_preferences_changed();
+    persist_preferences();
+}
+
+void ft_preferences_test_begin(void)
+{
+    if (s_test_active) return;
+    (void)ft_preferences_store_flush();
+    s_test_snapshot = s_preferences;
+    if (ft_preferences_store_test_suspend(true) == RT_EOK)
+        s_test_active = true;
+}
+
+void ft_preferences_test_end(void)
+{
+    if (!s_test_active) return;
+    s_preferences = s_test_snapshot;
+    s_preferences.revision++;
+    apply_preferences();
+    ft_ui_preferences_changed();
+    (void)ft_preferences_store_test_suspend(false);
+    persist_preferences();
+    s_test_active = false;
 }

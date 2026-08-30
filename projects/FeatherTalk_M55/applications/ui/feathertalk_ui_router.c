@@ -13,6 +13,17 @@ static lv_obj_t *s_route_host;
 static ft_route_entry_t s_route_stack[FT_ROUTER_MAX_DEPTH];
 static size_t s_route_depth;
 
+/* Routed pages become transparent while a wallpaper is active.  Object-local
+ * invalidation is then insufficient on a route transition: pixels that are
+ * not covered by a control can retain the previous page.  Recompose the
+ * complete content viewport once per push/pop; ordinary frame updates remain
+ * partial and keep their normal performance. */
+static void router_invalidate_viewport(void)
+{
+    if (s_route_host != RT_NULL && lv_obj_is_valid(s_route_host))
+        lv_obj_invalidate(s_route_host);
+}
+
 int ft_router_init(lv_obj_t *host)
 {
     if (host == RT_NULL)
@@ -68,6 +79,8 @@ int ft_router_push(ft_page_id_t page_id)
         definition->on_enter();
     }
 
+    router_invalidate_viewport();
+
     return RT_EOK;
 }
 
@@ -97,6 +110,7 @@ bool ft_router_back(void)
     top->view = RT_NULL;
     s_route_depth--;
     lv_obj_remove_flag(s_route_stack[s_route_depth - 1U].view, LV_OBJ_FLAG_HIDDEN);
+    router_invalidate_viewport();
     return true;
 }
 
@@ -134,6 +148,7 @@ int ft_router_refresh_all(void)
         result = ft_router_push(page_ids[i]);
         if (result != RT_EOK) break;
     }
+    router_invalidate_viewport();
     return result;
 }
 

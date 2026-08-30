@@ -9,6 +9,12 @@ int feathertalk_ui_init(void);
 void feathertalk_ui_alert(const char *title, const char *message);
 void feathertalk_ui_notify(const char *source, const char *title, const char *message);
 
+/* Synchronous media ownership barrier used around filesystem export.  Calls
+ * from non-LVGL threads are marshalled onto the LVGL thread and wait until all
+ * filesystem-backed image sources have been detached/restored. */
+int feathertalk_ui_media_freeze(void);
+int feathertalk_ui_media_thaw(void);
+
 #ifdef __cplusplus
 }
 #endif

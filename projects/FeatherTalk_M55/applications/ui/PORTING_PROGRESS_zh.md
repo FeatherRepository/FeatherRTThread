@@ -14,7 +14,7 @@
 | 资源策略 | 已完成、已板测 | SVG 源、A8 三档生成、统一图标 API、RGB565/ARGB8888 规则和许可证清单 |
 | 响应式布局 | 已完成、已板测 | 五种纵横屏配置计算自测、真实 480×800 控件几何检查和完整交互测试 |
 | 系统状态 IPC | 已完成、已板测 | ABI 4 携带系统状态、快捷能力/启用/连接/信号强度和命令结果；M55 状态栏、System 页、Live Tile 和快捷面板实时显示 |
-| 业务页面 | 已完成、已板测 | Settings、Media、Messages、Files、System/Device 和 About 均有真实交互或状态 |
+| 业务页面 | 已完成、持续板测 | Settings、Media、Gallery、Files、System/Device 和 About 均有真实交互或状态；无 SMS 硬件的 Messages 已下架 |
 | 动画与性能 | 已完成、已板测 | Live Tile、跟手面板/遮罩/速度吸附、Search Spinner、FPS、峰值内存和切页泄漏 |
 
 ## 本轮实现对应原移植顺序
@@ -25,7 +25,7 @@
 4. 偏好后端按计划使用内存桩，保存强调色、Tile 透明度、背景模式和 revision；生产持久化后端仍可在不改 UI API 的情况下替换。
 5. 资源格式与位置规则见 `UI_ASSET_POLICY_zh.md`，转换工具为 `tools/freather/ui-asset-convert.py`。
 6. M33 每个心跳发送 16 字节系统状态帧和 16 字节快捷状态帧。RTC 有效时发送 Unix 时间；当前板级电源、电池、网络、蓝牙和旋转驱动未启用，字段使用 `unknown/unavailable` 和显式能力位，未填充虚构数据。
-7. System 显示双核和性能状态；Settings 修改真实偏好；Media 支持上一首、播放/暂停、下一首和音量；Messages 产生通知；Files 刷新真实的存储可用性；About 显示产品/固件/ABI 版本。
+7. System 显示双核和性能状态；Settings 修改真实偏好；Media 支持上一首、播放/暂停、下一首和音量；Gallery 浏览 Flash/SD 图片并设置壁纸；Files 刷新真实的存储可用性；About 显示产品/固件/ABI 版本。
 8. System Live Tile 每秒更新；通知中心使用滑动动画；Search 使用 Spinner 动画；System/MSH 暴露 FPS、刷新次数、当前/峰值堆和 UI 对象峰值。
 
 ## P0 已完成：系统通知与快捷面板
@@ -339,7 +339,7 @@
 ## 已知边界
 
 - 电池、电源采样、Wi-Fi/网络、蓝牙和屏幕旋转的板级驱动尚未在产品配置中启用；SD 卡已经通过 SDHC1/Elm-FatFS 接入 `/sdcard`，末尾固定 2 MiB 外部 Flash 作为 `/flash` FAT 用户盘，USB Device MSC 使用 Flash/SD 双 LUN。UI 与 ABI 4 IPC 已具备无线能力、启用、连接和 Wi-Fi 信号强度接入点，并明确显示不可用。显示亮度已经接入 M55 `pwm18`。
-- 当前偏好仅在本次启动期间保存，这是原计划要求的“内存桩”；持久化需要后续选定 FlashDB/EasyFlash 或产品配置服务。
+- 强调色、Tile 透明度、背景/壁纸、时间制式、固定时区和语言已通过 `/flash/.feathertalk` A/B 配置掉电保存；USB 导出、本机格式化和自动测试均具备冻结/恢复协议。
 - 自动测试宏当前为板级验收而启用；发布固件应关闭 `CONFIG_FEATHERTALK_UI_TEST_MODE`。
 
 后续每次板测继续在本文末尾追加构建、镜像、自动测试和 IPC 结果。
@@ -410,3 +410,41 @@
 - 新增设备数、所选设备、操作目标、容量轨道和容量比例的测试接口，并把新增对象全部纳入路由销毁检查。板端专项测试覆盖 Flash/SD 独立选择、容量图形、浏览与格式化目标、Flash/SD 两级确认取消以及 Files 根目录的两个设备入口。
 - 最终 M55 构建为 text=3,382,340、data=72,600、bss=4,245,588 字节；HEX 9,717,996 字节，SHA-256 `85F03F7B3F82EFDA7F5284712882DDA63A5F89BB45BF1CBCDCA1311430884EAA`。Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 写入 M55 3,457,024 字节并校验 3,454,940 字节，随后写入签名 M33 167,936 字节并校验 160,536 字节；M55 擦除范围止于 `0x608FFFFF`，未触碰 `0x60E00000` 起始的固定 2 MiB 用户卷。
 - 全量板端自动化为 `281 PASS / 0 FAIL / 129 actions`，耗时 58,150 ms；最终 route-depth=1、路由对象增量为 0、IPC err=0。`/flash` 与 `/sdcard` 均可从 MSH 正常列目录。完整日志：`tools/freather/logs/storage-ui-device-view-final-board.log`；最终状态与双卷目录复核：`tools/freather/logs/storage-ui-device-view-final-status.log`。
+
+## 2026-08-30 Gallery、壁纸与每机配置持久化
+
+- 当前硬件没有移动网络、SIM 或 SMS 接收链路，因此删除 Messages 应用和收件箱测试逻辑；保留通知中心，因为系统/应用通知不依赖短信。原稳定应用枚举槽改为 Gallery，Start 与 All Apps 仍保持 Settings、Media、Gallery、Files 四个应用。
+- Gallery 使用 `/flash/Pictures`、`/sdcard/Pictures` 两个专用照片集合，介质挂载且可写时自动建目录，不浏览卷根目录、不复用 Files 应用的通用目录模型。每个集合最多列出 64 张已通过实际解码头、文件大小和像素上限检查的 JPG/JPEG/PNG/BMP；支持单图预览、上一张/下一张/关闭/设为壁纸，介质拔出或被 USB 占用时清除图片源并退回集合页。
+- FeatherTalk_M55 使用工程私有 `feathertalk_lv_conf.h` 启用 LVGL POSIX FS、TJPGD、LODEPNG 与 BMP，SDK 公共 LVGL 配置保持不变。Gallery 与 Wallpaper 新增两个独立 SVG/A8 图标；当前总计 41 个 ID、三档尺寸、160,064 字节 A8 数据，应用/设置/摘要卡/壁纸入口的语义图标唯一性继续由自动测试检查。
+- Personalization 增加“壁纸与背景”，提供纯黑、深色、强调色、相册图片四种模式。Gallery 选图后保存规范化原生路径并把壁纸放在内容视口底层；路由页透明显示壁纸，状态栏、导航栏和通知层仍保持不透明。SD 图片缺失时回退纯色但保留路径；Flash 图片与配置位于固定 2 MiB 用户卷。
+- 新增 `tools/freather/wallpapers` 精选部署包：三张 480x800 JPEG 不编入固件，复制到 `/flash/Pictures` 后由 Gallery 发现并可设为持久壁纸；素材来源、许可和再生成方法记录在[目录 README](../../../../tools/freather/wallpapers/README.md)。
+- `feathertalk_ui_preferences_store.*` 实现 `/flash/.feathertalk/ui-config-a.bin`、`ui-config-b.bin` 双槽。磁盘结构显式小端序列化，使用 schema、generation、CRC32、非活动槽写入、`fsync`、底层 Flash sync 和写后回读；2 秒防抖减少 64 KiB NOR 擦写。`feather_ui_status` 报告槽、generation、dirty/frozen/test 和写入错误。
+- USB MSC 导出和本机 Flash 格式化前先同步、冻结配置线程；重新挂载后重新验证双槽，如果电脑格式化掉配置则以内存中的当前每机配置自动重建。UI 自动化先快照、同步并暂停落盘，结束前恢复原配置，不再把测试默认值写进用户设备。
+- 自动测试已替换 Messages 场景为 Gallery 双来源、刷新、受控预览与可选壁纸场景，并增加偏好存储激活/测试暂停/最终快照恢复检查。最终 clean 整包构建通过：text=3,475,316、data=72,628、bss=4,265,908 字节，HEX=9,979,607 字节，SHA-256 `451F58DC3F460C875D037183FE5E949C08C1A2DE13F397F35DCF3E1C10AF4471`；新增产品模块无编译告警。
+- Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 写入 M55 3,551,232 字节并校验 3,547,944 字节；擦除范围止于 `0x608FFFFF`，未触碰 `0x60E00000` 起始的固定 2 MiB 用户卷。三张 480x800 JPEG 通过双 LUN USB MSC 写入 `/flash/Pictures`，共 62,063 字节，Windows 写缓存刷新后板端重新挂载并逐项列出成功。
+- 含真实图片的板端全量自动化为 `291 PASS / 0 FAIL / 134 actions`，耗时 75,823 ms；实际通过首图打开、decoder preview、设为壁纸、自定义背景生效、偏好快照恢复和路由对象无泄漏。结束后 `test=0`、`frozen=0`、USB MSC 已停止，设备原有纯色背景偏好保持不变。完整日志：`tools/freather/logs/gallery-wallpaper-final-board.log`；最终状态与目录复核：`tools/freather/logs/gallery-wallpaper-final-status.log`。
+
+## 2026-08-30 壁纸缓存、Shell 接缝与透明页面残影修复
+
+- 原 Gallery 预览和桌面壁纸把文件路径直接交给 LVGL 图片控件，显示期间会反复从 FAT 介质流式解码 JPEG；全屏壁纸参与局部失效区重绘时会重复解码，既造成明显降帧，也增加 USB 介质冻结、拔卡与页面销毁期间的资源竞争。现在图片只在选择或挂载恢复时解码一次，并转换为常驻 RGB565 `lv_draw_buf_t`；Gallery 预览和壁纸分别持有缓存，切图、卸载或 USB 导出前先解除图片源，等待绘制结束后再释放。
+- 第一轮直接读取 `0x263A5000` 的 819,200 字节常驻显存，确认状态栏下和导航栏上各有 10 px 旧像素带。根因不是 LCD 传输，而是 Screen 继承主题的 `pad_row=10`；壁纸模式又把 Screen 注册成透明页面背景，两个 Flex 间距暴露了上一帧。Screen 现在是始终不透明的 Shell 清屏层，行/列间距显式为 0，壁纸严格限制在 `480x700` 内容视口；自动测试 `shell.seams` 检查状态栏、内容区、导航栏以及壁纸四个坐标边界逐像素连续。
+- 第二次显存读取发现接缝已闭合，但 Gallery 当前页没有控件覆盖的上半区仍保留 Home 标题和 Tile。这是另一条独立残影路径：壁纸激活后路由页为透明，push/pop 只让新旧控件自己的矩形失效，未覆盖区域没有重新合成壁纸。路由器现在仅在 push、pop、Home/全栈刷新完成时使整个内容视口失效一次；普通动画、状态刷新和触摸热路径仍保持局部失效，不引入持续全屏刷新。
+- 最终重新构建和烧录后，板端全量自动化为 `294 PASS / 0 FAIL / 135 actions`，耗时 67,918 ms；覆盖 Gallery RGB565 非黑预览/壁纸、Shell 接缝、全部应用 push/pop/Home、深度 8 边界、对象释放和配置恢复。最终静止状态为 `present-fps=1、refresh-hz=54`，说明没有壁纸持续重绘；路由对象增量为 0，当前/总 heap 为 253,288 / 1,374,360 字节。
+- 修复后再次直接抓取 `0x263A5000`，画面中内容从 `y=36` 紧接状态栏并持续到 `y=735`，导航栏从 `y=736` 开始；上下均无空隙、Tile/Chevron 旧块或上一页残影。抓帧：`tmp/wallpaper-route-final.bin` 与 `tmp/wallpaper-route-final.png`。最终 M55 构建为 text=3,479,124、data=72,628、bss=4,265,948 字节；HEX=9,990,317 字节，SHA-256 `98278B054B7191D08DBEAC04074BC12D1930F5880F6DBE134C3D6594E6ECB954`。回归日志：`tools/freather/logs/wallpaper-route-final-board.log`；最终状态：`tools/freather/logs/wallpaper-route-final-status.log`。
+
+## 2026-08-30 Files 长按操作、目录管理与卷根格式化入口
+
+- Files 行内不常驻破坏性按钮。长按普通文件或文件夹后弹出统一操作面板：打开、剪切、复制、重命名、粘贴、删除和取消；目录还提供“新建文件夹”。长按当前目录空白区只显示适用于当前目录的新建文件夹、粘贴和取消。文件打开沿用文本/二进制预览，图片交给 Gallery，目录则逐级进入。
+- 剪切、复制和删除对普通目录递归工作；粘贴支持同卷移动、跨卷复制后删除、同名自动追加 `-copy`、禁止把目录粘贴进自身。重命名和新建目录通过受控存储接口执行，名称校验拒绝空名称、`.`/`..`、路径分隔符和 FAT/Windows 禁止字符；所有写操作严格限制在 `/flash`、`/sdcard` 之下。
+- `/flash`、`/sdcard` 卷根永远不能作为普通文件或目录复制、剪切、重命名、删除。Files 最外层的 Flash/SD 设备项长按后在当前 Files 页原地显示已锁定目标的第一级格式化确认；取消、继续到第二级确认以及最终格式化均不强制切换到 Storage 管理页。介质缺失、USB 占用或繁忙时只显示不可格式化原因，不进入擦写。
+- 重命名/新建文件夹使用带屏幕键盘的专用输入面板；中文标题、错误、确认按钮以及格式化确认按钮全部显式绑定 Noto Sans SC，避免 LVGL MessageBox footer 回落到不含中文字形的 Montserrat。长按操作面板按 3 列和可见操作数动态计算 1–3 行高度，每项保持 42 px 触控高度，新增操作不会被默认单行 footer 裁切。
+- 真机自动化在固定 Flash 用户卷实际完成“新建目录 → 重命名 → 路径/卷根保护 → 清理”，并覆盖卷根原地长按、第一级点“继续”后第二级确认仍停留 Files、第二级取消后仍停留 Files、普通目录菜单、重命名/新建输入面板和页面生命周期释放；测试不点击最终擦除。最终为 `321 PASS / 0 FAIL / 150 actions`，耗时 75,328 ms，IPC err=0。
+- 最终构建为 text=3,503,380、data=72,652、bss=4,270,164 字节；HEX 10,058,598 字节，SHA-256 `C04112073BF70417E506B373AF2C0C75853825E2D4591F07C6B794CE63AC8FA3`。Customized OpenOCD 写入/校验 M55 3,579,904 / 3,576,032 字节，M33 167,936 / 160,536 字节。完整日志：`tools/freather/logs/files-inplace-format-confirm-final-board.log`。
+
+## 2026-08-30 Gallery 点击响应与解码热路径修复
+
+- 原相册缩略图定时器每 20 ms 在 LVGL 线程同步读盘和解码，点击回调又在切换查看器之前同步生成最大 480×800 的 RGB565 预览；连续解码使触摸事件长期排队，表现为整行难以点中、反复点击后才出现查看窗口。
+- 图片行改为完整的 76 px Button 热区，缩略图容器、图片、占位符和文字列显式取消 `CLICKABLE`，不会再截获父行点击。手指按下立即暂停渐进缩略图加载，释放或滚动取消后恢复；按压态提供即时背景反馈。
+- 点击回调现在只设置目标并立即切换到带“正在加载...”状态的查看器，40 ms 后再开始预览转换，确保至少先提交一帧可见反馈。缩略图间隔放宽到 160 ms；RGB565 渲染删除了“先打开解码器探测、随后再次打开正式解码”的重复路径，文件头、尺寸和安全上限校验仍保留。
+- 自动测试在相册为空时生成一个 32×24 非黑 BMP，覆盖完整热区、查看器立即加载态、最终非黑 RGB565 缓存、Files 跳转、壁纸和删除确认，结束后删除临时文件。最终板端回归为 `328 PASS / 0 FAIL / 151 actions`，耗时 62,603 ms，路由对象增量为 0；日志为 `tools/freather/logs/gallery-click-final-board.log`。
+- 最终构建为 text=3,507,484、data=72,652、bss=4,270,180 字节；HEX 10,070,147 字节，SHA-256 `87C290E6EAB042567D7A78DFA81B5628413206B8A779A7859867B4E265FAB9F9`。Customized OpenOCD 写入/校验 M55 3,584,000 / 3,580,136 字节，M33 167,936 / 160,536 字节。

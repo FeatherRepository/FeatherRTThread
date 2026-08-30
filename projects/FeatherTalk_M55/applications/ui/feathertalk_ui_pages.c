@@ -7,8 +7,10 @@
 #include "feathertalk_usb.h"
 #include "ipc/feathertalk_ipc.h"
 #include "feathertalk_ui.h"
+#include "feathertalk_ui_gallery.h"
 #include "feathertalk_ui_internal.h"
 #include "feathertalk_ui_platform.h"
+#include "feathertalk_ui_preferences_store.h"
 
 #define FT_ACCENT_COUNT      5U
 #define FT_OPACITY_COUNT     3U
@@ -64,7 +66,6 @@ static lv_obj_t *create_search_page(lv_obj_t *parent);
 static lv_obj_t *create_system_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_page(lv_obj_t *parent);
 static lv_obj_t *create_media_page(lv_obj_t *parent);
-static lv_obj_t *create_messages_page(lv_obj_t *parent);
 static lv_obj_t *create_files_page(lv_obj_t *parent);
 static lv_obj_t *create_about_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_display_page(lv_obj_t *parent);
@@ -87,8 +88,6 @@ static void settings_storage_page_leave(void);
 static void language_refresh_async_cb(void *user_data);
 static void media_tile_live_content(lv_obj_t *content_host,
                                     uint32_t frame, void *context);
-static void messages_tile_live_content(lv_obj_t *content_host,
-                                       uint32_t frame, void *context);
 
 static const ft_app_descriptor_t s_apps[] =
 {
@@ -98,15 +97,15 @@ static const ft_app_descriptor_t s_apps[] =
     {FT_PAGE_MEDIA,
      {"Media", 1U, 1U, 255U, FT_ICON_MEDIA_PATTERN},
      {FT_ICON_MEDIA, true, 1600U, media_tile_live_content, RT_NULL}},
-    {FT_PAGE_MESSAGES,
-     {"Messages", 1U, 1U, 255U, FT_ICON_COUNT},
-     {FT_ICON_MESSAGES, true, 2200U, messages_tile_live_content, RT_NULL}},
+    {FT_PAGE_GALLERY,
+     {"Gallery", 1U, 1U, 255U, FT_ICON_COUNT},
+     {FT_ICON_GALLERY, false, 0U, RT_NULL, RT_NULL}},
     {FT_PAGE_FILES,
      {"Files", 2U, 1U, 255U, FT_ICON_COUNT},
      {FT_ICON_FILES, false, 0U, RT_NULL, RT_NULL}},
 };
 
-static const char *s_app_names_zh[] = {"设置", "媒体", "消息", "文件"};
+static const char *s_app_names_zh[] = {"设置", "媒体", "相册", "文件"};
 
 typedef struct
 {
@@ -179,9 +178,9 @@ static const uint32_t s_accent_rgb[FT_ACCENT_COUNT] =
     {0x0078D7UL, 0xE81123UL, 0x107C10UL, 0xFFB900UL, 0x744DA9UL};
 static const uint8_t s_opacity_values[FT_OPACITY_COUNT] = {160U, 210U, 255U};
 static const char *s_background_names_en[FT_BACKGROUND_COUNT] =
-    {"Black", "Dark", "Accent"};
+    {"Black", "Dark", "Accent", "Gallery photo"};
 static const char *s_background_names_zh[FT_BACKGROUND_COUNT] =
-    {"纯黑", "深色", "强调色"};
+    {"纯黑", "深色", "强调色", "相册图片"};
 static const char *s_tracks_en[] = {"Feather Intro", "PSoC Skyline", "Metro Pulse"};
 /* Keep product, platform and protocol keywords intact across languages.
  * "Feather" is a product-family term here, not the noun "羽翼". */
@@ -194,7 +193,8 @@ static const ft_page_definition_t s_pages[] =
     {FT_PAGE_SYSTEM, "System information", create_system_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS, "Settings", create_settings_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_MEDIA, "Media", create_media_page, RT_NULL, RT_NULL, RT_NULL},
-    {FT_PAGE_MESSAGES, "Messages", create_messages_page, RT_NULL, RT_NULL, RT_NULL},
+    {FT_PAGE_GALLERY, "Gallery", ft_gallery_create_page, ft_gallery_page_enter,
+     ft_gallery_page_back, ft_gallery_page_leave},
     {FT_PAGE_FILES, "Files", create_files_page, files_page_enter,
      files_page_back, files_page_leave},
     {FT_PAGE_ABOUT, "About", create_about_page, RT_NULL, RT_NULL, RT_NULL},
@@ -262,6 +262,7 @@ static volatile uint8_t s_storage_format_state;
 static volatile int s_storage_format_result;
 static uint8_t s_storage_confirm_stage;
 static bool s_storage_result_notified;
+static bool s_storage_format_from_files;
 static ft_storage_device_t s_storage_selected_device = FT_STORAGE_DEVICE_FLASH;
 static volatile ft_storage_device_t s_storage_format_target = FT_STORAGE_DEVICE_INVALID;
 static lv_obj_t *s_time_format_buttons[FT_TIME_FORMAT_COUNT];
@@ -282,17 +283,47 @@ static lv_obj_t *s_media_track_label;
 static lv_obj_t *s_media_volume;
 static bool s_media_playing;
 static int32_t s_media_track;
-static lv_obj_t *s_messages_button;
-static lv_obj_t *s_messages_count_label;
-static uint32_t s_message_count;
 static lv_obj_t *s_files_refresh_button;
 static lv_obj_t *s_files_status_label;
 static lv_obj_t *s_files_path_label;
 static lv_obj_t *s_files_up_button;
 static lv_obj_t *s_files_list;
+static lv_obj_t *s_files_action_box;
+static lv_obj_t *s_files_action_quick;
+static lv_obj_t *s_files_action_view;
+static lv_obj_t *s_files_action_copy;
+static lv_obj_t *s_files_action_cut;
+static lv_obj_t *s_files_action_rename;
+static lv_obj_t *s_files_action_new_folder;
+static lv_obj_t *s_files_action_refresh;
+static lv_obj_t *s_files_action_paste;
+static lv_obj_t *s_files_action_delete;
+static lv_obj_t *s_files_action_cancel;
+static lv_obj_t *s_files_name_box;
+static lv_obj_t *s_files_name_textarea;
+static lv_obj_t *s_files_name_error;
+static lv_obj_t *s_files_name_keyboard;
+static lv_obj_t *s_files_name_cancel;
+static lv_obj_t *s_files_name_confirm;
+static lv_obj_t *s_files_delete_box;
+static lv_obj_t *s_files_delete_cancel;
+static lv_obj_t *s_files_delete_confirm;
 static lv_timer_t *s_files_monitor_timer;
 static char s_files_current_path[FT_STORAGE_PATH_MAX];
+static char s_files_delete_path[FT_STORAGE_PATH_MAX];
+static char s_files_delete_name[FT_STORAGE_NAME_MAX];
+static char s_files_context_path[FT_STORAGE_PATH_MAX];
+static char s_files_context_name[FT_STORAGE_NAME_MAX];
+static char s_files_clipboard_path[FT_STORAGE_PATH_MAX];
+static char s_files_clipboard_name[FT_STORAGE_NAME_MAX];
+static char s_files_name_target[FT_STORAGE_PATH_MAX];
+static lv_obj_t *s_files_suppress_click_row;
 static ft_storage_device_t s_files_requested_device = FT_STORAGE_DEVICE_INVALID;
+static bool s_files_delete_is_directory;
+static bool s_files_context_is_directory;
+static bool s_files_context_current_folder;
+static bool s_files_clipboard_cut;
+static bool s_files_name_is_rename;
 static bool s_files_last_mounted;
 static bool s_files_last_flash_mounted;
 static bool s_files_last_sd_mounted;
@@ -326,7 +357,7 @@ static lv_obj_t *tile_live_text_label(lv_obj_t *content_host)
         lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
         lv_obj_set_width(label, lv_pct(100));
         lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-        lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
+        lv_obj_set_style_text_font(label, ft_layout_font(14), LV_PART_MAIN);
         lv_obj_align(label, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
     }
     return label;
@@ -341,28 +372,6 @@ static void media_tile_live_content(lv_obj_t *content_host,
     if (label != RT_NULL)
         lv_label_set_text(label,
                           track_display_name(((uint32_t)s_media_track + frame) % track_count));
-}
-
-static void messages_tile_live_content(lv_obj_t *content_host,
-                                       uint32_t frame, void *context)
-{
-    static char text[32];
-    lv_obj_t *label = tile_live_text_label(content_host);
-    LV_UNUSED(context);
-    if (label == RT_NULL) return;
-    if ((frame & 1U) != 0U)
-        lv_label_set_text(label, ft_preferences_text("点按打开收件箱",
-                                                     "Tap to open inbox"));
-    else if (s_message_count == 0U)
-        lv_label_set_text(label, ft_preferences_text("没有未读消息",
-                                                     "No unread messages"));
-    else
-    {
-        lv_snprintf(text, sizeof(text),
-                    ft_preferences_text("%lu 条未读", "%lu unread"),
-                    (unsigned long)s_message_count);
-        lv_label_set_text(label, text);
-    }
 }
 
 static void tracked_object_deleted_cb(lv_event_t *event)
@@ -1325,7 +1334,20 @@ static void accent_clicked_cb(lv_event_t *event)
 static void opacity_clicked_cb(lv_event_t *event)
 { ft_preferences_set_tile_opa((uint8_t)(uintptr_t)lv_event_get_user_data(event)); }
 static void background_clicked_cb(lv_event_t *event)
-{ ft_preferences_set_background((ft_background_mode_t)(uintptr_t)lv_event_get_user_data(event)); }
+{
+    ft_background_mode_t background =
+        (ft_background_mode_t)(uintptr_t)lv_event_get_user_data(event);
+    if (background == FT_BACKGROUND_CUSTOM &&
+        !ft_preferences_wallpaper_available())
+    {
+        feathertalk_ui_alert(ft_preferences_text("壁纸", "Wallpaper"),
+                            ft_preferences_text("请先在相册中打开一张图片并选择“设为壁纸”。",
+                                                "Open a photo in Gallery and choose Set wallpaper first."));
+        (void)ft_router_push(FT_PAGE_GALLERY);
+        return;
+    }
+    ft_preferences_set_background(background);
+}
 
 static void settings_keyboard_set_visible(bool visible)
 {
@@ -1765,14 +1787,29 @@ static void settings_storage_cancel_clicked_cb(lv_event_t *event)
     LV_UNUSED(event);
     settings_storage_close_confirmation();
     s_storage_format_target = FT_STORAGE_DEVICE_INVALID;
+    s_storage_format_from_files = false;
 }
 
 static void settings_storage_format_worker(void *parameter)
 {
     int result;
+    bool flash_preferences_frozen = false;
     LV_UNUSED(parameter);
-    result = s_storage_format_target == FT_STORAGE_DEVICE_FLASH ?
-             ft_storage_format_flash() : ft_storage_format_sd();
+    if (s_storage_format_target == FT_STORAGE_DEVICE_FLASH)
+    {
+        result = ft_preferences_store_freeze();
+        if (result == RT_EOK)
+        {
+            flash_preferences_frozen = true;
+            result = ft_storage_format_flash();
+        }
+        if (flash_preferences_frozen)
+            ft_preferences_store_thaw();
+    }
+    else
+    {
+        result = ft_storage_format_sd();
+    }
     s_storage_format_result = result;
     s_storage_format_state = result == RT_EOK ?
                              FT_STORAGE_FORMAT_SUCCESS :
@@ -1803,6 +1840,7 @@ static void settings_storage_start_format(void)
                 "内置 Flash 当前不可用或正由 USB 存储占用。请先停止 USB 存储并关闭正在访问它的文件。",
                 "Internal Flash is unavailable or owned by USB storage. Stop USB storage and close files that are using it."));
         s_storage_format_target = FT_STORAGE_DEVICE_INVALID;
+        s_storage_format_from_files = false;
         return;
     }
 
@@ -1891,6 +1929,12 @@ static void settings_storage_show_confirmation(uint8_t stage)
                         stage == 1U ? settings_storage_continue_clicked_cb :
                                       settings_storage_final_confirm_clicked_cb,
                         LV_EVENT_CLICKED, RT_NULL);
+    if (lv_obj_get_child_count(s_storage_confirm_cancel) > 0U)
+        lv_obj_set_style_text_font(lv_obj_get_child(s_storage_confirm_cancel, 0U),
+                                   ft_layout_font(14), LV_PART_MAIN);
+    if (lv_obj_get_child_count(s_storage_confirm_continue) > 0U)
+        lv_obj_set_style_text_font(lv_obj_get_child(s_storage_confirm_continue, 0U),
+                                   ft_layout_font(14), LV_PART_MAIN);
     if (stage == 2U)
     {
         lv_obj_set_style_bg_color(s_storage_confirm_continue,
@@ -1903,6 +1947,7 @@ static void settings_storage_show_confirmation(uint8_t stage)
 static void settings_storage_format_clicked_cb(lv_event_t *event)
 {
     LV_UNUSED(event);
+    s_storage_format_from_files = false;
     s_storage_format_target = s_storage_selected_device;
     settings_storage_show_confirmation(1U);
 }
@@ -2177,6 +2222,7 @@ static void settings_storage_refresh(void)
             feathertalk_ui_alert(ft_preferences_text("格式化失败", "Format failed"),
                                 message);
         }
+        s_storage_format_from_files = false;
     }
 }
 
@@ -2767,8 +2813,8 @@ static lv_obj_t *create_settings_personalization_page(lv_obj_t *parent)
     lv_obj_t *page = create_text_page(parent,
                                       ft_preferences_text("个性化", "Personalization"),
                                       FT_ICON_PERSONALIZATION,
-                                      ft_preferences_text("个性化偏好（当前保存在内存中）",
-                                                          "Personalization preferences (memory backend)"));
+                                      ft_preferences_text("壁纸、配色和标签外观会保存在本机 Flash，掉电不丢失。",
+                                                          "Wallpaper, color and Tile appearance are saved in device Flash."));
     lv_obj_t *caption;
     lv_obj_t *row;
     size_t i;
@@ -2814,8 +2860,17 @@ static lv_obj_t *create_settings_personalization_page(lv_obj_t *parent)
         lv_obj_set_width(s_opacity_buttons[i], 0);
         lv_obj_set_flex_grow(s_opacity_buttons[i], 1);
     }
-    caption = lv_label_create(page);
-    lv_label_set_text(caption, ft_preferences_text("背景", "Background"));
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), ft_layout_px(32));
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    (void)ft_icon_create(row, FT_ICON_WALLPAPER,
+                         ft_layout_icon_size(24U), true);
+    caption = lv_label_create(row);
+    lv_label_set_text(caption, ft_preferences_text("壁纸与背景", "Wallpaper & background"));
     lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
     row = lv_obj_create(page);
     style_layout_container(row);
@@ -2833,13 +2888,29 @@ static lv_obj_t *create_settings_personalization_page(lv_obj_t *parent)
         lv_obj_set_width(s_background_buttons[i], 0);
         lv_obj_set_flex_grow(s_background_buttons[i], 1);
     }
+    ft_pages_apply_preferences();
     return page;
 }
 
 void ft_pages_apply_preferences(void)
 {
     const ft_ui_preferences_t *preferences = ft_preferences_get();
+    size_t i;
     ft_tiles_apply_opacity(preferences->tile_opa);
+    for (i = 0U; i < FT_ACCENT_COUNT; i++)
+    {
+        if (s_accent_buttons[i] != RT_NULL &&
+            lv_obj_is_valid(s_accent_buttons[i]))
+            lv_obj_set_style_border_width(s_accent_buttons[i],
+                preferences->accent_rgb == s_accent_rgb[i] ? 4 : 1,
+                LV_PART_MAIN);
+    }
+    for (i = 0U; i < FT_OPACITY_COUNT; i++)
+        settings_choice_refresh(s_opacity_buttons[i],
+                                preferences->tile_opa == s_opacity_values[i]);
+    for (i = 0U; i < FT_BACKGROUND_COUNT; i++)
+        settings_choice_refresh(s_background_buttons[i],
+                                preferences->background == (ft_background_mode_t)i);
     ft_pages_apply_language();
     settings_time_language_refresh();
 }
@@ -2852,6 +2923,7 @@ void ft_pages_apply_language(void)
                                     s_apps[i].tile.name,
                                     s_app_names_zh[i],
                                     app_display_name(i));
+    ft_gallery_apply_language();
 }
 
 static void update_media_labels(void)
@@ -2937,44 +3009,6 @@ static lv_obj_t *create_media_page(lv_obj_t *parent)
     return page;
 }
 
-static void message_test_cb(lv_event_t *event)
-{
-    char text[48];
-    LV_UNUSED(event);
-    s_message_count++;
-    lv_snprintf(text, sizeof(text),
-                ft_preferences_text("已创建通知：%lu",
-                                    "Notifications created: %lu"),
-                (unsigned long)s_message_count);
-    lv_label_set_text(s_messages_count_label, text);
-    feathertalk_ui_notify(ft_preferences_text("消息", "Messages"),
-                         ft_preferences_text("测试通知", "Test notification"),
-                         ft_preferences_text("内存通知投递成功。",
-                                             "In-memory notification delivery succeeded."));
-    feathertalk_ui_alert(ft_preferences_text("消息", "Messages"),
-                        ft_preferences_text("内存通知投递成功。",
-                                            "In-memory notification delivery succeeded."));
-}
-static lv_obj_t *create_messages_page(lv_obj_t *parent)
-{
-    lv_obj_t *page = create_text_page(parent,
-                                      ft_preferences_text("消息", "Messages"),
-                                      FT_ICON_MESSAGES,
-                                      ft_preferences_text("通知服务适配器",
-                                                          "Notification service adapter"));
-    track_object(&s_messages_count_label, lv_label_create(page));
-    lv_label_set_text(s_messages_count_label,
-                      ft_preferences_text("已创建通知：0",
-                                          "Notifications created: 0"));
-    track_object(&s_messages_button,
-                 create_flat_button(page,
-                                    ft_preferences_text("创建测试通知",
-                                                        "Create test notification"),
-                                    message_test_cb, RT_NULL));
-    lv_obj_set_width(s_messages_button, lv_pct(100));
-    return page;
-}
-
 typedef struct
 {
     size_t directories;
@@ -2982,6 +3016,626 @@ typedef struct
 } ft_files_list_context_t;
 
 static uint8_t s_files_directory_marker;
+static void files_refresh_view(bool manual_refresh);
+static void files_preview_file(const char *path, const char *name);
+
+typedef enum
+{
+    FT_FILES_ACTION_VIEW = 0,
+    FT_FILES_ACTION_COPY,
+    FT_FILES_ACTION_CUT,
+    FT_FILES_ACTION_RENAME,
+    FT_FILES_ACTION_NEW_FOLDER,
+    FT_FILES_ACTION_REFRESH,
+    FT_FILES_ACTION_PASTE,
+    FT_FILES_ACTION_DELETE,
+    FT_FILES_ACTION_CANCEL
+} ft_files_action_t;
+
+static void files_close_action_menu(void)
+{
+    if (s_files_action_box != RT_NULL && lv_obj_is_valid(s_files_action_box))
+        lv_msgbox_close(s_files_action_box);
+    s_files_action_box = RT_NULL;
+    s_files_action_quick = RT_NULL;
+    s_files_action_view = RT_NULL;
+    s_files_action_copy = RT_NULL;
+    s_files_action_cut = RT_NULL;
+    s_files_action_rename = RT_NULL;
+    s_files_action_new_folder = RT_NULL;
+    s_files_action_refresh = RT_NULL;
+    s_files_action_paste = RT_NULL;
+    s_files_action_delete = RT_NULL;
+    s_files_action_cancel = RT_NULL;
+    s_files_context_path[0] = '\0';
+    s_files_context_name[0] = '\0';
+    s_files_context_is_directory = false;
+    s_files_context_current_folder = false;
+}
+
+static void files_close_name_editor(void)
+{
+    if (s_files_name_box != RT_NULL && lv_obj_is_valid(s_files_name_box))
+        lv_msgbox_close(s_files_name_box);
+    s_files_name_box = RT_NULL;
+    s_files_name_textarea = RT_NULL;
+    s_files_name_error = RT_NULL;
+    s_files_name_keyboard = RT_NULL;
+    s_files_name_cancel = RT_NULL;
+    s_files_name_confirm = RT_NULL;
+    s_files_name_target[0] = '\0';
+    s_files_name_is_rename = false;
+}
+
+static void files_name_cancel_cb(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    files_close_name_editor();
+}
+
+static void files_name_set_error(const char *text)
+{
+    if (s_files_name_error != RT_NULL && lv_obj_is_valid(s_files_name_error))
+        lv_label_set_text(s_files_name_error, text != RT_NULL ? text : "");
+}
+
+static void files_name_confirm_cb(lv_event_t *event)
+{
+    const char *input;
+    char name[FT_STORAGE_NAME_MAX];
+    char result_path[FT_STORAGE_PATH_MAX];
+    size_t start = 0U;
+    size_t end;
+    size_t length;
+    bool rename_item = s_files_name_is_rename;
+    int result;
+
+    LV_UNUSED(event);
+    if (s_files_name_textarea == RT_NULL ||
+        !lv_obj_is_valid(s_files_name_textarea))
+        return;
+    input = lv_textarea_get_text(s_files_name_textarea);
+    if (input == RT_NULL) input = "";
+    end = strlen(input);
+    while (start < end && (input[start] == ' ' || input[start] == '\t')) start++;
+    while (end > start && (input[end - 1U] == ' ' || input[end - 1U] == '\t')) end--;
+    length = end - start;
+    if (length == 0U || length >= sizeof(name))
+    {
+        files_name_set_error(ft_preferences_text(
+            "请输入有效名称。", "Enter a valid name."));
+        return;
+    }
+    rt_memcpy(name, input + start, length);
+    name[length] = '\0';
+    result = rename_item ?
+        ft_storage_rename_path(s_files_name_target, name, result_path,
+                               sizeof(result_path)) :
+        ft_storage_create_directory(s_files_name_target, name, result_path,
+                                    sizeof(result_path));
+    if (result != RT_EOK)
+    {
+        files_name_set_error(ft_preferences_text(
+            "名称无效、已存在，或存储设备当前不可写。",
+            "The name is invalid or already exists, or the storage device is not writable."));
+        return;
+    }
+    if (rename_item && strcmp(s_files_clipboard_path, s_files_name_target) == 0)
+    {
+        rt_strncpy(s_files_clipboard_path, result_path,
+                   sizeof(s_files_clipboard_path) - 1U);
+        s_files_clipboard_path[sizeof(s_files_clipboard_path) - 1U] = '\0';
+        rt_strncpy(s_files_clipboard_name, name,
+                   sizeof(s_files_clipboard_name) - 1U);
+        s_files_clipboard_name[sizeof(s_files_clipboard_name) - 1U] = '\0';
+    }
+    files_close_name_editor();
+    files_refresh_view(false);
+}
+
+static void files_name_keyboard_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_READY)
+        files_name_confirm_cb(event);
+    else if (code == LV_EVENT_CANCEL)
+        files_name_cancel_cb(event);
+}
+
+static void files_show_name_editor(bool rename_item, const char *target,
+                                   const char *initial_name)
+{
+    lv_obj_t *content;
+    lv_obj_t *title;
+    lv_obj_t *label;
+
+    if (target == RT_NULL || target[0] == '\0') return;
+    files_close_name_editor();
+    s_files_name_is_rename = rename_item;
+    rt_strncpy(s_files_name_target, target,
+               sizeof(s_files_name_target) - 1U);
+    s_files_name_target[sizeof(s_files_name_target) - 1U] = '\0';
+    s_files_name_box = lv_msgbox_create(RT_NULL);
+    lv_obj_set_size(s_files_name_box, lv_pct(94), lv_pct(88));
+    title = lv_msgbox_add_title(
+        s_files_name_box,
+        rename_item ? ft_preferences_text("重命名", "Rename") :
+                      ft_preferences_text("新建文件夹", "New folder"));
+    lv_obj_set_style_text_font(title, ft_layout_font(18), LV_PART_MAIN);
+    content = lv_msgbox_get_content(s_files_name_box);
+    lv_obj_set_height(content, 0);
+    lv_obj_set_flex_grow(content, 1);
+    lv_obj_set_style_pad_row(content, ft_layout_px(5), LV_PART_MAIN);
+    s_files_name_textarea = lv_textarea_create(content);
+    lv_obj_set_size(s_files_name_textarea, lv_pct(100),
+                    ft_layout_get()->control_height);
+    lv_obj_set_style_text_font(s_files_name_textarea, ft_layout_font(16),
+                               LV_PART_MAIN);
+    lv_textarea_set_one_line(s_files_name_textarea, true);
+    lv_textarea_set_max_length(s_files_name_textarea,
+                               FT_STORAGE_NAME_MAX - 1U);
+    lv_textarea_set_placeholder_text(
+        s_files_name_textarea,
+        ft_preferences_text("输入名称", "Enter a name"));
+    lv_textarea_set_text(s_files_name_textarea,
+                         initial_name != RT_NULL ? initial_name : "");
+    lv_textarea_set_cursor_pos(s_files_name_textarea, LV_TEXTAREA_CURSOR_LAST);
+    s_files_name_error = lv_label_create(content);
+    lv_label_set_text(s_files_name_error, "");
+    lv_obj_set_width(s_files_name_error, lv_pct(100));
+    lv_obj_set_style_text_color(s_files_name_error,
+                                lv_color_hex(0xFF6B6B), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_files_name_error, ft_layout_font(12),
+                               LV_PART_MAIN);
+    s_files_name_keyboard = lv_keyboard_create(content);
+    lv_obj_set_width(s_files_name_keyboard, lv_pct(100));
+    lv_obj_set_height(s_files_name_keyboard, 0);
+    lv_obj_set_flex_grow(s_files_name_keyboard, 1);
+    lv_keyboard_set_textarea(s_files_name_keyboard, s_files_name_textarea);
+    lv_obj_add_event_cb(s_files_name_keyboard, files_name_keyboard_cb,
+                        LV_EVENT_READY, RT_NULL);
+    lv_obj_add_event_cb(s_files_name_keyboard, files_name_keyboard_cb,
+                        LV_EVENT_CANCEL, RT_NULL);
+    s_files_name_cancel = lv_msgbox_add_footer_button(
+        s_files_name_box, ft_preferences_text("取消", "Cancel"));
+    s_files_name_confirm = lv_msgbox_add_footer_button(
+        s_files_name_box,
+        rename_item ? ft_preferences_text("保存", "Save") :
+                      ft_preferences_text("创建", "Create"));
+    label = lv_obj_get_child_count(s_files_name_cancel) > 0U ?
+            lv_obj_get_child(s_files_name_cancel, 0U) : RT_NULL;
+    if (label != RT_NULL)
+        lv_obj_set_style_text_font(label, ft_layout_font(14), LV_PART_MAIN);
+    label = lv_obj_get_child_count(s_files_name_confirm) > 0U ?
+            lv_obj_get_child(s_files_name_confirm, 0U) : RT_NULL;
+    if (label != RT_NULL)
+        lv_obj_set_style_text_font(label, ft_layout_font(14), LV_PART_MAIN);
+    lv_obj_add_event_cb(s_files_name_cancel, files_name_cancel_cb,
+                        LV_EVENT_CLICKED, RT_NULL);
+    lv_obj_add_event_cb(s_files_name_confirm, files_name_confirm_cb,
+                        LV_EVENT_CLICKED, RT_NULL);
+    lv_obj_send_event(s_files_name_textarea, LV_EVENT_FOCUSED, RT_NULL);
+}
+
+static void files_close_delete_confirmation(void)
+{
+    if (s_files_delete_box != RT_NULL && lv_obj_is_valid(s_files_delete_box))
+        lv_msgbox_close(s_files_delete_box);
+    s_files_delete_box = RT_NULL;
+    s_files_delete_cancel = RT_NULL;
+    s_files_delete_confirm = RT_NULL;
+}
+
+static void files_delete_cancel_cb(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    files_close_delete_confirmation();
+    s_files_delete_path[0] = '\0';
+    s_files_delete_name[0] = '\0';
+}
+
+static void files_delete_confirm_cb(lv_event_t *event)
+{
+    int result;
+    char name[FT_STORAGE_NAME_MAX];
+    bool was_directory = s_files_delete_is_directory;
+
+    LV_UNUSED(event);
+    rt_strncpy(name, s_files_delete_name, sizeof(name) - 1U);
+    name[sizeof(name) - 1U] = '\0';
+    result = ft_storage_delete_path(s_files_delete_path);
+    files_close_delete_confirmation();
+    s_files_delete_path[0] = '\0';
+    s_files_delete_name[0] = '\0';
+    files_refresh_view(false);
+    if (result == RT_EOK)
+    {
+        feathertalk_ui_alert(ft_preferences_text("已删除", "Deleted"), name);
+    }
+    else
+    {
+        feathertalk_ui_alert(
+            ft_preferences_text("无法删除", "Unable to delete"),
+            was_directory ?
+            ft_preferences_text("文件夹可能已被移除、介质为只读，或正在被其他功能使用。",
+                                "The folder may be gone, read-only, or in use by another feature.") :
+            ft_preferences_text("文件可能已被移除、处于只读介质上，或正在被其他功能使用。",
+                                "The file may be gone, on read-only media, or in use by another feature."));
+    }
+}
+
+static void files_show_delete_confirmation(const char *name, const char *path,
+                                           bool is_directory)
+{
+    lv_obj_t *title;
+    lv_obj_t *text;
+    char message[FT_STORAGE_NAME_MAX + 128U];
+
+    if (name == RT_NULL || path == RT_NULL) return;
+    files_close_delete_confirmation();
+    rt_strncpy(s_files_delete_name, name, sizeof(s_files_delete_name) - 1U);
+    s_files_delete_name[sizeof(s_files_delete_name) - 1U] = '\0';
+    rt_strncpy(s_files_delete_path, path, sizeof(s_files_delete_path) - 1U);
+    s_files_delete_path[sizeof(s_files_delete_path) - 1U] = '\0';
+    s_files_delete_is_directory = is_directory;
+    lv_snprintf(message, sizeof(message),
+                is_directory ?
+                ft_preferences_text("删除文件夹“%s”及其中全部内容？\n此操作不可撤销。",
+                                    "Delete folder \"%s\" and all its contents?\nThis cannot be undone.") :
+                ft_preferences_text("删除文件“%s”？\n此操作不可撤销。",
+                                    "Delete file \"%s\"?\nThis cannot be undone."),
+                name);
+    track_object(&s_files_delete_box, lv_msgbox_create(RT_NULL));
+    lv_obj_set_width(s_files_delete_box, lv_pct(88));
+    title = lv_msgbox_add_title(
+        s_files_delete_box,
+        is_directory ? ft_preferences_text("删除文件夹", "Delete folder") :
+                       ft_preferences_text("删除文件", "Delete file"));
+    text = lv_msgbox_add_text(s_files_delete_box, message);
+    lv_obj_set_style_text_font(title, ft_layout_font(18), LV_PART_MAIN);
+    lv_obj_set_style_text_font(text, ft_layout_font(14), LV_PART_MAIN);
+    track_object(&s_files_delete_cancel,
+                 lv_msgbox_add_footer_button(
+                     s_files_delete_box, ft_preferences_text("取消", "Cancel")));
+    track_object(&s_files_delete_confirm,
+                 lv_msgbox_add_footer_button(
+                     s_files_delete_box, ft_preferences_text("删除", "Delete")));
+    if (lv_obj_get_child_count(s_files_delete_cancel) > 0U)
+        lv_obj_set_style_text_font(lv_obj_get_child(s_files_delete_cancel, 0U),
+                                   ft_layout_font(14), LV_PART_MAIN);
+    if (lv_obj_get_child_count(s_files_delete_confirm) > 0U)
+        lv_obj_set_style_text_font(lv_obj_get_child(s_files_delete_confirm, 0U),
+                                   ft_layout_font(14), LV_PART_MAIN);
+    lv_obj_add_event_cb(s_files_delete_cancel, files_delete_cancel_cb,
+                        LV_EVENT_CLICKED, RT_NULL);
+    lv_obj_add_event_cb(s_files_delete_confirm, files_delete_confirm_cb,
+                        LV_EVENT_CLICKED, RT_NULL);
+    lv_obj_set_style_bg_color(s_files_delete_confirm,
+                              lv_color_hex(0xC42B1C), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_files_delete_confirm, LV_OPA_COVER, LV_PART_MAIN);
+}
+
+static void files_action_clicked_cb(lv_event_t *event)
+{
+    ft_files_action_t action =
+        (ft_files_action_t)(uintptr_t)lv_event_get_user_data(event);
+    char context_path[FT_STORAGE_PATH_MAX];
+    char context_name[FT_STORAGE_NAME_MAX];
+    char destination[FT_STORAGE_PATH_MAX];
+    char result_path[FT_STORAGE_PATH_MAX];
+    bool context_is_directory = s_files_context_is_directory;
+    bool clipboard_cut = s_files_clipboard_cut;
+    int result;
+
+    rt_strncpy(context_path, s_files_context_path, sizeof(context_path) - 1U);
+    context_path[sizeof(context_path) - 1U] = '\0';
+    rt_strncpy(context_name, s_files_context_name, sizeof(context_name) - 1U);
+    context_name[sizeof(context_name) - 1U] = '\0';
+    if (action == FT_FILES_ACTION_CANCEL)
+    {
+        files_close_action_menu();
+        return;
+    }
+    if (action == FT_FILES_ACTION_VIEW)
+    {
+        files_close_action_menu();
+        if (context_is_directory)
+        {
+            rt_strncpy(s_files_current_path, context_path,
+                       sizeof(s_files_current_path) - 1U);
+            s_files_current_path[sizeof(s_files_current_path) - 1U] = '\0';
+            files_refresh_view(false);
+        }
+        else if (ft_gallery_can_open_file(context_path))
+        {
+            if (ft_gallery_request_open_file(context_path))
+                (void)ft_router_push(FT_PAGE_GALLERY);
+            else
+                feathertalk_ui_alert(
+                    ft_preferences_text("无法查看", "Unable to view"),
+                    ft_preferences_text("图片格式、路径或存储介质当前不可用。",
+                                        "The image format, path, or medium is unavailable."));
+        }
+        else
+        {
+            files_preview_file(context_path, context_name);
+        }
+        return;
+    }
+    if (action == FT_FILES_ACTION_COPY || action == FT_FILES_ACTION_CUT)
+    {
+        rt_strncpy(s_files_clipboard_path, context_path,
+                   sizeof(s_files_clipboard_path) - 1U);
+        s_files_clipboard_path[sizeof(s_files_clipboard_path) - 1U] = '\0';
+        rt_strncpy(s_files_clipboard_name, context_name,
+                   sizeof(s_files_clipboard_name) - 1U);
+        s_files_clipboard_name[sizeof(s_files_clipboard_name) - 1U] = '\0';
+        s_files_clipboard_cut = action == FT_FILES_ACTION_CUT;
+        files_close_action_menu();
+        feathertalk_ui_alert(
+            action == FT_FILES_ACTION_CUT ? ft_preferences_text("已剪切", "Cut") :
+                                            ft_preferences_text("已复制", "Copied"),
+            ft_preferences_text("请长按目标文件夹或空白区域，然后选择“粘贴”。",
+                                "Long-press the destination folder or empty area, then choose Paste."));
+        return;
+    }
+    if (action == FT_FILES_ACTION_RENAME)
+    {
+        files_close_action_menu();
+        files_show_name_editor(true, context_path, context_name);
+        return;
+    }
+    if (action == FT_FILES_ACTION_NEW_FOLDER)
+    {
+        rt_strncpy(destination,
+                   context_is_directory ? context_path : s_files_current_path,
+                   sizeof(destination) - 1U);
+        destination[sizeof(destination) - 1U] = '\0';
+        files_close_action_menu();
+        files_show_name_editor(false, destination, "");
+        return;
+    }
+    if (action == FT_FILES_ACTION_REFRESH)
+    {
+        files_close_action_menu();
+        files_refresh_view(true);
+        return;
+    }
+    if (action == FT_FILES_ACTION_DELETE)
+    {
+        files_close_action_menu();
+        files_show_delete_confirmation(context_name, context_path,
+                                       context_is_directory);
+        return;
+    }
+    if (action != FT_FILES_ACTION_PASTE || s_files_clipboard_path[0] == '\0')
+        return;
+    rt_strncpy(destination,
+               context_is_directory ? context_path : s_files_current_path,
+               sizeof(destination) - 1U);
+    destination[sizeof(destination) - 1U] = '\0';
+    files_close_action_menu();
+    result = ft_storage_paste_path(s_files_clipboard_path, destination,
+                                   clipboard_cut, result_path,
+                                   sizeof(result_path));
+    if (result == RT_EOK)
+    {
+        if (clipboard_cut)
+        {
+            s_files_clipboard_path[0] = '\0';
+            s_files_clipboard_name[0] = '\0';
+            s_files_clipboard_cut = false;
+        }
+        files_refresh_view(false);
+        feathertalk_ui_alert(ft_preferences_text("粘贴完成", "Paste complete"),
+                            s_files_clipboard_name[0] != '\0' ?
+                            s_files_clipboard_name :
+                            ft_preferences_text("项目已移动。", "The item was moved."));
+    }
+    else
+    {
+        feathertalk_ui_alert(ft_preferences_text("无法粘贴", "Unable to paste"),
+                            ft_preferences_text("请检查目标空间、介质状态和文件夹层级。不能把文件夹粘贴进自身。",
+                                                "Check free space, media state, and folder nesting. A folder cannot be pasted into itself."));
+    }
+}
+
+static lv_obj_t *files_add_action_button(lv_obj_t *parent,
+                                         const char *symbol,
+                                         const char *text,
+                                         ft_files_action_t action,
+                                         bool quick)
+{
+    lv_obj_t *button = lv_button_create(parent);
+    lv_obj_t *label = lv_label_create(button);
+    char caption[FT_STORAGE_NAME_MAX + 16U];
+
+    lv_obj_set_style_radius(button, quick ? ft_layout_px(4) : 0,
+                            LV_PART_MAIN);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x242424), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(button, quick ? LV_OPA_COVER : LV_OPA_50,
+                            LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(button, quick ? 0 : 1, LV_PART_MAIN);
+    lv_obj_set_style_border_side(button, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+    lv_obj_set_style_border_color(button, lv_color_hex(0x454545), LV_PART_MAIN);
+    lv_obj_set_height(button, ft_layout_px(quick ? 64 : 46));
+    if (quick)
+    {
+        lv_obj_set_width(button, 0);
+        lv_obj_set_flex_grow(button, 1);
+        lv_snprintf(caption, sizeof(caption), "%s\n%s", symbol, text);
+        lv_label_set_text(label, caption);
+        lv_obj_set_width(label, lv_pct(100));
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_font(label, ft_layout_font(14), LV_PART_MAIN);
+        lv_obj_center(label);
+    }
+    else
+    {
+        lv_obj_set_width(button, lv_pct(100));
+        lv_snprintf(caption, sizeof(caption), "%s   %s", symbol, text);
+        lv_label_set_text(label, caption);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(label, lv_pct(100));
+        lv_obj_set_style_text_font(label, ft_layout_font(14), LV_PART_MAIN);
+        lv_obj_align(label, LV_ALIGN_LEFT_MID, 0, 0);
+    }
+    lv_obj_add_event_cb(button, files_action_clicked_cb, LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)action);
+    return button;
+}
+
+static void files_show_action_menu(const char *name, const char *path,
+                                   bool is_directory, bool current_folder)
+{
+    lv_obj_t *title;
+    lv_obj_t *content;
+    lv_obj_t *separator;
+
+    if (name == RT_NULL || path == RT_NULL) return;
+    files_close_action_menu();
+    rt_strncpy(s_files_context_name, name, sizeof(s_files_context_name) - 1U);
+    s_files_context_name[sizeof(s_files_context_name) - 1U] = '\0';
+    rt_strncpy(s_files_context_path, path, sizeof(s_files_context_path) - 1U);
+    s_files_context_path[sizeof(s_files_context_path) - 1U] = '\0';
+    s_files_context_is_directory = is_directory;
+    s_files_context_current_folder = current_folder;
+    s_files_action_box = lv_msgbox_create(RT_NULL);
+    lv_obj_set_width(s_files_action_box, lv_pct(86));
+    title = lv_msgbox_add_title(s_files_action_box, name);
+    lv_obj_set_style_text_font(title, ft_layout_font(18), LV_PART_MAIN);
+    content = lv_msgbox_get_content(s_files_action_box);
+    lv_obj_set_style_pad_all(content, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(content, ft_layout_px(3), LV_PART_MAIN);
+    s_files_action_quick = lv_obj_create(content);
+    lv_obj_set_size(s_files_action_quick, lv_pct(100), ft_layout_px(64));
+    lv_obj_set_style_bg_opa(s_files_action_quick, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_files_action_quick, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_files_action_quick, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(s_files_action_quick, ft_layout_px(3), LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_files_action_quick, LV_FLEX_FLOW_ROW);
+    lv_obj_remove_flag(s_files_action_quick, LV_OBJ_FLAG_SCROLLABLE);
+    s_files_action_cut = files_add_action_button(
+        s_files_action_quick, LV_SYMBOL_CUT,
+        ft_preferences_text("剪切", "Cut"), FT_FILES_ACTION_CUT, true);
+    s_files_action_copy = files_add_action_button(
+        s_files_action_quick, LV_SYMBOL_COPY,
+        ft_preferences_text("复制", "Copy"), FT_FILES_ACTION_COPY, true);
+    s_files_action_rename = files_add_action_button(
+        s_files_action_quick, LV_SYMBOL_EDIT,
+        ft_preferences_text("重命名", "Rename"), FT_FILES_ACTION_RENAME, true);
+    s_files_action_delete = files_add_action_button(
+        s_files_action_quick, LV_SYMBOL_TRASH,
+        ft_preferences_text("删除", "Delete"), FT_FILES_ACTION_DELETE, true);
+    separator = lv_obj_create(content);
+    lv_obj_set_size(separator, lv_pct(100), 1);
+    lv_obj_set_style_bg_color(separator, lv_color_hex(0x555555), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(separator, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(separator, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(separator, 0, LV_PART_MAIN);
+    s_files_action_view = files_add_action_button(
+        content, LV_SYMBOL_EYE_OPEN,
+        ft_preferences_text("打开", "Open"), FT_FILES_ACTION_VIEW, false);
+    s_files_action_refresh = files_add_action_button(
+        content, LV_SYMBOL_REFRESH,
+        ft_preferences_text("刷新", "Refresh"), FT_FILES_ACTION_REFRESH, false);
+    s_files_action_new_folder = files_add_action_button(
+        content, LV_SYMBOL_DIRECTORY,
+        ft_preferences_text("新建文件夹", "New folder"),
+        FT_FILES_ACTION_NEW_FOLDER, false);
+    s_files_action_paste = files_add_action_button(
+        content, LV_SYMBOL_PASTE,
+        ft_preferences_text("粘贴", "Paste"), FT_FILES_ACTION_PASTE, false);
+    s_files_action_cancel = files_add_action_button(
+        content, LV_SYMBOL_CLOSE,
+        ft_preferences_text("取消", "Cancel"), FT_FILES_ACTION_CANCEL, false);
+    lv_obj_set_style_text_color(lv_obj_get_child(s_files_action_delete, 0U),
+                                lv_color_hex(0xFF8A80), LV_PART_MAIN);
+    if (!is_directory)
+    {
+        lv_obj_add_flag(s_files_action_new_folder, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_files_action_paste, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_files_clipboard_path[0] == '\0')
+        lv_obj_add_state(s_files_action_paste, LV_STATE_DISABLED);
+    if (current_folder)
+    {
+        lv_obj_add_flag(s_files_action_quick, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_files_action_view, LV_OBJ_FLAG_HIDDEN);
+    }
+    else
+    {
+        lv_obj_add_flag(s_files_action_refresh, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_update_layout(s_files_action_box);
+}
+
+static void files_entry_long_pressed_cb(lv_event_t *event)
+{
+    lv_obj_t *row = lv_event_get_target(event);
+    lv_obj_t *name_label;
+    const char *name;
+    char path[FT_STORAGE_PATH_MAX];
+    bool is_directory = lv_event_get_user_data(event) ==
+                        &s_files_directory_marker;
+
+    if (row == RT_NULL || lv_obj_get_child_count(row) == 0U)
+        return;
+    name_label = lv_obj_get_child(row, 0U);
+    if (name_label == RT_NULL || !lv_obj_check_type(name_label, &lv_label_class))
+        return;
+    name = lv_label_get_text(name_label);
+    if (strcmp(s_files_current_path, FT_STORAGE_BROWSE_ROOT) == 0)
+    {
+        ft_storage_device_info_t info;
+        ft_storage_device_t device;
+        int info_result;
+
+        if (strcmp(name, "flash") == 0)
+            device = FT_STORAGE_DEVICE_FLASH;
+        else if (strcmp(name, "sdcard") == 0)
+            device = FT_STORAGE_DEVICE_SD;
+        else
+            return;
+        s_files_suppress_click_row = row;
+        s_storage_selected_device = device;
+        s_storage_format_target = FT_STORAGE_DEVICE_INVALID;
+        s_storage_format_from_files = false;
+        info_result = settings_storage_get_info(device, &info);
+        if (info_result == RT_EOK && info.can_format)
+        {
+            s_storage_format_from_files = true;
+            s_storage_format_target = device;
+            settings_storage_show_confirmation(1U);
+        }
+        else
+        {
+            feathertalk_ui_alert(
+                ft_preferences_text("当前不能格式化", "Formatting unavailable"),
+                device == FT_STORAGE_DEVICE_SD ?
+                ft_preferences_text("SD 卡未插入、正在使用，或已交给 USB 主机。",
+                                    "The SD card is absent, busy, or owned by the USB host.") :
+                ft_preferences_text("内置 Flash 正在使用，或已交给 USB 主机。",
+                                    "Internal Flash is busy or owned by the USB host."));
+        }
+        return;
+    }
+    if (ft_storage_join_path(s_files_current_path, name, path,
+                             sizeof(path)) != RT_EOK)
+        return;
+    s_files_suppress_click_row = row;
+    files_show_action_menu(name, path, is_directory, false);
+}
+
+static void files_list_long_pressed_cb(lv_event_t *event)
+{
+    if (lv_event_get_target(event) != s_files_list ||
+        strcmp(s_files_current_path, FT_STORAGE_BROWSE_ROOT) == 0)
+        return;
+    files_show_action_menu(ft_preferences_text("当前文件夹", "Current folder"),
+                           s_files_current_path, true, true);
+}
 
 static void files_format_bytes(uint64_t bytes, char *text, size_t text_size)
 {
@@ -3064,6 +3718,11 @@ static void files_entry_clicked_cb(lv_event_t *event)
     const char *name;
     char path[FT_STORAGE_PATH_MAX];
 
+    if (row == s_files_suppress_click_row)
+    {
+        s_files_suppress_click_row = RT_NULL;
+        return;
+    }
     if (row == RT_NULL || lv_obj_get_child_count(row) == 0U)
         return;
     name_label = lv_obj_get_child(row, 0U);
@@ -3120,6 +3779,10 @@ static bool files_add_entry(const ft_storage_entry_t *entry, void *context)
     lv_obj_add_event_cb(row, files_entry_clicked_cb, LV_EVENT_CLICKED,
                         entry->type == FT_STORAGE_ENTRY_DIRECTORY ?
                         &s_files_directory_marker : RT_NULL);
+    lv_obj_add_event_cb(row, files_entry_long_pressed_cb,
+                        LV_EVENT_LONG_PRESSED,
+                        entry->type == FT_STORAGE_ENTRY_DIRECTORY ?
+                        &s_files_directory_marker : RT_NULL);
 
     name = lv_label_create(row);
     lv_label_set_text(name, entry->name);
@@ -3142,6 +3805,7 @@ static bool files_add_entry(const ft_storage_entry_t *entry, void *context)
     }
     lv_obj_set_style_text_color(detail, lv_color_hex(0xA0A0A0), LV_PART_MAIN);
     lv_obj_set_style_text_font(detail, ft_layout_font(12), LV_PART_MAIN);
+
     return true;
 }
 
@@ -3219,6 +3883,7 @@ static void files_refresh_view(bool manual_refresh)
         ft_storage_get_volume(FT_STORAGE_SD_MOUNT_PATH,
                               &sd_volume) == RT_EOK && sd_volume.mounted;
     lv_obj_clean(s_files_list);
+    s_files_suppress_click_row = RT_NULL;
 
     if (strcmp(s_files_current_path, FT_STORAGE_BROWSE_ROOT) == 0)
     {
@@ -3344,6 +4009,14 @@ static void files_monitor_cb(lv_timer_t *timer)
     bool flash_mounted;
     bool sd_mounted;
     LV_UNUSED(timer);
+    if (s_storage_format_from_files)
+    {
+        uint8_t format_state = s_storage_format_state;
+        settings_storage_refresh();
+        if (format_state == FT_STORAGE_FORMAT_SUCCESS ||
+            format_state == FT_STORAGE_FORMAT_FAILED)
+            files_refresh_view(false);
+    }
     flash_mounted = ft_storage_get_volume(FT_STORAGE_FLASH_MOUNT_PATH,
                                           &flash_volume) == RT_EOK &&
                     flash_volume.mounted;
@@ -3364,6 +4037,27 @@ static void files_page_enter(void)
 
 static bool files_page_back(void)
 {
+    if (s_storage_format_from_files && s_storage_confirm_box != RT_NULL &&
+        lv_obj_is_valid(s_storage_confirm_box))
+    {
+        settings_storage_cancel_clicked_cb(RT_NULL);
+        return true;
+    }
+    if (s_files_name_box != RT_NULL && lv_obj_is_valid(s_files_name_box))
+    {
+        files_close_name_editor();
+        return true;
+    }
+    if (s_files_delete_box != RT_NULL && lv_obj_is_valid(s_files_delete_box))
+    {
+        files_delete_cancel_cb(RT_NULL);
+        return true;
+    }
+    if (s_files_action_box != RT_NULL && lv_obj_is_valid(s_files_action_box))
+    {
+        files_close_action_menu();
+        return true;
+    }
     if (ft_storage_parent_path(s_files_current_path, FT_STORAGE_BROWSE_ROOT))
     {
         files_refresh_view(false);
@@ -3374,6 +4068,15 @@ static bool files_page_back(void)
 
 static void files_page_leave(void)
 {
+    if (s_storage_format_from_files && s_storage_confirm_box != RT_NULL &&
+        lv_obj_is_valid(s_storage_confirm_box))
+        settings_storage_cancel_clicked_cb(RT_NULL);
+    files_close_action_menu();
+    files_close_delete_confirmation();
+    files_close_name_editor();
+    s_files_delete_path[0] = '\0';
+    s_files_delete_name[0] = '\0';
+    s_files_suppress_click_row = RT_NULL;
     if (s_files_monitor_timer != RT_NULL)
     {
         lv_timer_delete(s_files_monitor_timer);
@@ -3436,6 +4139,8 @@ static lv_obj_t *create_files_page(lv_obj_t *parent)
     lv_obj_set_height(s_files_list, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(s_files_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(s_files_list, ft_layout_px(3), LV_PART_MAIN);
+    lv_obj_add_event_cb(s_files_list, files_list_long_pressed_cb,
+                        LV_EVENT_LONG_PRESSED, RT_NULL);
     return page;
 }
 
@@ -3484,6 +4189,9 @@ bool ft_pages_test_icon_assignments_unique(void)
         if (icon >= FT_ICON_COUNT || used[icon]) return false;
         used[icon] = true;
     }
+    if (FT_ICON_WALLPAPER >= FT_ICON_COUNT || used[FT_ICON_WALLPAPER])
+        return false;
+    used[FT_ICON_WALLPAPER] = true;
     return true;
 }
 lv_obj_t *ft_pages_test_get_start_button(size_t i)
@@ -3604,6 +4312,26 @@ lv_obj_t *ft_pages_test_get_storage_confirm_continue(void)
 { return s_storage_confirm_continue; }
 uint8_t ft_pages_test_storage_confirm_stage(void)
 { return s_storage_confirm_stage; }
+bool ft_pages_test_storage_confirm_fonts(void)
+{
+    lv_obj_t *buttons[] =
+    {
+        s_storage_confirm_cancel, s_storage_confirm_continue,
+    };
+    size_t index;
+    for (index = 0U; index < sizeof(buttons) / sizeof(buttons[0]); index++)
+    {
+        lv_obj_t *label;
+        if (buttons[index] == RT_NULL || !lv_obj_is_valid(buttons[index]) ||
+            lv_obj_get_child_count(buttons[index]) == 0U)
+            return false;
+        label = lv_obj_get_child(buttons[index], 0U);
+        if (label == RT_NULL || !lv_obj_check_type(label, &lv_label_class) ||
+            lv_obj_get_style_text_font(label, LV_PART_MAIN) != ft_layout_font(14))
+            return false;
+    }
+    return true;
+}
 bool ft_pages_test_storage_visual_valid(void)
 {
     ft_storage_device_info_t info;
@@ -3760,9 +4488,191 @@ bool ft_pages_test_media_is_playing(void) { return s_media_playing; }
 int32_t ft_pages_test_media_track(void) { return s_media_track; }
 int32_t ft_pages_test_media_volume(void)
 { return s_media_volume != RT_NULL && lv_obj_is_valid(s_media_volume) ? lv_slider_get_value(s_media_volume) : -1; }
-lv_obj_t *ft_pages_test_get_messages_button(void) { return s_messages_button; }
 lv_obj_t *ft_pages_test_get_files_refresh_button(void) { return s_files_refresh_button; }
-uint32_t ft_pages_test_message_count(void) { return s_message_count; }
+lv_obj_t *ft_pages_test_get_files_up_button(void) { return s_files_up_button; }
+lv_obj_t *ft_pages_test_get_files_first_entry(void)
+{
+    uint32_t index;
+    uint32_t count;
+    lv_obj_t *sd_entry = RT_NULL;
+    if (s_files_list == RT_NULL || !lv_obj_is_valid(s_files_list) ||
+        lv_obj_get_child_count(s_files_list) == 0U)
+        return RT_NULL;
+    count = lv_obj_get_child_count(s_files_list);
+    for (index = 0U; index < count; index++)
+    {
+        lv_obj_t *row = lv_obj_get_child(s_files_list, index);
+        lv_obj_t *label;
+        const char *name;
+        if (row == RT_NULL || lv_obj_get_child_count(row) == 0U) continue;
+        label = lv_obj_get_child(row, 0U);
+        if (label == RT_NULL || !lv_obj_check_type(label, &lv_label_class)) continue;
+        name = lv_label_get_text(label);
+        if (name != RT_NULL && strcmp(name, "flash") == 0) return row;
+        if (name != RT_NULL && strcmp(name, "sdcard") == 0) sd_entry = row;
+    }
+    return sd_entry;
+}
+lv_obj_t *ft_pages_test_get_files_first_content_entry(void)
+{
+    if (s_files_list == RT_NULL || !lv_obj_is_valid(s_files_list) ||
+        lv_obj_get_child_count(s_files_list) == 0U)
+        return RT_NULL;
+    return lv_obj_get_child(s_files_list, 0U);
+}
+lv_obj_t *ft_pages_test_get_files_first_directory_entry(void)
+{
+    if (s_files_directory_count == 0U || s_files_list == RT_NULL ||
+        !lv_obj_is_valid(s_files_list) ||
+        lv_obj_get_child_count(s_files_list) == 0U)
+        return RT_NULL;
+    return lv_obj_get_child(s_files_list, 0U);
+}
+lv_obj_t *ft_pages_test_get_files_list(void) { return s_files_list; }
+lv_obj_t *ft_pages_test_get_files_action_delete(void)
+{ return s_files_action_delete; }
+lv_obj_t *ft_pages_test_get_files_action_cancel(void)
+{ return s_files_action_cancel; }
+lv_obj_t *ft_pages_test_get_files_action_paste(void)
+{ return s_files_action_paste; }
+lv_obj_t *ft_pages_test_get_files_action_rename(void)
+{ return s_files_action_rename; }
+lv_obj_t *ft_pages_test_get_files_action_new_folder(void)
+{ return s_files_action_new_folder; }
+lv_obj_t *ft_pages_test_get_files_delete_cancel(void)
+{ return s_files_delete_cancel; }
+lv_obj_t *ft_pages_test_get_files_name_cancel(void)
+{ return s_files_name_cancel; }
+bool ft_pages_test_files_action_visible(void)
+{
+    return s_files_action_box != RT_NULL && lv_obj_is_valid(s_files_action_box) &&
+           s_files_action_quick != RT_NULL && lv_obj_is_valid(s_files_action_quick) &&
+           s_files_action_copy != RT_NULL && lv_obj_is_valid(s_files_action_copy) &&
+           s_files_action_cut != RT_NULL && lv_obj_is_valid(s_files_action_cut) &&
+           s_files_action_rename != RT_NULL && lv_obj_is_valid(s_files_action_rename) &&
+           s_files_action_new_folder != RT_NULL && lv_obj_is_valid(s_files_action_new_folder) &&
+           s_files_action_refresh != RT_NULL && lv_obj_is_valid(s_files_action_refresh) &&
+           s_files_action_paste != RT_NULL && lv_obj_is_valid(s_files_action_paste) &&
+           s_files_action_delete != RT_NULL && lv_obj_is_valid(s_files_action_delete) &&
+           s_files_action_cancel != RT_NULL && lv_obj_is_valid(s_files_action_cancel) &&
+           s_files_context_path[0] != '\0';
+}
+bool ft_pages_test_files_action_fonts(void)
+{
+    lv_obj_t *buttons[] =
+    {
+        s_files_action_view, s_files_action_copy, s_files_action_cut,
+        s_files_action_rename, s_files_action_new_folder,
+        s_files_action_refresh,
+        s_files_action_paste, s_files_action_delete, s_files_action_cancel,
+    };
+    size_t index;
+    const lv_font_t *expected = ft_layout_font(14);
+    for (index = 0U; index < sizeof(buttons) / sizeof(buttons[0]); index++)
+    {
+        lv_obj_t *label;
+        if (buttons[index] == RT_NULL || !lv_obj_is_valid(buttons[index]) ||
+            lv_obj_get_child_count(buttons[index]) == 0U)
+            return false;
+        label = lv_obj_get_child(buttons[index], 0U);
+        if (label == RT_NULL || !lv_obj_check_type(label, &lv_label_class) ||
+            lv_obj_get_style_text_font(label, LV_PART_MAIN) != expected)
+            return false;
+    }
+    return true;
+}
+bool ft_pages_test_files_action_layout(void)
+{
+    lv_obj_t *all[] =
+    {
+        s_files_action_cut, s_files_action_copy, s_files_action_rename,
+        s_files_action_delete, s_files_action_view, s_files_action_refresh,
+        s_files_action_new_folder, s_files_action_paste, s_files_action_cancel,
+    };
+    lv_area_t box;
+    lv_area_t cut;
+    lv_area_t copy;
+    lv_area_t rename;
+    lv_area_t delete_area;
+    lv_area_t previous;
+    size_t index;
+    bool have_previous = false;
+
+    if (!ft_pages_test_files_action_visible()) return false;
+    lv_obj_update_layout(s_files_action_box);
+    lv_obj_get_coords(s_files_action_box, &box);
+    for (index = 0U; index < sizeof(all) / sizeof(all[0]); index++)
+    {
+        lv_area_t area;
+        if (lv_obj_has_flag(all[index], LV_OBJ_FLAG_HIDDEN)) continue;
+        lv_obj_get_coords(all[index], &area);
+        if (area.x1 < box.x1 || area.x2 > box.x2 ||
+            area.y1 < box.y1 || area.y2 > box.y2)
+            return false;
+    }
+    if (!s_files_context_current_folder)
+    {
+        if (lv_obj_has_flag(s_files_action_quick, LV_OBJ_FLAG_HIDDEN) ||
+            !lv_obj_has_flag(s_files_action_refresh, LV_OBJ_FLAG_HIDDEN))
+            return false;
+        lv_obj_get_coords(s_files_action_cut, &cut);
+        lv_obj_get_coords(s_files_action_copy, &copy);
+        lv_obj_get_coords(s_files_action_rename, &rename);
+        lv_obj_get_coords(s_files_action_delete, &delete_area);
+        if (cut.y1 != copy.y1 || cut.y1 != rename.y1 ||
+            cut.y1 != delete_area.y1 || cut.x1 >= copy.x1 ||
+            copy.x1 >= rename.x1 || rename.x1 >= delete_area.x1)
+            return false;
+        lv_obj_get_coords(s_files_action_view, &previous);
+        return previous.y1 > cut.y2;
+    }
+    if (!lv_obj_has_flag(s_files_action_quick, LV_OBJ_FLAG_HIDDEN) ||
+        !lv_obj_has_flag(s_files_action_view, LV_OBJ_FLAG_HIDDEN) ||
+        lv_obj_has_flag(s_files_action_refresh, LV_OBJ_FLAG_HIDDEN))
+        return false;
+    for (index = 5U; index < sizeof(all) / sizeof(all[0]); index++)
+    {
+        lv_area_t area;
+        if (lv_obj_has_flag(all[index], LV_OBJ_FLAG_HIDDEN)) continue;
+        lv_obj_get_coords(all[index], &area);
+        if (have_previous && area.y1 <= previous.y2) return false;
+        previous = area;
+        have_previous = true;
+    }
+    return have_previous;
+}
+bool ft_pages_test_files_context_is_directory(void)
+{ return s_files_context_is_directory; }
+bool ft_pages_test_files_name_editor_visible(bool rename_item)
+{
+    return s_files_name_box != RT_NULL && lv_obj_is_valid(s_files_name_box) &&
+           s_files_name_textarea != RT_NULL && lv_obj_is_valid(s_files_name_textarea) &&
+           s_files_name_keyboard != RT_NULL && lv_obj_is_valid(s_files_name_keyboard) &&
+           s_files_name_cancel != RT_NULL && lv_obj_is_valid(s_files_name_cancel) &&
+           s_files_name_confirm != RT_NULL && lv_obj_is_valid(s_files_name_confirm) &&
+           s_files_name_target[0] != '\0' &&
+           s_files_name_is_rename == rename_item;
+}
+bool ft_pages_test_files_rows_have_no_permanent_actions(void)
+{
+    uint32_t index;
+    if (s_files_list == RT_NULL || !lv_obj_is_valid(s_files_list)) return false;
+    for (index = 0U; index < lv_obj_get_child_count(s_files_list); index++)
+    {
+        lv_obj_t *row = lv_obj_get_child(s_files_list, index);
+        if (row != RT_NULL && lv_obj_check_type(row, &lv_button_class) &&
+            lv_obj_get_child_count(row) > 2U)
+            return false;
+    }
+    return true;
+}
+bool ft_pages_test_files_delete_confirmation_visible(void)
+{
+    return s_files_delete_box != RT_NULL && lv_obj_is_valid(s_files_delete_box) &&
+           s_files_delete_cancel != RT_NULL && lv_obj_is_valid(s_files_delete_cancel) &&
+           s_files_delete_confirm != RT_NULL && lv_obj_is_valid(s_files_delete_confirm) &&
+           s_files_delete_path[0] != '\0';
+}
 uint32_t ft_pages_test_files_refresh_count(void) { return s_files_refresh_count; }
 bool ft_pages_test_files_browser_ready(void)
 {
@@ -3814,10 +4724,20 @@ bool ft_pages_test_transient_slots_clear(void)
         s_media_prev_button != RT_NULL || s_media_button != RT_NULL ||
         s_media_next_button != RT_NULL || s_media_label != RT_NULL ||
         s_media_state_icon != RT_NULL || s_media_track_label != RT_NULL ||
-        s_media_volume != RT_NULL || s_messages_button != RT_NULL ||
-        s_messages_count_label != RT_NULL || s_files_refresh_button != RT_NULL ||
+        s_media_volume != RT_NULL || s_files_refresh_button != RT_NULL ||
         s_files_status_label != RT_NULL || s_files_path_label != RT_NULL ||
         s_files_up_button != RT_NULL || s_files_list != RT_NULL ||
+        s_files_action_box != RT_NULL || s_files_action_view != RT_NULL ||
+        s_files_action_quick != RT_NULL ||
+        s_files_action_copy != RT_NULL || s_files_action_cut != RT_NULL ||
+        s_files_action_rename != RT_NULL || s_files_action_new_folder != RT_NULL ||
+        s_files_action_refresh != RT_NULL ||
+        s_files_action_paste != RT_NULL || s_files_action_delete != RT_NULL ||
+        s_files_action_cancel != RT_NULL || s_files_delete_box != RT_NULL ||
+        s_files_delete_cancel != RT_NULL || s_files_delete_confirm != RT_NULL ||
+        s_files_name_box != RT_NULL || s_files_name_textarea != RT_NULL ||
+        s_files_name_error != RT_NULL || s_files_name_keyboard != RT_NULL ||
+        s_files_name_cancel != RT_NULL || s_files_name_confirm != RT_NULL ||
         s_files_monitor_timer != RT_NULL) return false;
     for (i = 0U; i < FT_SYSTEM_SUMMARY_COUNT; i++)
         if (s_system_summary_values[i] != RT_NULL ||

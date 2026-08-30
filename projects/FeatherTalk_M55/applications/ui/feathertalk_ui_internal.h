@@ -17,7 +17,7 @@ typedef enum
     FT_PAGE_SYSTEM,
     FT_PAGE_SETTINGS,
     FT_PAGE_MEDIA,
-    FT_PAGE_MESSAGES,
+    FT_PAGE_GALLERY,
     FT_PAGE_FILES,
     FT_PAGE_ABOUT,
     FT_PAGE_SETTINGS_DISPLAY,
@@ -89,6 +89,7 @@ typedef enum
     FT_BACKGROUND_BLACK = 0,
     FT_BACKGROUND_DARK,
     FT_BACKGROUND_ACCENT,
+    FT_BACKGROUND_CUSTOM,
     FT_BACKGROUND_COUNT
 } ft_background_mode_t;
 
@@ -107,6 +108,7 @@ typedef struct
     bool use_24_hour;
     int16_t timezone_offset_minutes;
     ft_language_t language;
+    char wallpaper_path[256];
     uint32_t revision;
 } ft_ui_preferences_t;
 
@@ -165,6 +167,10 @@ const ft_ui_preferences_t *ft_preferences_get(void);
 void ft_preferences_set_accent(uint32_t rgb);
 void ft_preferences_set_tile_opa(uint8_t opa);
 void ft_preferences_set_background(ft_background_mode_t background);
+void ft_preferences_set_wallpaper_file(const char *path);
+bool ft_preferences_wallpaper_available(void);
+void ft_preferences_refresh_wallpaper(void);
+int ft_preferences_flush(void);
 void ft_preferences_set_24_hour(bool enabled);
 void ft_preferences_set_timezone(int16_t offset_minutes);
 void ft_preferences_set_language(ft_language_t language);
@@ -172,6 +178,10 @@ const char *ft_preferences_text(const char *zh_cn, const char *en_us);
 void ft_preferences_format_clock(uint32_t seconds, bool utc_time,
                                  char *buffer, size_t buffer_size);
 void ft_preferences_reset(void);
+#ifdef FEATHERTALK_UI_TEST_MODE
+void ft_preferences_test_begin(void);
+void ft_preferences_test_end(void);
+#endif
 
 void ft_metrics_init(lv_display_t *display, lv_obj_t *root);
 void ft_metrics_get(ft_ui_metrics_t *metrics);
@@ -212,6 +222,8 @@ bool ft_tiles_test_live_enabled(size_t app_index);
 lv_obj_t *ft_ui_test_get_nav_button(ft_nav_button_id_t button_id);
 lv_obj_t *ft_ui_test_get_status_bar(void);
 bool ft_ui_test_status_monitor_visible(void);
+bool ft_ui_test_wallpaper_cached(void);
+bool ft_ui_test_shell_seams_closed(void);
 lv_obj_t *ft_ui_test_get_notification_panel(void);
 int32_t ft_ui_test_notification_y(void);
 void ft_ui_test_notification_drag_begin(int32_t pointer_y);
@@ -272,6 +284,7 @@ bool ft_pages_test_storage_visual_valid(void);
 lv_obj_t *ft_pages_test_get_storage_confirm_cancel(void);
 lv_obj_t *ft_pages_test_get_storage_confirm_continue(void);
 uint8_t ft_pages_test_storage_confirm_stage(void);
+bool ft_pages_test_storage_confirm_fonts(void);
 bool ft_pages_test_storage_state_valid(void);
 lv_obj_t *ft_pages_test_get_time_format_button(size_t index);
 lv_obj_t *ft_pages_test_get_timezone_dropdown(void);
@@ -303,9 +316,26 @@ lv_obj_t *ft_pages_test_get_media_next_button(void);
 lv_obj_t *ft_pages_test_get_media_volume(void);
 int32_t ft_pages_test_media_track(void);
 int32_t ft_pages_test_media_volume(void);
-lv_obj_t *ft_pages_test_get_messages_button(void);
 lv_obj_t *ft_pages_test_get_files_refresh_button(void);
-uint32_t ft_pages_test_message_count(void);
+lv_obj_t *ft_pages_test_get_files_up_button(void);
+lv_obj_t *ft_pages_test_get_files_first_entry(void);
+lv_obj_t *ft_pages_test_get_files_first_content_entry(void);
+lv_obj_t *ft_pages_test_get_files_first_directory_entry(void);
+lv_obj_t *ft_pages_test_get_files_list(void);
+lv_obj_t *ft_pages_test_get_files_action_delete(void);
+lv_obj_t *ft_pages_test_get_files_action_cancel(void);
+lv_obj_t *ft_pages_test_get_files_action_paste(void);
+lv_obj_t *ft_pages_test_get_files_action_rename(void);
+lv_obj_t *ft_pages_test_get_files_action_new_folder(void);
+lv_obj_t *ft_pages_test_get_files_delete_cancel(void);
+lv_obj_t *ft_pages_test_get_files_name_cancel(void);
+bool ft_pages_test_files_action_visible(void);
+bool ft_pages_test_files_action_fonts(void);
+bool ft_pages_test_files_action_layout(void);
+bool ft_pages_test_files_context_is_directory(void);
+bool ft_pages_test_files_name_editor_visible(bool rename_item);
+bool ft_pages_test_files_rows_have_no_permanent_actions(void);
+bool ft_pages_test_files_delete_confirmation_visible(void);
 uint32_t ft_pages_test_files_refresh_count(void);
 bool ft_pages_test_files_browser_ready(void);
 bool ft_pages_test_files_at_root(void);
@@ -348,6 +378,8 @@ void ft_ui_test_print_status(void);
 lv_color_t ft_ui_accent_color(void);
 void ft_ui_set_accent(uint32_t rgb);
 void ft_ui_set_page_background(uint32_t rgb);
+void ft_ui_set_page_wallpaper(const char *path);
+bool ft_ui_page_wallpaper_active(void);
 void ft_ui_register_page_background(lv_obj_t *obj);
 void ft_ui_register_accent(lv_obj_t *obj, ft_accent_target_t target);
 size_t ft_ui_accent_object_count(void);

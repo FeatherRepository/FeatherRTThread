@@ -10,7 +10,7 @@ typedef enum
     FT_ICON_SYSTEM = 0,
     FT_ICON_SETTINGS,
     FT_ICON_MEDIA,
-    FT_ICON_MESSAGES,
+    FT_ICON_GALLERY,
     FT_ICON_FILES,
     FT_ICON_ABOUT,
     FT_ICON_BACK,
@@ -47,6 +47,7 @@ typedef enum
     FT_ICON_TILE_PATTERN,
     FT_ICON_FLASH_DEVICE,
     FT_ICON_SD_DEVICE,
+    FT_ICON_WALLPAPER,
     FT_ICON_COUNT
 } ft_icon_id_t;
 

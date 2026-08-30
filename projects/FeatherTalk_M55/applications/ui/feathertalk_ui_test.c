@@ -1,8 +1,15 @@
+#include <fcntl.h>
 #include <rtthread.h>
+#include <stdint.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/unistd.h>
+#include "feathertalk_storage.h"
 #include "feathertalk_ui.h"
+#include "feathertalk_ui_gallery.h"
 #include "feathertalk_ui_internal.h"
 #include "feathertalk_ui_notifications.h"
+#include "feathertalk_ui_preferences_store.h"
 
 #ifdef FEATHERTALK_UI_TEST_MODE
 
@@ -10,6 +17,7 @@
 #define FT_UI_TEST_STEP_MS         320U
 #define FT_UI_TEST_ROUTE_LIMIT     8U
 #define FT_UI_TEST_MEDIA_INDEX     1U
+#define FT_UI_TEST_GALLERY_FIXTURE "/flash/Pictures/.feathertalk-ui-click-test.bmp"
 
 typedef enum
 {
@@ -105,11 +113,12 @@ static uint32_t s_fail_count;
 static uint32_t s_action_count;
 static uint32_t s_start_ms;
 static bool s_step_period_active;
-static uint32_t s_message_before;
 static uint32_t s_files_before;
 static uint32_t s_shade_render_before;
 static uint8_t s_settings_brightness_before;
 static uint8_t s_lifecycle_wait_steps;
+static uint8_t s_gallery_wait_steps;
+static ft_ui_preferences_t s_preferences_before;
 
 static void test_record(bool passed, const char *action, const char *detail)
 {
@@ -195,6 +204,8 @@ static void run_settings_test(void)
     size_t background_count = ft_pages_test_background_count();
     const size_t preference_base = 21U;
     char detail[24];
+    if (!ft_preferences_wallpaper_available() && background_count > 0U)
+        background_count--;
     if (s_control_index == 0U)
     {
         test_record(ft_pages_test_settings_count() == 9U &&
@@ -554,21 +565,223 @@ static void run_media_test(void)
     s_control_index++;
 }
 
-static void run_message_test(void)
+static bool s_gallery_fixture_prepared;
+static bool s_gallery_fixture_created;
+
+static void test_write_le32(uint8_t *bytes, uint32_t value)
 {
+    bytes[0] = (uint8_t)value;
+    bytes[1] = (uint8_t)(value >> 8U);
+    bytes[2] = (uint8_t)(value >> 16U);
+    bytes[3] = (uint8_t)(value >> 24U);
+}
+
+static bool test_write_all(int file, const uint8_t *data, size_t size)
+{
+    size_t offset = 0U;
+    while (offset < size)
+    {
+        int written = write(file, data + offset, size - offset);
+        if (written <= 0) return false;
+        offset += (size_t)written;
+    }
+    return true;
+}
+
+static bool test_prepare_gallery_fixture(void)
+{
+    enum { WIDTH = 32, HEIGHT = 24, ROW_BYTES = WIDTH * 3 };
+    uint8_t header[54] = {0};
+    uint8_t row[ROW_BYTES];
+    struct stat status;
+    int file;
+    int x;
+    int y;
+
+    if (stat(FT_UI_TEST_GALLERY_FIXTURE, &status) == 0)
+        return S_ISREG(status.st_mode);
+    file = open(FT_UI_TEST_GALLERY_FIXTURE,
+                O_CREAT | O_TRUNC | O_WRONLY, 0666);
+    if (file < 0) return false;
+    header[0] = 'B';
+    header[1] = 'M';
+    test_write_le32(header + 2U, sizeof(header) + ROW_BYTES * HEIGHT);
+    test_write_le32(header + 10U, sizeof(header));
+    test_write_le32(header + 14U, 40U);
+    test_write_le32(header + 18U, WIDTH);
+    test_write_le32(header + 22U, HEIGHT);
+    header[26] = 1U;
+    header[28] = 24U;
+    test_write_le32(header + 34U, ROW_BYTES * HEIGHT);
+    if (!test_write_all(file, header, sizeof(header))) goto fail;
+    for (y = 0; y < HEIGHT; y++)
+    {
+        for (x = 0; x < WIDTH; x++)
+        {
+            row[x * 3] = (uint8_t)(32 + x * 5);
+            row[x * 3 + 1] = (uint8_t)(48 + y * 7);
+            row[x * 3 + 2] = (uint8_t)(192 - x * 3);
+        }
+        if (!test_write_all(file, row, sizeof(row))) goto fail;
+    }
+    close(file);
+    s_gallery_fixture_created = true;
+    return true;
+
+fail:
+    close(file);
+    (void)unlink(FT_UI_TEST_GALLERY_FIXTURE);
+    return false;
+}
+
+static void test_cleanup_gallery_fixture(void)
+{
+    if (s_gallery_fixture_created)
+        (void)unlink(FT_UI_TEST_GALLERY_FIXTURE);
+    s_gallery_fixture_created = false;
+}
+
+static void run_gallery_test(void)
+{
+    lv_obj_t *image;
     if (s_control_index == 0U)
     {
-        s_message_before = ft_pages_test_message_count();
-        (void)test_click(ft_pages_test_get_messages_button(), "messages.notify", "create alert");
-        test_record(ft_pages_test_message_count() == s_message_before + 1U,
-                    "messages.count", "incremented");
-        test_record(ft_ui_test_get_alert_button() != RT_NULL, "messages.alert", "visible");
+        if (!s_gallery_fixture_prepared)
+        {
+            s_gallery_fixture_prepared = true;
+            if (ft_gallery_test_entry_count() == 0U)
+            {
+                test_record(test_prepare_gallery_fixture(),
+                            "gallery.fixture",
+                            "temporary real BMP created for click/decode coverage");
+                (void)test_click(ft_gallery_test_get_refresh_button(),
+                                 "gallery.fixture.refresh", "discover fixture");
+                s_gallery_wait_steps = 0U;
+                return;
+            }
+        }
+        if (!ft_gallery_test_thumbnails_ready() && s_gallery_wait_steps < 80U)
+        {
+            s_gallery_wait_steps++;
+            return;
+        }
+        test_record(ft_gallery_test_browser_visible() &&
+                    ft_gallery_test_selected_source() == FT_GALLERY_SOURCE_FLASH &&
+                    ft_gallery_test_path_safe() &&
+                    ft_gallery_test_uses_dedicated_collection(),
+                    "gallery.collection", "dedicated Flash/SD Pictures collection");
+        test_record(ft_gallery_test_get_source_button(FT_GALLERY_SOURCE_FLASH) != RT_NULL &&
+                    ft_gallery_test_get_source_button(FT_GALLERY_SOURCE_SD) != RT_NULL,
+                    "gallery.sources", "independent Flash and SD collections");
+        test_record(ft_gallery_test_thumbnails_ready(),
+                    "gallery.thumbnails",
+                    "RGB565 previews and formatted dimensions/size");
+        (void)test_click(ft_gallery_test_get_refresh_button(),
+                         "gallery.refresh", "refresh current source");
+        s_gallery_wait_steps = 0U;
         s_control_index++;
         return;
     }
     if (s_control_index == 1U)
     {
-        (void)test_alert_close("messages.alert.close");
+        if (!ft_gallery_test_thumbnails_ready() && s_gallery_wait_steps < 80U)
+        {
+            s_gallery_wait_steps++;
+            return;
+        }
+        test_record(ft_gallery_test_thumbnails_ready(),
+                    "gallery.refresh.thumbnails", "previews rebuilt progressively");
+        image = ft_gallery_test_get_first_image();
+        if (image != RT_NULL)
+        {
+            test_record(ft_gallery_test_entry_hit_target(0U),
+                        "gallery.hit_target",
+                        "whole 72px+ row is clickable; children do not intercept");
+            (void)test_click(image, "gallery.open", "first supported image");
+            test_record(ft_gallery_test_viewer_visible() &&
+                        ft_gallery_test_path_safe() &&
+                        ft_gallery_test_preview_loading(),
+                        "gallery.viewer.immediate",
+                        "viewer shell and loading feedback shown before decode");
+            s_gallery_wait_steps = 0U;
+        }
+        else
+        {
+            test_record(true, "gallery.empty", "no image on Flash; browser remains usable");
+        }
+        s_control_index++;
+        return;
+    }
+    if (s_control_index == 2U)
+    {
+        if (ft_gallery_test_viewer_visible() &&
+            ft_gallery_test_preview_loading() && s_gallery_wait_steps < 80U)
+        {
+            s_gallery_wait_steps++;
+            return;
+        }
+        if (ft_gallery_test_viewer_visible())
+        {
+            test_record(ft_gallery_test_path_safe() &&
+                        !ft_gallery_test_preview_loading() &&
+                        ft_gallery_test_current_image_verified() &&
+                        ft_gallery_test_current_image_cached(),
+                        "gallery.viewer", "non-black RGB565 cached preview");
+            test_record(ft_gallery_can_open_file(ft_gallery_test_current_file()),
+                        "gallery.files.handoff",
+                        "Files can route this image through the Gallery viewer");
+            if (ft_gallery_test_current_image_verified())
+            {
+                (void)test_click(ft_gallery_test_get_wallpaper_button(),
+                                 "gallery.wallpaper", "set current photo");
+                test_record(ft_preferences_get()->background == FT_BACKGROUND_CUSTOM &&
+                            strcmp(ft_preferences_get()->wallpaper_path,
+                                   ft_gallery_test_current_file()) == 0 &&
+                            ft_ui_test_wallpaper_cached(),
+                            "gallery.wallpaper.state",
+                            "custom background uses non-black RGB565 cache");
+                (void)test_alert_close("gallery.wallpaper.alert.close");
+            }
+            (void)test_click(ft_gallery_test_get_delete_button(),
+                             "gallery.delete.request",
+                             "viewer deletion requires confirmation");
+            test_record(ft_gallery_test_delete_confirmation_visible(),
+                        "gallery.delete.confirm", "current image is explicit");
+            if (ft_gallery_test_get_delete_cancel() != RT_NULL &&
+                lv_obj_is_valid(ft_gallery_test_get_delete_cancel()))
+            {
+                s_action_count++;
+                (void)lv_obj_send_event(ft_gallery_test_get_delete_cancel(),
+                                        LV_EVENT_CLICKED, RT_NULL);
+            }
+            test_record(!ft_gallery_test_delete_confirmation_visible() &&
+                        ft_gallery_test_viewer_visible(),
+                        "gallery.delete.cancel", "closed; image retained");
+        }
+        else
+        {
+            test_record(true, "gallery.viewer.skip", "no Flash image to decode");
+        }
+        s_control_index++;
+        return;
+    }
+    if (s_control_index == 3U)
+    {
+        if (ft_gallery_test_viewer_visible())
+            (void)test_click(ft_gallery_test_get_close_button(),
+                             "gallery.close", "return to browser");
+        (void)test_click(ft_gallery_test_get_source_button(FT_GALLERY_SOURCE_SD),
+                         "gallery.source", "SD card");
+        test_record(ft_gallery_test_selected_source() == FT_GALLERY_SOURCE_SD &&
+                    ft_gallery_test_browser_visible() &&
+                    ft_gallery_test_path_safe() &&
+                    ft_gallery_test_uses_dedicated_collection(),
+                    "gallery.sd", "dedicated SD Pictures collection or unavailable state");
+        (void)test_click(ft_gallery_test_get_source_button(FT_GALLERY_SOURCE_FLASH),
+                         "gallery.source", "Internal Flash");
+        test_cleanup_gallery_fixture();
+        test_record(!s_gallery_fixture_created,
+                    "gallery.fixture.cleanup", "temporary image removed");
         s_control_index++;
         return;
     }
@@ -585,10 +798,183 @@ static void run_files_test(void)
                     "/ with flash and sdcard device directories");
         test_record(ft_pages_test_files_entry_count() >= 2U,
                     "files.devices", "flash + sdcard entries");
+        test_record(ft_storage_test_delete_contract(),
+                    "files.delete.contract",
+                    "file + recursive directory removed; volume roots rejected");
+        test_record(ft_storage_test_clipboard_contract(),
+                    "files.clipboard.contract",
+                    "copy, move, collision rename, and self-nesting rejection");
+        test_record(ft_storage_test_name_contract(),
+                    "files.name.contract",
+                    "create folder, rename, collision/path guards, and root protection");
         s_files_before = ft_pages_test_files_refresh_count();
         (void)test_click(ft_pages_test_get_files_refresh_button(), "files.refresh", RT_NULL);
         test_record(ft_pages_test_files_refresh_count() == s_files_before + 1U,
                     "files.refresh.count", "incremented");
+        s_control_index++;
+        return;
+    }
+    if (s_control_index == 1U)
+    {
+        lv_obj_t *device_entry = ft_pages_test_get_files_first_entry();
+        s_action_count++;
+        if (device_entry != RT_NULL && lv_obj_is_valid(device_entry))
+            (void)lv_obj_send_event(device_entry, LV_EVENT_LONG_PRESSED, RT_NULL);
+        test_record(ft_router_current_page() == FT_PAGE_FILES &&
+                    ft_pages_test_files_at_root() &&
+                    ft_pages_test_storage_selected_device() == 0U &&
+                    ft_pages_test_storage_action_target() == 0U &&
+                    ft_pages_test_storage_confirm_stage() == 1U,
+                    "files.device.format", "volume root opens in-place locked format confirmation");
+        test_record(ft_pages_test_storage_confirm_fonts(),
+                    "files.device.format.fonts",
+                    "format action labels use the Simplified Chinese font");
+        if (ft_pages_test_get_storage_confirm_continue() != RT_NULL &&
+            lv_obj_is_valid(ft_pages_test_get_storage_confirm_continue()))
+        {
+            s_action_count++;
+            (void)lv_obj_send_event(ft_pages_test_get_storage_confirm_continue(),
+                                    LV_EVENT_CLICKED, RT_NULL);
+        }
+        test_record(ft_router_current_page() == FT_PAGE_FILES &&
+                    ft_pages_test_files_at_root() &&
+                    ft_pages_test_storage_action_target() == 0U &&
+                    ft_pages_test_storage_confirm_stage() == 2U,
+                    "files.device.format.continue",
+                    "final confirmation remains over Files; no erase requested");
+        if (ft_pages_test_get_storage_confirm_cancel() != RT_NULL &&
+            lv_obj_is_valid(ft_pages_test_get_storage_confirm_cancel()))
+        {
+            s_action_count++;
+            (void)lv_obj_send_event(ft_pages_test_get_storage_confirm_cancel(),
+                                    LV_EVENT_CLICKED, RT_NULL);
+        }
+        if (device_entry != RT_NULL && lv_obj_is_valid(device_entry))
+            (void)lv_obj_send_event(device_entry, LV_EVENT_CLICKED, RT_NULL);
+        test_record(ft_router_current_page() == FT_PAGE_FILES &&
+                    ft_pages_test_files_at_root(),
+                    "files.device.format.cancel", "no format; Files never changed page");
+        s_control_index++;
+        return;
+    }
+    if (s_control_index == 2U)
+    {
+        lv_obj_t *device_entry = ft_pages_test_get_files_first_entry();
+        s_action_count++;
+        if (device_entry != RT_NULL && lv_obj_is_valid(device_entry))
+            (void)lv_obj_send_event(device_entry, LV_EVENT_CLICKED, RT_NULL);
+        test_record(!ft_pages_test_files_at_root() &&
+                    ft_pages_test_files_mounted(),
+                    "files.device.open", "opened Internal Flash storage");
+        s_control_index++;
+        return;
+    }
+    if (s_control_index == 3U)
+    {
+        lv_obj_t *directory = ft_pages_test_get_files_first_directory_entry();
+        lv_obj_t *entry = ft_pages_test_get_files_first_content_entry();
+        if (directory != RT_NULL) entry = directory;
+        test_record(ft_pages_test_files_rows_have_no_permanent_actions(),
+                    "files.actions.hidden", "no persistent row action buttons");
+        if (entry != RT_NULL && lv_obj_check_type(entry, &lv_button_class))
+        {
+            s_action_count++;
+            (void)lv_obj_send_event(entry, LV_EVENT_LONG_PRESSED, RT_NULL);
+            test_record(ft_pages_test_files_action_visible(),
+                        "files.longpress.menu",
+                        "open/cut/copy/rename/new-folder/paste/delete actions appear on demand");
+            test_record(ft_pages_test_files_action_fonts(),
+                        "files.longpress.fonts",
+                        "all context labels use the Simplified Chinese font");
+            test_record(ft_pages_test_files_action_layout(),
+                        "files.longpress.layout",
+                        "four quick actions above supported vertical rows");
+            test_record(ft_pages_test_get_files_action_paste() != RT_NULL &&
+                        lv_obj_has_state(ft_pages_test_get_files_action_paste(),
+                                         LV_STATE_DISABLED),
+                        "files.paste.disabled", "empty clipboard");
+            if (directory != RT_NULL)
+            {
+                test_record(ft_pages_test_files_context_is_directory() &&
+                            ft_pages_test_get_files_action_new_folder() != RT_NULL &&
+                            !lv_obj_has_flag(ft_pages_test_get_files_action_new_folder(),
+                                             LV_OBJ_FLAG_HIDDEN),
+                            "files.directory.actions",
+                            "directory supports recursive clipboard/delete and creating children");
+            }
+            s_action_count++;
+            (void)lv_obj_send_event(ft_pages_test_get_files_action_rename(),
+                                    LV_EVENT_CLICKED, RT_NULL);
+            test_record(ft_pages_test_files_name_editor_visible(true),
+                        "files.rename.editor", "keyboard editor opens with current name");
+            if (ft_pages_test_get_files_name_cancel() != RT_NULL &&
+                lv_obj_is_valid(ft_pages_test_get_files_name_cancel()))
+            {
+                s_action_count++;
+                (void)lv_obj_send_event(ft_pages_test_get_files_name_cancel(),
+                                        LV_EVENT_CLICKED, RT_NULL);
+            }
+            (void)lv_obj_send_event(entry, LV_EVENT_LONG_PRESSED, RT_NULL);
+            s_action_count++;
+            (void)lv_obj_send_event(ft_pages_test_get_files_action_delete(),
+                                    LV_EVENT_CLICKED, RT_NULL);
+            test_record(true, "files.delete.request",
+                        "long-press action requires confirmation");
+            test_record(ft_pages_test_files_delete_confirmation_visible(),
+                        "files.delete.confirm", "explicit target and confirmation");
+            s_action_count++;
+            if (ft_pages_test_get_files_delete_cancel() != RT_NULL &&
+                lv_obj_is_valid(ft_pages_test_get_files_delete_cancel()))
+                (void)lv_obj_send_event(ft_pages_test_get_files_delete_cancel(),
+                                        LV_EVENT_CLICKED, RT_NULL);
+            test_record(!ft_pages_test_files_delete_confirmation_visible(),
+                        "files.delete.cancel", "closed; nothing deleted");
+        }
+        else
+        {
+            test_record(true, "files.delete.empty",
+                        "device has no entries; long-press action is not shown");
+        }
+        s_control_index++;
+        return;
+    }
+    if (s_control_index == 4U)
+    {
+        lv_obj_t *list = ft_pages_test_get_files_list();
+        if (list != RT_NULL && lv_obj_is_valid(list))
+        {
+            s_action_count++;
+            (void)lv_obj_send_event(list, LV_EVENT_LONG_PRESSED, RT_NULL);
+            test_record(ft_pages_test_files_action_visible() &&
+                        ft_pages_test_get_files_action_new_folder() != RT_NULL &&
+                        !lv_obj_has_flag(ft_pages_test_get_files_action_new_folder(),
+                                         LV_OBJ_FLAG_HIDDEN),
+                        "files.folder.create", "blank area offers New folder and Paste");
+            test_record(ft_pages_test_files_action_layout(),
+                        "files.folder.layout",
+                        "blank-area actions are a single vertical menu");
+            s_action_count++;
+            (void)lv_obj_send_event(ft_pages_test_get_files_action_new_folder(),
+                                    LV_EVENT_CLICKED, RT_NULL);
+            test_record(ft_pages_test_files_name_editor_visible(false),
+                        "files.folder.editor", "new-folder keyboard editor opens");
+            if (ft_pages_test_get_files_name_cancel() != RT_NULL &&
+                lv_obj_is_valid(ft_pages_test_get_files_name_cancel()))
+            {
+                s_action_count++;
+                (void)lv_obj_send_event(ft_pages_test_get_files_name_cancel(),
+                                        LV_EVENT_CLICKED, RT_NULL);
+            }
+        }
+        s_control_index++;
+        return;
+    }
+    if (s_control_index == 5U)
+    {
+        (void)test_click(ft_pages_test_get_files_up_button(),
+                         "files.up", "return to storage devices");
+        test_record(ft_pages_test_files_at_root(), "files.root.restore",
+                    "ready for route Back");
         s_control_index++;
         return;
     }
@@ -605,7 +991,7 @@ static void run_page_control_test(const ft_app_descriptor_t *app)
     }
     else if (app->page_id == FT_PAGE_SETTINGS) run_settings_test();
     else if (app->page_id == FT_PAGE_MEDIA) run_media_test();
-    else if (app->page_id == FT_PAGE_MESSAGES) run_message_test();
+    else if (app->page_id == FT_PAGE_GALLERY) run_gallery_test();
     else if (app->page_id == FT_PAGE_FILES) run_files_test();
     else
     {
@@ -631,12 +1017,17 @@ static void ui_test_timer_cb(lv_timer_t *timer)
     case FT_TEST_PENDING:
     {
         const ft_ui_layout_t *layout = ft_layout_get();
+        ft_preferences_store_status_t store_status;
         char detail[64];
         lv_snprintf(detail, sizeof(detail), "%ldx%ld %u columns scale %ld%%",
                     (long)layout->screen_width, (long)layout->screen_height,
                     layout->tile_columns, (long)layout->scale_percent);
         test_record(home_start_is_ready(), "shell.start", "home/start");
         test_record(app_count == 4U, "registry.count", "4 standalone applications");
+        test_record(ft_preferences_store_get_status(&store_status) == RT_EOK &&
+                    store_status.initialized && store_status.worker_started &&
+                    store_status.test_suspended,
+                    "preferences.store", "A/B Flash store active; tests suspended");
         test_record(ft_pages_test_icon_assignments_unique(), "icons.entity.unique",
                     "apps/settings/cards use distinct semantic icons");
         test_record(ft_layout_profiles_self_test(), "layout.profiles",
@@ -646,6 +1037,8 @@ static void ui_test_timer_cb(lv_timer_t *timer)
                     "layout.current", detail);
         test_record(ft_ui_test_status_monitor_visible(), "status.monitor",
                     "present FPS / refresh Hz / RT heap");
+        test_record(ft_ui_test_shell_seams_closed(), "shell.seams",
+                    "status/content/navigation are pixel-contiguous");
         ft_ui_test_notification_reset();
         s_shade_render_before = ft_ui_test_notification_render_count();
         ft_metrics_route_baseline();
@@ -1278,7 +1671,19 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         preferences = ft_preferences_get();
         test_record(preferences->accent_rgb == 0x0078D7UL && preferences->tile_opa == 255U &&
                     preferences->background == FT_BACKGROUND_BLACK,
-                    "preferences.restore", "defaults");
+                    "preferences.defaults", "reset path exercised under test suspension");
+        ft_preferences_test_end();
+        preferences = ft_preferences_get();
+        test_record(preferences->accent_rgb == s_preferences_before.accent_rgb &&
+                    preferences->tile_opa == s_preferences_before.tile_opa &&
+                    preferences->background == s_preferences_before.background &&
+                    preferences->use_24_hour == s_preferences_before.use_24_hour &&
+                    preferences->timezone_offset_minutes ==
+                        s_preferences_before.timezone_offset_minutes &&
+                    preferences->language == s_preferences_before.language &&
+                    strcmp(preferences->wallpaper_path,
+                           s_preferences_before.wallpaper_path) == 0,
+                    "preferences.restore", "per-device configuration restored");
         test_record(ft_ui_test_notification_count() == 0U &&
                     ft_ui_test_brightness() == 100U,
                     "shade.restore", "queue empty / brightness 100%");
@@ -1300,6 +1705,8 @@ static void ui_test_timer_cb(lv_timer_t *timer)
 void ft_ui_test_start(void)
 {
     if (s_test_timer != RT_NULL) return;
+    s_preferences_before = *ft_preferences_get();
+    ft_preferences_test_begin();
     s_test_phase = FT_TEST_PENDING;
     s_app_index = 0U;
     s_control_index = 0U;
@@ -1307,6 +1714,7 @@ void ft_ui_test_start(void)
     s_fail_count = 0U;
     s_action_count = 0U;
     s_lifecycle_wait_steps = 0U;
+    s_gallery_wait_steps = 0U;
     s_step_period_active = false;
     s_start_ms = rt_tick_get_millisecond();
     rt_kprintf("[UI-TEST] ENABLED delay=%lums step=%lums shell/search/apps/preferences/business/route/performance\n",

@@ -14,8 +14,9 @@
 ## 存放位置
 
 - SVG 可编辑源放在 `assets-src/<group>/`，生成的 A8 C 描述符放在 `assets/generated/`；生成文件不得手工修改。
-- 启动必需且体积小的资源编译进 M55 XIP 镜像。当前 25 个图标生成 24/32/48 三档，共 97,600 字节 A8 像素数据。
-- 大背景、媒体封面和可替换主题不编译进固件；待外部存储驱动启用后，由资源服务按需读取。
+- 启动必需且体积小的资源编译进 M55 XIP 镜像。当前 41 个图标生成 24/32/48 三档，共 160,064 字节 A8 像素数据。
+- 大背景、媒体封面和可替换主题不编译进固件；相册通过 LVGL POSIX `P:` 驱动从 `/flash` 或 `/sdcard` 按需读取 JPG/JPEG/PNG/BMP。产品级 LVGL 配置只在 FeatherTalk_M55 工程启用 TJPGD、LODEPNG、BMP 与 POSIX FS，不修改 SDK 公共 `lv_conf.h`。
+- PNG 解码会分配完整 ARGB 图像，当前限制为 2 MiB 文件且不超过 160,000 像素；JPEG/BMP 上限为 16 MiB、4,000,000 像素。超限、损坏或介质丢失必须显示受控错误，不能直接交给解码器耗尽堆。
 - Files 页面只显示 DFS 实际挂载卷。当前 SDHC1/Elm-FatFS 已启用，SD 卡挂载成功后读取 `/sdcard` 的真实容量和目录；未插卡或卸载后显示等待状态，不伪造容量或文件列表。
 
 ## 转换命令
@@ -37,4 +38,4 @@ python .\tools\freather\ui-asset-convert.py background.png background.c --name f
 
 中文界面使用 Noto Sans SC 生成的 12/14/16/22 px 静态字体。修改界面文案后必须执行 `tools\freather\fonts\build-ui-fonts.cmd`，把 GB2312 基础字形以及源码实际使用的 CJK 标点、Unicode 通用标点、全角字符和间隔号 `·` 同步进四档字体；不得假设普通固件构建会自动更新字形集合。新增的弯引号 `“ ”` 等通用标点必须通过同一生成链路进入固件，页面代码不得依赖 Montserrat fallback 猜测非 ASCII 字符是否存在。
 
-评审时同时记录源文件许可证、转换参数、生成尺寸和固件体积增量。参考项目中的资源只有在许可证和产品用途均明确后才可迁入。新增常用图标时必须先扩展 SVG、清单和 `ft_icon_id_t`，页面代码不得重新引入散落的 `LV_SYMBOL_*` 或固定 PNG 图标。
+评审时同时记录源文件许可证、转换参数、生成尺寸和固件体积增量。参考项目中的资源只有在许可证和产品用途均明确后才可迁入。新增常用图标时必须先扩展 SVG、清单和 `ft_icon_id_t`，页面代码不得重新引入散落的 `LV_SYMBOL_*` 或固定 PNG 图标。每个应用、Settings 分类、System 摘要卡和专用功能入口必须拥有独立语义图标；Gallery 与 Wallpaper 因此分别使用“叠放照片”和“悬挂画框”，不得复用 Files、Media 或 Personalization 图标。

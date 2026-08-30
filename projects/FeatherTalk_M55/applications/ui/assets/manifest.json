@@ -24,7 +24,7 @@
     {"id": "system", "group": "apps", "reference": "squareline/assets/wp_system.png", "redesign": "dual-core chip"},
     {"id": "settings", "group": "apps", "reference": "squareline/assets/wp_settings.png", "redesign": "personalization sliders"},
     {"id": "media", "group": "apps", "reference": "squareline/assets/groove_ic.png", "redesign": "neutral media player"},
-    {"id": "messages", "group": "apps", "reference": "squareline/assets/message_ic.png"},
+    {"id": "gallery", "group": "apps", "reference": "functional photo application", "redesign": "neutral stacked landscape photographs"},
     {"id": "files", "group": "apps", "reference": "squareline/assets/file_ic.png"},
     {"id": "about", "group": "apps", "reference": "functional information control", "redesign": "neutral information outline"},
     {"id": "play", "group": "controls", "reference": "functional control"},
@@ -50,6 +50,7 @@
     {"id": "media_pattern", "group": "apps", "reference": "Media live Tile decoration", "redesign": "neutral audio waveform"},
     {"id": "tile_pattern", "group": "controls", "reference": "mutable Tile pattern test", "redesign": "neutral dot grid"},
     {"id": "flash_device", "group": "storage", "reference": "fixed internal Flash volume", "redesign": "drive outline with Flash mark"},
-    {"id": "sd_device", "group": "storage", "reference": "removable SD media", "redesign": "SD card outline with ready mark"}
+    {"id": "sd_device", "group": "storage", "reference": "removable SD media", "redesign": "SD card outline with ready mark"},
+    {"id": "wallpaper", "group": "settings", "reference": "personal wallpaper configuration", "redesign": "neutral suspended landscape picture frame"}
   ]
 }

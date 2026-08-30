@@ -30,6 +30,12 @@ env = Environment(tools = ['mingw'],
     LINK = rtconfig.LINK, LINKFLAGS = rtconfig.LFLAGS)
 env.PrependENVPath('PATH', rtconfig.EXEC_PATH)
 
+# FeatherTalk enables file-backed Gallery decoders without changing the
+# SDK-wide LVGL configuration used by the native demos.
+feathertalk_ui_path = os.path.abspath(os.path.join(os.getcwd(), 'applications', 'ui'))
+env.Append(CPPPATH = [feathertalk_ui_path])
+env.Append(CPPDEFINES = [('LV_CONF_PATH', 'feathertalk_lv_conf.h')])
+
 if rtconfig.PLATFORM in ['iccarm']:
     env.Replace(CCCOM = ['$CC $CFLAGS $CPPFLAGS $_CPPDEFFLAGS $_CPPINCFLAGS -o $TARGET $SOURCES'])
     env.Replace(ARFLAGS = [''])

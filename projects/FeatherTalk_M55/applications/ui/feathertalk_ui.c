@@ -1,4 +1,5 @@
 #include <rtthread.h>
+#include <rtdevice.h>
 #include <string.h>
 #include <feathertalk/ipc_protocol.h>
 #ifdef RT_USING_FINSH
@@ -6,9 +7,13 @@
 #endif
 #include "ipc/feathertalk_ipc.h"
 #include "feathertalk_ui.h"
+#include "feathertalk_ui_gallery.h"
 #include "feathertalk_ui_internal.h"
 #include "feathertalk_ui_notifications.h"
 #include "feathertalk_ui_platform.h"
+#include "feathertalk_ui_preferences_store.h"
+#include "lv_image_cache.h"
+#include "lv_os.h"
 
 #define FT_ACCENT_SLOTS      96U
 #define FT_BACKGROUND_SLOTS  16U
@@ -56,7 +61,10 @@ typedef struct
 } ft_accent_slot_t;
 
 static bool s_ui_initialized;
+static rt_thread_t s_ui_thread;
 static lv_obj_t *s_status_bar;
+static lv_obj_t *s_content_viewport;
+static lv_obj_t *s_nav_bar;
 static lv_obj_t *s_status_uptime;
 static lv_obj_t *s_status_metrics;
 static lv_obj_t *s_status_wifi;
@@ -67,6 +75,11 @@ static lv_color_t s_accent;
 static lv_color_t s_page_background;
 static ft_accent_slot_t s_accent_slots[FT_ACCENT_SLOTS];
 static lv_obj_t *s_background_slots[FT_BACKGROUND_SLOTS];
+static lv_obj_t *s_wallpaper_image;
+static bool s_wallpaper_active;
+static bool s_media_frozen;
+static char s_wallpaper_native_path[256];
+static ft_gallery_rendered_image_t s_wallpaper_cache;
 static size_t s_accent_overflow_count;
 static lv_obj_t *s_notification_mask;
 static lv_obj_t *s_notification_panel;
@@ -167,6 +180,15 @@ static void background_object_deleted(lv_event_t *event)
     if (slot != RT_NULL) *slot = RT_NULL;
 }
 
+static void apply_page_background(lv_obj_t *obj)
+{
+    if (obj == RT_NULL || !lv_obj_is_valid(obj)) return;
+    lv_obj_set_style_bg_color(obj, s_page_background, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(obj,
+                            s_wallpaper_active ? LV_OPA_TRANSP : LV_OPA_COVER,
+                            LV_PART_MAIN);
+}
+
 lv_color_t ft_ui_accent_color(void)
 {
     return s_accent;
@@ -217,7 +239,7 @@ void ft_ui_set_page_background(uint32_t rgb)
         if (s_background_slots[i] != RT_NULL)
         {
             if (lv_obj_is_valid(s_background_slots[i]))
-                lv_obj_set_style_bg_color(s_background_slots[i], s_page_background, LV_PART_MAIN);
+                apply_page_background(s_background_slots[i]);
             else
                 s_background_slots[i] = RT_NULL;
         }
@@ -235,11 +257,235 @@ void ft_ui_register_page_background(lv_obj_t *obj)
             s_background_slots[i] = obj;
             lv_obj_add_event_cb(obj, background_object_deleted, LV_EVENT_DELETE,
                                 &s_background_slots[i]);
-            lv_obj_set_style_bg_color(obj, s_page_background, LV_PART_MAIN);
+            apply_page_background(obj);
             return;
         }
     }
     rt_kprintf("[FeatherTalk UI] page background registry full\n");
+}
+
+static void wallpaper_detach_and_release(void)
+{
+    s_wallpaper_active = false;
+    if (s_wallpaper_image != RT_NULL && lv_obj_is_valid(s_wallpaper_image))
+    {
+        if (lv_image_get_src(s_wallpaper_image) != RT_NULL)
+            lv_image_set_src(s_wallpaper_image, RT_NULL);
+        lv_obj_add_flag(s_wallpaper_image, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_wallpaper_cache.draw_buf != RT_NULL)
+    {
+        /* A previously queued VG-Lite operation may still reference the
+         * variable image descriptor after lv_image_set_src(NULL). */
+        lv_draw_wait_for_finish();
+        ft_gallery_release_rendered_image(&s_wallpaper_cache);
+    }
+}
+
+void ft_ui_set_page_wallpaper(const char *path)
+{
+    char lv_path[sizeof(s_wallpaper_native_path) + 3U];
+    lv_image_header_t header;
+    ft_gallery_rendered_image_t rendered;
+    const ft_ui_layout_t *layout = ft_layout_get();
+    ft_gallery_source_t source;
+    bool verified = false;
+    bool image_available;
+    size_t i;
+
+    rt_memset(&rendered, 0, sizeof(rendered));
+    image_available = s_wallpaper_image != RT_NULL &&
+                      lv_obj_is_valid(s_wallpaper_image);
+
+    if (!s_media_frozen && path != RT_NULL && path[0] != '\0')
+    {
+        if (image_available)
+            verified = ft_gallery_render_image_path(
+                path, (uint32_t)layout->screen_width,
+                (uint32_t)layout->screen_height, &rendered);
+        else
+            verified = ft_gallery_validate_image_path(path, &source, lv_path,
+                                                      sizeof(lv_path), &header);
+    }
+    if (verified)
+    {
+        rt_strncpy(s_wallpaper_native_path, path,
+                   sizeof(s_wallpaper_native_path) - 1U);
+        s_wallpaper_native_path[sizeof(s_wallpaper_native_path) - 1U] = '\0';
+    }
+    else if (!s_media_frozen)
+    {
+        s_wallpaper_native_path[0] = '\0';
+    }
+
+    wallpaper_detach_and_release();
+    if (verified && image_available)
+    {
+        s_wallpaper_cache = rendered;
+        rt_memset(&rendered, 0, sizeof(rendered));
+        lv_image_set_src(s_wallpaper_image, s_wallpaper_cache.draw_buf);
+        lv_obj_remove_flag(s_wallpaper_image, LV_OBJ_FLAG_HIDDEN);
+        s_wallpaper_active = true;
+    }
+    ft_gallery_release_rendered_image(&rendered);
+    for (i = 0U; i < FT_BACKGROUND_SLOTS; i++)
+    {
+        if (s_background_slots[i] != RT_NULL)
+        {
+            if (lv_obj_is_valid(s_background_slots[i]))
+                apply_page_background(s_background_slots[i]);
+            else
+                s_background_slots[i] = RT_NULL;
+        }
+    }
+    /* Wallpaper mode changes the routed pages between opaque and transparent.
+     * Repaint the whole hard-clipped content viewport once so stale pixels at
+     * the status/navigation seams cannot survive a partial invalidation. */
+    if (image_available)
+    {
+        lv_obj_t *content = lv_obj_get_parent(s_wallpaper_image);
+        if (content != RT_NULL && lv_obj_is_valid(content))
+            lv_obj_invalidate(content);
+    }
+    if (s_status_bar != RT_NULL && lv_obj_is_valid(s_status_bar))
+        lv_obj_invalidate(s_status_bar);
+    for (i = 0U; i < FT_NAV_COUNT; i++)
+        if (s_nav_buttons[i] != RT_NULL && lv_obj_is_valid(s_nav_buttons[i]))
+            lv_obj_invalidate(s_nav_buttons[i]);
+}
+
+bool ft_ui_page_wallpaper_active(void)
+{
+    return s_wallpaper_active;
+}
+
+typedef enum
+{
+    FT_UI_MEDIA_ACTION_FREEZE = 0,
+    FT_UI_MEDIA_ACTION_THAW
+} ft_ui_media_action_t;
+
+typedef struct
+{
+    struct rt_completion completion;
+    ft_ui_media_action_t action;
+    int result;
+} ft_ui_media_request_t;
+
+static void ui_media_apply_backgrounds(void)
+{
+    size_t index;
+
+    for (index = 0U; index < FT_BACKGROUND_SLOTS; index++)
+    {
+        if (s_background_slots[index] == RT_NULL) continue;
+        if (lv_obj_is_valid(s_background_slots[index]))
+            apply_page_background(s_background_slots[index]);
+        else
+            s_background_slots[index] = RT_NULL;
+    }
+}
+
+/* This function is called only by the LVGL thread.  Returning the Gallery to
+ * its collection view invokes gallery_clear_image(), while page_leave stops
+ * its filesystem monitor.  Force one source-free refresh before dropping the
+ * cache: the VG-Lite backend retains image decoder descriptors until its
+ * command queue is finished, and file decoders can own an open filesystem
+ * handle until that point. */
+static int ui_media_freeze_on_lvgl(void)
+{
+    if (s_media_frozen) return RT_EOK;
+    s_media_frozen = true;
+
+    (void)ft_gallery_page_back();
+    ft_gallery_page_leave();
+    wallpaper_detach_and_release();
+    ui_media_apply_backgrounds();
+
+    /* Invalidate even when the detached objects were already hidden, so the
+     * refresh path necessarily dispatches and finishes the VG-Lite queue.
+     * lv_refr_now() runs here on the LVGL thread while both media are still
+     * mounted; only after it returns is it safe to evict decoder cache data. */
+    lv_obj_invalidate(lv_screen_active());
+    lv_refr_now(RT_NULL);
+    lv_image_cache_drop(RT_NULL);
+    return RT_EOK;
+}
+
+/* This function is called only by the LVGL thread, after both filesystems have
+ * been remounted.  The configured wallpaper is decoded again if its medium is
+ * available, and Gallery refreshes its collection/source state. */
+static int ui_media_thaw_on_lvgl(void)
+{
+    const ft_ui_preferences_t *preferences;
+
+    if (!s_media_frozen) return RT_EOK;
+    s_media_frozen = false;
+    preferences = ft_preferences_get();
+    if (preferences != RT_NULL &&
+        preferences->background == FT_BACKGROUND_CUSTOM &&
+        preferences->wallpaper_path[0] != '\0')
+        ft_ui_set_page_wallpaper(preferences->wallpaper_path);
+    else
+        ft_ui_set_page_wallpaper(RT_NULL);
+    ft_gallery_page_enter();
+    return RT_EOK;
+}
+
+static int ui_media_action_on_lvgl(ft_ui_media_action_t action)
+{
+    return action == FT_UI_MEDIA_ACTION_FREEZE ?
+           ui_media_freeze_on_lvgl() : ui_media_thaw_on_lvgl();
+}
+
+static void ui_media_async_cb(void *user_data)
+{
+    ft_ui_media_request_t *request = (ft_ui_media_request_t *)user_data;
+
+    if (request == RT_NULL) return;
+    request->result = ui_media_action_on_lvgl(request->action);
+    rt_completion_done(&request->completion);
+}
+
+static int ui_media_run_sync(ft_ui_media_action_t action)
+{
+    ft_ui_media_request_t request;
+    lv_result_t schedule_result;
+    rt_err_t wait_result;
+
+    /* There cannot be an LVGL-backed media owner before shell construction.
+     * Remember an early freeze so initialization also avoids opening paths. */
+    if (!s_ui_initialized)
+    {
+        s_media_frozen = action == FT_UI_MEDIA_ACTION_FREEZE;
+        return RT_EOK;
+    }
+    if (rt_thread_self() == s_ui_thread)
+        return ui_media_action_on_lvgl(action);
+
+    rt_memset(&request, 0, sizeof(request));
+    request.action = action;
+    request.result = -RT_ERROR;
+    rt_completion_init(&request.completion);
+
+    /* lv_async_call itself manipulates LVGL timers, so only scheduling is
+     * protected by LVGL's OS mutex.  No object is touched by this caller. */
+    lv_lock();
+    schedule_result = lv_async_call(ui_media_async_cb, &request);
+    lv_unlock();
+    if (schedule_result != LV_RESULT_OK) return -RT_ENOMEM;
+    wait_result = rt_completion_wait(&request.completion, RT_WAITING_FOREVER);
+    return wait_result == RT_EOK ? request.result : wait_result;
+}
+
+int feathertalk_ui_media_freeze(void)
+{
+    return ui_media_run_sync(FT_UI_MEDIA_ACTION_FREEZE);
+}
+
+int feathertalk_ui_media_thaw(void)
+{
+    return ui_media_run_sync(FT_UI_MEDIA_ACTION_THAW);
 }
 
 size_t ft_ui_accent_object_count(void)
@@ -601,6 +847,7 @@ static void status_timer_cb(lv_timer_t *timer)
 
     ft_metrics_get(&metrics);
     status_metrics_refresh(&metrics);
+    ft_preferences_refresh_wallpaper();
     if (timer != RT_NULL && (s_notification_dragging || s_notification_animating)) return;
     if (feathertalk_ipc_get_system_status(&status) == RT_EOK)
     {
@@ -1417,6 +1664,40 @@ bool ft_ui_test_status_monitor_visible(void)
            monitor_area.x1 >= bar_area.x1 && monitor_area.x2 <= bar_area.x2 &&
            monitor_area.y1 >= bar_area.y1 && monitor_area.y2 <= bar_area.y2;
 }
+bool ft_ui_test_wallpaper_cached(void)
+{
+    return s_wallpaper_active && s_wallpaper_cache.draw_buf != RT_NULL &&
+           s_wallpaper_cache.draw_buf->header.cf == LV_COLOR_FORMAT_RGB565 &&
+           s_wallpaper_cache.non_black_pixels > 0U &&
+           s_wallpaper_cache.checksum != 0U;
+}
+bool ft_ui_test_shell_seams_closed(void)
+{
+    lv_area_t status_area;
+    lv_area_t content_area;
+    lv_area_t wallpaper_area;
+    lv_area_t nav_area;
+
+    if (s_status_bar == RT_NULL || !lv_obj_is_valid(s_status_bar) ||
+        s_content_viewport == RT_NULL || !lv_obj_is_valid(s_content_viewport) ||
+        s_nav_bar == RT_NULL || !lv_obj_is_valid(s_nav_bar) ||
+        s_wallpaper_image == RT_NULL || !lv_obj_is_valid(s_wallpaper_image))
+        return false;
+    lv_obj_update_layout(lv_screen_active());
+    lv_obj_get_coords(s_status_bar, &status_area);
+    lv_obj_get_coords(s_content_viewport, &content_area);
+    lv_obj_get_coords(s_wallpaper_image, &wallpaper_area);
+    lv_obj_get_coords(s_nav_bar, &nav_area);
+    return status_area.y2 + 1 == content_area.y1 &&
+           content_area.y2 + 1 == nav_area.y1 &&
+           wallpaper_area.x1 == content_area.x1 &&
+           wallpaper_area.x2 == content_area.x2 &&
+           wallpaper_area.y1 == content_area.y1 &&
+           wallpaper_area.y2 == content_area.y2 &&
+           lv_obj_get_style_pad_row(lv_screen_active(), LV_PART_MAIN) == 0 &&
+           lv_obj_get_style_bg_opa(lv_screen_active(), LV_PART_MAIN) ==
+               LV_OPA_COVER;
+}
 lv_obj_t *ft_ui_test_get_notification_panel(void) { return s_notification_panel; }
 int32_t ft_ui_test_notification_y(void)
 {
@@ -1547,6 +1828,8 @@ int feathertalk_ui_init(void)
         return RT_EOK;
     }
 
+    s_ui_thread = rt_thread_self();
+
     display = lv_display_get_default();
     if (display == RT_NULL) return -RT_ERROR;
 #if LV_USE_SYSMON && LV_USE_PERF_MONITOR
@@ -1589,7 +1872,12 @@ int feathertalk_ui_init(void)
     screen = lv_screen_active();
     lv_obj_clean(screen);
     ft_ui_style_page(screen);
-    ft_ui_register_page_background(screen);
+    /* The screen is the opaque shell clear plane, not a routed page.  A
+     * wallpaper lives only inside the content viewport; making this parent
+     * transparent exposes stale display pixels wherever Flex leaves a gap. */
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(screen, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(screen, 0, LV_PART_MAIN);
     lv_obj_set_flex_flow(screen, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(screen, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -1642,6 +1930,7 @@ int feathertalk_ui_init(void)
     (void)ft_icon_create(status_info, FT_ICON_BATTERY, ft_layout_icon_size(24U), false);
 
     content = lv_obj_create(screen);
+    s_content_viewport = content;
     ft_ui_style_page(content);
     /* This object is the hard clip viewport between the status and navigation
      * bars.  Tile handles may overflow their local desktop container, but the
@@ -1650,8 +1939,27 @@ int feathertalk_ui_init(void)
     lv_obj_set_width(content, lv_pct(100));
     lv_obj_set_height(content, 0);
     lv_obj_set_flex_grow(content, 1);
+    s_wallpaper_image = lv_image_create(content);
+    lv_obj_set_size(s_wallpaper_image, lv_pct(100), lv_pct(100));
+    lv_obj_center(s_wallpaper_image);
+    lv_image_set_inner_align(s_wallpaper_image, LV_IMAGE_ALIGN_STRETCH);
+    lv_obj_remove_flag(s_wallpaper_image,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE |
+                       LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_add_flag(s_wallpaper_image,
+                    LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_background(s_wallpaper_image);
+    if (s_wallpaper_native_path[0] != '\0')
+    {
+        char wallpaper_path[sizeof(s_wallpaper_native_path)];
+        rt_strncpy(wallpaper_path, s_wallpaper_native_path,
+                   sizeof(wallpaper_path) - 1U);
+        wallpaper_path[sizeof(wallpaper_path) - 1U] = '\0';
+        ft_ui_set_page_wallpaper(wallpaper_path);
+    }
 
     nav = create_bar(screen, layout->nav_bar_height);
+    s_nav_bar = nav;
     lv_obj_set_style_pad_all(nav, 0, LV_PART_MAIN);
     lv_obj_set_style_border_width(nav, 1, LV_PART_MAIN);
     lv_obj_set_style_border_side(nav, LV_BORDER_SIDE_TOP, LV_PART_MAIN);
@@ -1812,6 +2120,7 @@ static int feather_ui_status(void)
 {
     const ft_ui_preferences_t *preferences = ft_preferences_get();
     const ft_ui_layout_t *layout = ft_layout_get();
+    ft_preferences_store_status_t preference_store;
     feathertalk_system_status_t system_status;
     feathertalk_quick_status_t quick_status;
     size_t selected_tile = ft_tiles_selected();
@@ -1822,9 +2131,38 @@ static int feather_ui_status(void)
                (unsigned long)(lv_color_to_u32(s_accent) & 0xFFFFFFUL),
                (unsigned long)ft_ui_accent_object_count(),
                (unsigned long)s_accent_overflow_count);
-    rt_kprintf("FeatherTalk UI preferences: revision=%lu tile-opacity=%u background=%d notification=%d\n",
+    rt_kprintf("FeatherTalk UI preferences: revision=%lu tile-opacity=%u background=%d "
+               "wallpaper=%s active=%d notification=%d\n",
                (unsigned long)preferences->revision, preferences->tile_opa,
-               (int)preferences->background, s_notification_visible ? 1 : 0);
+               (int)preferences->background,
+               preferences->wallpaper_path[0] != '\0' ?
+                   preferences->wallpaper_path : "(none)",
+               ft_ui_page_wallpaper_active() ? 1 : 0,
+               s_notification_visible ? 1 : 0);
+    rt_kprintf("FeatherTalk UI wallpaper cache: %lux%lu RGB565 source=%lux%lu "
+               "non-black=%lu checksum=0x%08lx\n",
+               s_wallpaper_cache.draw_buf != RT_NULL ?
+                   (unsigned long)s_wallpaper_cache.draw_buf->header.w : 0UL,
+               s_wallpaper_cache.draw_buf != RT_NULL ?
+                   (unsigned long)s_wallpaper_cache.draw_buf->header.h : 0UL,
+               (unsigned long)s_wallpaper_cache.source_width,
+               (unsigned long)s_wallpaper_cache.source_height,
+               (unsigned long)s_wallpaper_cache.non_black_pixels,
+               (unsigned long)s_wallpaper_cache.checksum);
+    if (ft_preferences_store_get_status(&preference_store) == RT_EOK)
+        rt_kprintf("FeatherTalk UI preference store: loaded=%d slots=0x%02x active=%d "
+                   "generation=%lu dirty=%d frozen=%d test=%d writes=%lu/%lu error=%d\n",
+                   preference_store.loaded_from_storage ? 1 : 0,
+                   preference_store.valid_slots, preference_store.active_slot,
+                   (unsigned long)preference_store.generation,
+                   preference_store.dirty ? 1 : 0,
+                   preference_store.frozen ? 1 : 0,
+                   preference_store.test_suspended ? 1 : 0,
+                   (unsigned long)preference_store.successful_writes,
+                   (unsigned long)preference_store.failed_writes,
+                   preference_store.last_error);
+    else
+        rt_kprintf("FeatherTalk UI preference store: unavailable\n");
     rt_kprintf("FeatherTalk UI layout: %ldx%ld scale=%ld%% compact=%d landscape=%d "
                "tiles=%u column=%ld bars=%ld/%ld keyboard=%ld\n",
                (long)layout->screen_width, (long)layout->screen_height,

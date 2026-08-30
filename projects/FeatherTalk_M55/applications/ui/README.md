@@ -25,13 +25,14 @@ The product UI now provides:
 - a bounded, allocation-free route stack with a maximum depth of eight;
 - a routed Search page with filtering, a fixed bottom-overlay keyboard with an
   explicit collapse control, and Cortana-style activity animation;
-- interactive System, Settings, Media, Messages, Files, and About pages;
+- interactive System, Settings, Media, Gallery, Files, and About pages;
 - a detailed System inventory that separates physical capacity, linker allocation,
   and live M55 usage across CPU/clock domains, on-chip ROM/RRAM/RAM, external
   Flash/HyperRAM, communication links, display transport, and registered drivers;
 - M33 system-status IPC plus status-bar Wi-Fi/Bluetooth connection indicators, with
   explicit unavailable states for missing hardware drivers;
-- memory-backed accent, Tile opacity, and background preferences;
+- power-loss-safe per-device accent, Tile opacity, language/time, background,
+  and wallpaper preferences stored as CRC-protected A/B records on `/flash`;
 - live System Tile updates, FPS/heap/object metrics, and route leak diagnostics;
 - runtime accent-color propagation with deleted-object tracking;
 - an SVG-source icon system with generated 24/32/48 px A8 assets and runtime recoloring;
@@ -102,13 +103,14 @@ contract as application Search. Filtering checks category names, descriptions, a
 hardware keywords. Selecting a row pushes a bounded child route, so shell Back/Home
 semantics and object-lifetime cleanup remain unchanged.
 
-The visible categories are limited to settings that users can actually change on
-the current product: Display & brightness, Wi-Fi, Bluetooth, Time & language, and
-Personalization. Time & language provides 12/24-hour status-bar formatting, seven
+The visible categories are limited to settings and hardware that exist on the
+current product: Display & brightness, Wi-Fi, Bluetooth, Storage, USB,
+Time & language, and Personalization. Time & language provides 12/24-hour status-bar formatting, seven
 fixed UTC offsets, and Simplified Chinese/English selection. It defaults to
 Simplified Chinese, UTC+08:00, and 24-hour time; the M33 RTC remains the time source.
-Notification queue management remains in the notification shade, storage status
-remains in Files, and runtime diagnostics/About remain separate applications.
+Notification queue management remains in the notification shade, while Storage
+owns Flash/SD capacity, formatting and browse actions. Runtime diagnostics and About
+remain routed Settings children rather than duplicate standalone applications.
 Cellular/SIM/phone, hotspot, VPN, NFC, account, manual RTC setting, application uninstall,
 and every status-only placeholder from the Windows Phone visual reference are
 intentionally absent. Display brightness directly uses the M55 `pwm18` adapter.
@@ -118,8 +120,13 @@ M33 service is not enabled. Storage, RTC, locale, rotation, and other incomplete
 board services state the missing driver or persistence boundary instead of exposing
 an in-memory switch that would pretend to change hardware.
 
-Time format, fixed offset, language, accent, Tile opacity, and background currently
-share the boot-lifetime memory preference backend. The UTC-offset selector does not
+Time format, fixed offset, language, accent, Tile opacity, background, and the
+selected wallpaper path share a per-device A/B preference store under
+`/flash/.feathertalk`. Each record has a schema, generation and CRC32; writes are
+debounced for two seconds and use the inactive slot with readback verification.
+USB export and local Flash formatting freeze the writer first. If the host formats
+the 2 MiB Flash volume, the live settings are automatically re-seeded after remount.
+The UTC-offset selector does not
 pretend to provide a time-zone database or automatic daylight-saving changes. Wi-Fi
 and Bluetooth use clean, dedicated SVG assets: a symmetric three-level Wi-Fi mark
 and a standard outline Bluetooth rune, without the former slider overlays.
@@ -170,14 +177,15 @@ mask/Home/Back/Search/upward-swipe closing, the four
 quick controls, explicit IPC unavailable states, queue unread/single-delete/
 clear/overflow behavior, Alert lifecycle, Search keyboard overlay geometry,
 collapse/reopen/cancel behavior, Search filtering/routing,
-all navigation buttons, six Start tiles,
-six All Apps entries, Settings search/keyboard and every hardware category route,
+all navigation buttons, four Start tiles,
+four All Apps entries, Settings search/keyboard and every hardware category route,
 real Settings brightness write/readback, 12/24-hour, UTC-offset and language restore
-checks, every personalization choice, all Media controls,
-Messages/Files actions, System summary/accordion state, transient-object lifecycle cleanup, System-to-Search
+checks, every built-in personalization choice, all Media controls,
+Gallery/Files actions, System summary/accordion state, transient-object lifecycle cleanup, System-to-Search
 address-reuse regression, Tile model/edit-handle/reorder/resize/property/live-content
 behavior, route depth/overflow/release, and an object-leak check.
-It restores all default preferences and the Start screen when complete.
+It snapshots the device preferences, suppresses Flash writes during the run, exercises
+the reset path, and restores the original per-device preferences when complete.
 
 ## Start Tile application contract
 
@@ -191,9 +199,33 @@ opacity by the global Start Tile preference.
 and may opt into a periodic live-content callback. The callback receives a transparent
 LVGL content host owned by the Tile; the shell schedules frames but does not create or
 interpret the application's children. Media currently creates and cycles track text,
-Messages creates inbox text, and System receives external M33 status. A future Gallery
-app can create an `lv_image` in the same host and switch image frames without adding
-Gallery-specific logic to the desktop.
+while System receives external M33 status. Gallery is a normal routed application;
+its Start Tile does not need desktop-specific image-decoder logic.
+
+## Gallery and wallpaper
+
+The Messages application was removed because this board has no cellular/SMS receive
+path. Its stable application slot now hosts Gallery. Gallery exposes Flash and SD as
+separate sources and uses only `/flash/Pictures` and `/sdcard/Pictures`. It creates
+each collection when its mounted medium is writable and lists up to 64 photos whose
+JPG/JPEG/PNG/BMP metadata can actually be decoded; it is not a second Files browser.
+It uses the LVGL POSIX `P:` drive and validates file size, decoded dimensions, root
+containment, and decoder metadata before preview. Previous/next, close, and
+Set wallpaper are available in the single-image viewer.
+
+Personalization offers Black, Dark, Accent, and Gallery photo backgrounds. Selecting
+Set wallpaper stores the canonical `/flash/Pictures/...` or `/sdcard/Pictures/...`
+path and immediately
+applies the image behind routed pages. A missing removable SD image falls back to the
+configured solid background without discarding the saved path. Photos copied to the
+fixed 2 MiB Flash volume are device-local and survive reboot; formatting that volume
+removes both those photos and the durable configuration files.
+
+A curated deployment pack provides three native 480x800 JPEG wallpapers in
+`tools/freather/wallpapers`. Copy them to the Flash MSC volume's
+`/flash/Pictures` directory; Gallery will discover them and can set any one as
+the persistent wallpaper. Source and license links are recorded in the
+[wallpaper pack README](../../../../tools/freather/wallpapers/README.md).
 
 Start Tiles use LVGL's mutually exclusive input events: `SHORT_CLICKED` opens an
 application and `LONG_PRESSED` enters edit mode and arms movement from the Tile body.

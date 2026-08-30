@@ -36,6 +36,9 @@ JLinkSettings.ini
 DebugConfig/
 RTE/
 settings/
+!applications/ui/assets-src/settings/
+applications/ui/assets-src/settings/*
+!applications/ui/assets-src/settings/wallpaper.svg
 *.uvguix*
 cconfig.h
 !edgeprotecttools.exe

@@ -4,6 +4,10 @@
 #include "board_storage.h"
 #include "feathertalk_storage.h"
 #include "feathertalk_usb.h"
+#ifdef FEATHERTALK_USING_UI_SHELL
+#include "ui/feathertalk_ui.h"
+#include "ui/feathertalk_ui_preferences_store.h"
+#endif
 
 static ft_usb_status_t s_usb_status =
 {
@@ -246,18 +250,49 @@ static void usb_lun_close(uint8_t lun)
     rt_memset(&s_luns[lun], 0, sizeof(s_luns[lun]));
 }
 
+static int usb_ui_storage_freeze(void)
+{
+#ifdef FEATHERTALK_USING_UI_SHELL
+    int result = ft_preferences_store_freeze();
+    if (result != RT_EOK) return result;
+    result = feathertalk_ui_media_freeze();
+    if (result != RT_EOK) ft_preferences_store_thaw();
+    return result;
+#else
+    return RT_EOK;
+#endif
+}
+
+static int usb_ui_storage_thaw(void)
+{
+#ifdef FEATHERTALK_USING_UI_SHELL
+    int result = feathertalk_ui_media_thaw();
+    ft_preferences_store_thaw();
+    return result;
+#else
+    return RT_EOK;
+#endif
+}
+
 static int usb_storage_start(void)
 {
     const char *flash_device_name = RT_NULL;
     const char *sd_device_name = RT_NULL;
     int result;
 
-    result = board_flash_storage_export_begin(&flash_device_name);
+    result = usb_ui_storage_freeze();
     if (result != RT_EOK) return result;
+    result = board_flash_storage_export_begin(&flash_device_name);
+    if (result != RT_EOK)
+    {
+        (void)usb_ui_storage_thaw();
+        return result;
+    }
     result = board_sdcard_export_begin(&sd_device_name);
     if (result != RT_EOK)
     {
         (void)board_flash_storage_export_end();
+        (void)usb_ui_storage_thaw();
         return result;
     }
     result = usb_lun_open(FT_USB_LUN_FLASH, flash_device_name);
@@ -265,6 +300,7 @@ static int usb_storage_start(void)
     {
         (void)board_sdcard_export_end();
         (void)board_flash_storage_export_end();
+        (void)usb_ui_storage_thaw();
         return result;
     }
     result = usb_lun_open(FT_USB_LUN_SD, sd_device_name);
@@ -273,6 +309,7 @@ static int usb_storage_start(void)
         usb_lun_close(FT_USB_LUN_FLASH);
         (void)board_sdcard_export_end();
         (void)board_flash_storage_export_end();
+        (void)usb_ui_storage_thaw();
         return result;
     }
 
@@ -289,6 +326,7 @@ static int usb_storage_start(void)
         usb_lun_close(FT_USB_LUN_FLASH);
         (void)board_sdcard_export_end();
         (void)board_flash_storage_export_end();
+        (void)usb_ui_storage_thaw();
         return -RT_ERROR;
     }
 
@@ -341,6 +379,10 @@ static int usb_storage_stop(void)
     {
         int mount_result = board_flash_storage_export_end();
         if (result == RT_EOK) result = mount_result;
+    }
+    {
+        int thaw_result = usb_ui_storage_thaw();
+        if (result == RT_EOK) result = thaw_result;
     }
     s_usb_status.function = FT_USB_FUNCTION_NONE;
     s_usb_status.active = false;

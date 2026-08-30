@@ -87,5 +87,20 @@ bool ft_storage_parent_path(char *path, const char *mount_path);
 int ft_storage_read_preview(const char *path, uint8_t *buffer,
                             size_t buffer_size, bool *binary,
                             uint64_t *file_size);
+/* File-manager operations are confined to children of /flash and /sdcard.
+ * Volume roots are never valid sources for destructive operations. */
+int ft_storage_delete_path(const char *path);
+int ft_storage_create_directory(const char *parent, const char *name,
+                                char *result_path, size_t result_path_size);
+int ft_storage_rename_path(const char *path, const char *new_name,
+                           char *result_path, size_t result_path_size);
+int ft_storage_paste_path(const char *source, const char *destination_directory,
+                          bool move, char *result_path,
+                          size_t result_path_size);
+#ifdef FEATHERTALK_UI_TEST_MODE
+bool ft_storage_test_delete_contract(void);
+bool ft_storage_test_clipboard_contract(void);
+bool ft_storage_test_name_contract(void);
+#endif
 
 #endif
