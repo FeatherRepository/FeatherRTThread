@@ -1,8 +1,11 @@
 #include <rtdevice.h>
 #include <rtthread.h>
+#include <rthw.h>
 #include <board.h>
 #include <lvgl.h>
 #include <drv_touch.h>
+#include <cycfg_qspi_memslot.h>
+#include <string.h>
 #include "feathertalk_ui_platform.h"
 
 #define FT_LCD_BL_PWM_DEVICE    "pwm18"
@@ -12,6 +15,16 @@
 #define FT_LCD_BL_MIN_DUTY_PERCENT 50U
 #define FT_TOUCH_LONG_PRESS_MS      500U
 #define FT_TOUCH_SCROLL_LIMIT_PX     18U
+#define FT_M55_XIP_CAPACITY_BYTES    0x00800000UL
+#define FT_M55_DTCM_CAPACITY_BYTES   0x00040000UL
+#define FT_GFX_SRAM_CAPACITY_BYTES   0x00300000UL
+
+extern unsigned char __m55_image_start__;
+extern unsigned char __m55_image_end__;
+extern unsigned char __bss_end__;
+extern unsigned char __gfx_mem_used_start__;
+extern unsigned char __gfx_mem_used_end__;
+extern struct rt_memheap *drv_hyperam_get_memheap(void);
 
 static struct rt_device_pwm *s_backlight_pwm;
 static uint8_t s_brightness =
@@ -127,4 +140,90 @@ void ft_platform_touch_print_status(void)
                (unsigned long)diagnostics.held_reports,
                (unsigned long)diagnostics.press_reports,
                (unsigned long)diagnostics.release_reports);
+}
+
+static void collect_registered_devices(ft_platform_system_info_t *info)
+{
+    struct rt_object_information *devices;
+    rt_list_t *node;
+    size_t used = 0U;
+
+    devices = rt_object_get_information(RT_Object_Class_Device);
+    if (devices == RT_NULL) return;
+
+    rt_list_for_each(node, &devices->object_list)
+    {
+        struct rt_object *object = rt_list_entry(node, struct rt_object, list);
+        const char *name = object->name;
+        int written;
+
+        if (name == RT_NULL || name[0] == '\0') continue;
+        info->registered_device_count++;
+        if (used >= sizeof(info->registered_devices) - 1U) continue;
+        written = rt_snprintf(info->registered_devices + used,
+                              sizeof(info->registered_devices) - used,
+                              "%s%s", used == 0U ? "" : ", ", name);
+        if (written > 0)
+        {
+            size_t appended = (size_t)written;
+            size_t available = sizeof(info->registered_devices) - used;
+            used += appended < available ? appended : available - 1U;
+        }
+    }
+}
+
+void ft_platform_get_system_info(ft_platform_system_info_t *info)
+{
+    struct rt_memheap *hyperram_heap;
+    rt_size_t total = 0U;
+    rt_size_t used = 0U;
+    rt_size_t peak = 0U;
+    uint32_t npu_hf;
+
+    if (info == RT_NULL) return;
+    rt_memset(info, 0, sizeof(*info));
+
+    info->m55_core_hz = SystemCoreClock;
+    info->m33_domain_hz = Cy_SysClk_ClkHfGetFrequency(0U);
+    npu_hf = Cy_Sysclk_PeriPclkGetClkHfNum(PCLK_MXU55_CLK_HF);
+    info->npu_hz = Cy_SysClk_ClkHfGetFrequency(npu_hf);
+    info->gfx_hz = Cy_SysClk_ClkHfGetFrequency(CY_MMIO_GFXSS_GPU_CLK_HF_NR);
+    info->flash_smif_hz = CYBSP_SMIF_CORE_0_XSPI_FLASH_config.inputFrequencyMHz * 1000000UL;
+    info->hyperram_smif_hz = CYBSP_SMIF_CORE_1_PSRAM_config.inputFrequencyMHz * 1000000UL;
+    info->instruction_cache_enabled = rt_hw_cpu_icache_status() != 0;
+    info->data_cache_enabled = rt_hw_cpu_dcache_status() != 0;
+
+    info->firmware_used_bytes =
+        (uint32_t)((uintptr_t)&__m55_image_end__ - (uintptr_t)&__m55_image_start__);
+    info->firmware_capacity_bytes = FT_M55_XIP_CAPACITY_BYTES;
+    info->boot_rom_bytes = CY_ROM_M0_SIZE;
+    info->onchip_rram_bytes = CY_RRAM_SIZE;
+    info->onchip_ram_bytes = CY_CM55_ITCM_INTERNAL_SIZE +
+                             CY_CM55_DTCM_INTERNAL_SIZE +
+                             CY_SRAM_SIZE + CY_SOCMEM_RAM_SIZE;
+    info->dtcm_static_bytes =
+        (uint32_t)((uintptr_t)&__bss_end__ - (uintptr_t)0x20000000UL);
+    info->dtcm_capacity_bytes = FT_M55_DTCM_CAPACITY_BYTES;
+    info->gfx_used_bytes =
+        (uint32_t)((uintptr_t)&__gfx_mem_used_end__ -
+                   (uintptr_t)&__gfx_mem_used_start__);
+    info->gfx_capacity_bytes = FT_GFX_SRAM_CAPACITY_BYTES;
+
+    rt_memory_info(&total, &used, &peak);
+    info->internal_heap_total = (uint32_t)total;
+    info->internal_heap_used = (uint32_t)used;
+    info->internal_heap_peak = (uint32_t)peak;
+
+    hyperram_heap = drv_hyperam_get_memheap();
+    if (hyperram_heap != RT_NULL && hyperram_heap->pool_size != 0U)
+    {
+        rt_memheap_info(hyperram_heap, &total, &used, &peak);
+        info->external_heap_total = (uint32_t)total;
+        info->external_heap_used = (uint32_t)used;
+        info->external_heap_peak = (uint32_t)peak;
+    }
+
+    info->external_flash_bytes = deviceCfg_S25FS128S_SMIF0_SlaveSlot_1.memSize;
+    info->external_hyperram_bytes = deviceCfg_S70KS1283_SMIF1_SlaveSlot_2.memSize;
+    collect_registered_devices(info);
 }

@@ -1,5 +1,6 @@
 #include <rtthread.h>
 #include "feathertalk_ui_layout.h"
+#include "feathertalk_ui_font.h"
 
 #define FT_LAYOUT_DESIGN_WIDTH   480
 #define FT_LAYOUT_DESIGN_HEIGHT  800
@@ -111,10 +112,10 @@ uint16_t ft_layout_icon_size(uint16_t design_size)
 const lv_font_t *ft_layout_font(int32_t design_size)
 {
     int32_t size = ft_layout_px(design_size);
-    if (size <= 13) return &lv_font_montserrat_12;
-    if (size <= 15) return &lv_font_montserrat_14;
-    if (size <= 18) return &lv_font_montserrat_16;
-    return &lv_font_montserrat_22;
+    if (size <= 13) return &feathertalk_noto_sans_sc_12;
+    if (size <= 15) return &feathertalk_noto_sans_sc_14;
+    if (size <= 18) return &feathertalk_noto_sans_sc_16;
+    return &feathertalk_noto_sans_sc_22;
 }
 
 int32_t ft_layout_tile_width(bool wide)

@@ -42,6 +42,15 @@ static const ft_icon_sources_t s_icon_sources[FT_ICON_COUNT] =
     FT_ICON_SOURCES(rotation),
     FT_ICON_SOURCES(display),
     FT_ICON_SOURCES(personalization),
+    FT_ICON_SOURCES(wifi_settings),
+    FT_ICON_SOURCES(bluetooth_settings),
+    FT_ICON_SOURCES(time_language),
+    FT_ICON_SOURCES(storage),
+    FT_ICON_SOURCES(external_memory),
+    FT_ICON_SOURCES(onchip_memory),
+    FT_ICON_SOURCES(processor),
+    FT_ICON_SOURCES(media_pattern),
+    FT_ICON_SOURCES(tile_pattern),
 };
 
 const lv_image_dsc_t *ft_icon_source(ft_icon_id_t icon_id, uint16_t size)

@@ -117,6 +117,9 @@ MCUBOOT_HEADER_SIZE = 0x400;
 /* Define the sections */
 SECTIONS
 {
+    /* Runtime diagnostics use these bounds to report the exact occupied XIP
+     * image span instead of presenting a stale build-time number. */
+    __m55_image_start__ = ORIGIN(m55_nvm_sel);
     /* This section reserves a space for MCUBoot header */
     .mcu_boot_header :
     {
@@ -420,6 +423,8 @@ SECTIONS
 
     }  > m55_data_secondary AT > m55_nvm_sel
 
+    __m55_image_end__ = LOADADDR(.cy_socmem_data) + SIZEOF(.cy_socmem_data);
+
     /* A section for the heap memory */
     .heap(NOLOAD) :
     {
@@ -438,7 +443,9 @@ SECTIONS
     /* A section for the GPU buffer */
     .cy_gpu_buf(NOLOAD) :
     {
+        __gfx_mem_used_start__ = .;
         KEEP(*(.cy_gpu_buf))
+        __gfx_mem_used_end__ = .;
     } > gfx_mem
 
     .reserved_socmem(NOLOAD) :

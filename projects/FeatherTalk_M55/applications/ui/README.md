@@ -17,13 +17,18 @@ The product UI now provides:
 - an explicit application registry in `feathertalk_ui_pages.c`, split into mutable
   common Tile properties (name, grid span, opacity, and pattern) and app-owned
   private properties (icon, live-loop policy, period, content callback, and context);
-- long-press Start Tile editing with a subtle breathing animation, a four-way move
-  handle, three diagonal resize handles, floating pointer tracking, live sibling
+- long-press Start Tile editing with an internally clipped body-scale animation,
+  body-drag movement,
+  four inset 90-degree corner Chevron resize handles, floating pointer tracking,
+  live sibling
   reflow, and release-time grid snapping;
 - a bounded, allocation-free route stack with a maximum depth of eight;
 - a routed Search page with filtering, a fixed bottom-overlay keyboard with an
   explicit collapse control, and Cortana-style activity animation;
 - interactive System, Settings, Media, Messages, Files, and About pages;
+- a detailed System inventory that separates physical capacity, linker allocation,
+  and live M55 usage across CPU/clock domains, on-chip ROM/RRAM/RAM, external
+  Flash/HyperRAM, communication links, display transport, and registered drivers;
 - M33 system-status IPC plus status-bar Wi-Fi/Bluetooth connection indicators, with
   explicit unavailable states for missing hardware drivers;
 - memory-backed accent, Tile opacity, and background preferences;
@@ -73,6 +78,12 @@ PWM device instead of relying on a UI-only cache. Availability also requires P20
 to be routed to TCPWM0 line 265, preventing a GPIO override from silently accepting
 brightness changes that never reach the panel. Notifications use a fixed-capacity model independent
 of LVGL object lifetime and support unread tracking, swipe delete, and clear-all.
+Each notification card owns a horizontal press/drag/release state machine: it follows
+the pointer using style translation, deletes after one-quarter-card travel or a fast
+horizontal release, and otherwise eases back in 160 ms. Vertical input remains with
+the scrolling list and the shade-close gesture. All shade and dynamically created
+card labels select the Noto Sans SC application fonts explicitly, so stock-widget
+font inheritance cannot reintroduce CJK placeholder boxes.
 The model carries a revision; opening an unchanged or empty queue reuses the existing
 LVGL tree instead of cleaning and rebuilding every notification card. Quick-control,
 radio-status, label, and external Live Tile setters also skip values already on screen.
@@ -92,10 +103,13 @@ hardware keywords. Selecting a row pushes a bounded child route, so shell Back/H
 semantics and object-lifetime cleanup remain unchanged.
 
 The visible categories are limited to settings that users can actually change on
-the current product: Display & brightness, Wi-Fi, Bluetooth, and Personalization.
+the current product: Display & brightness, Wi-Fi, Bluetooth, Time & language, and
+Personalization. Time & language provides 12/24-hour status-bar formatting, seven
+fixed UTC offsets, and Simplified Chinese/English selection. It defaults to
+Simplified Chinese, UTC+08:00, and 24-hour time; the M33 RTC remains the time source.
 Notification queue management remains in the notification shade, storage status
 remains in Files, and runtime diagnostics/About remain separate applications.
-Cellular/SIM/phone, hotspot, VPN, NFC, account, language/RTC, application uninstall,
+Cellular/SIM/phone, hotspot, VPN, NFC, account, manual RTC setting, application uninstall,
 and every status-only placeholder from the Windows Phone visual reference are
 intentionally absent. Display brightness directly uses the M55 `pwm18` adapter.
 Wi-Fi and Bluetooth read the ABI 4 M33 capability/enabled/connected fields, plus
@@ -103,6 +117,47 @@ Wi-Fi signal percentage, and visibly disable their action when the corresponding
 M33 service is not enabled. Storage, RTC, locale, rotation, and other incomplete
 board services state the missing driver or persistence boundary instead of exposing
 an in-memory switch that would pretend to change hardware.
+
+Time format, fixed offset, language, accent, Tile opacity, and background currently
+share the boot-lifetime memory preference backend. The UTC-offset selector does not
+pretend to provide a time-zone database or automatic daylight-saving changes. Wi-Fi
+and Bluetooth use clean, dedicated SVG assets: a symmetric three-level Wi-Fi mark
+and a standard outline Bluetooth rune, without the former slider overlays.
+
+The display language is global rather than local to Settings. Switching between
+Simplified Chinese and English refreshes the persistent status/quick-settings shell
+in place and reconstructs the active route stack, so Start Tile names, All Apps,
+search, application pages, Settings options, notifications and system information
+change together. User-renamed Tiles are treated as private data and are not overwritten.
+
+Chinese text uses an offline-generated Noto Sans SC product font. The checked-in LVGL
+C assets contain all 6,763 GB2312 level-1/level-2 Han characters plus extra punctuation
+and UI-source glyphs at 12/14/16/22 px, 2 bpp. Montserrat remains the ASCII/symbol
+fallback. The full TTF and converter packages are host-only cache files; regenerate
+the tracked fonts with `tools\freather\fonts\build-ui-fonts.cmd`. Source provenance,
+the pinned SHA-256 and the SIL OFL 1.1 license are documented under
+`tools/freather/fonts/`.
+
+## System information application
+
+System uses a compact overview-first layout. Four responsive cards show storage,
+external RAM, on-chip RAM, and processor information at a glance. A 480 x 800 screen
+uses a 2 x 2 card grid, while wider landscape profiles can place all four cards on
+one row. Device specifications are expanded initially; Memory & storage, Interfaces
+& peripherals, and Runtime status are collapsed accordions, so the page does not
+present every diagnostic value as one long wall of text.
+
+Opening the detail groups reveals the full inventory: live M55/M33/GFX/NPU clock
+domains and cache state; physical on-chip ROM, RRAM, TCM, M33 SRAM and SoC/GFX SRAM;
+exact linker-derived M55 XIP, DTCM and display-buffer occupation; RT-Thread internal
+and HyperRAM heap current/peak usage; the complete 16 MiB external Flash and 16 MiB
+HyperRAM partitioning; SMIF, MIPI-DSI, UART, I2C, IPC, PWM and AXI-DMA settings; and
+the actual RT-Thread device registry.
+
+Values outside the M55 ownership boundary are labelled as allocated, unavailable,
+or not observable instead of being presented as live usage. The source hierarchy,
+address map, units and maintenance rules are documented in
+`SYSTEM_INFORMATION_zh.md`.
 
 ## Automatic interaction test
 
@@ -117,8 +172,9 @@ clear/overflow behavior, Alert lifecycle, Search keyboard overlay geometry,
 collapse/reopen/cancel behavior, Search filtering/routing,
 all navigation buttons, six Start tiles,
 six All Apps entries, Settings search/keyboard and every hardware category route,
-real Settings brightness write/readback, all four category routes, every personalization choice, all Media controls,
-Messages/Files actions, transient-object lifecycle cleanup, System-to-Search
+real Settings brightness write/readback, 12/24-hour, UTC-offset and language restore
+checks, every personalization choice, all Media controls,
+Messages/Files actions, System summary/accordion state, transient-object lifecycle cleanup, System-to-Search
 address-reuse regression, Tile model/edit-handle/reorder/resize/property/live-content
 behavior, route depth/overflow/release, and an object-leak check.
 It restores all default preferences and the Start screen when complete.
@@ -140,40 +196,45 @@ app can create an `lv_image` in the same host and switch image frames without ad
 Gallery-specific logic to the desktop.
 
 Start Tiles use LVGL's mutually exclusive input events: `SHORT_CLICKED` opens an
-application and `LONG_PRESSED` enters edit mode. A plain `PRESSED` event, layout
-event, or the `PRESS_LOST`/`CLICKED` sequence that may follow a long press cannot
-enter an application or initialize editing. Edit mode disables desktop/tileview
-scrolling until editing ends. Each compact circular handle has its center exactly on
-one Tile corner while an enlarged invisible hit area preserves touch usability. The
-selected Tile is moved to the container's last drawn child and paired with an
-equal-size placeholder. The desktop itself uses explicit responsive grid cells rather
-than Flex compaction, so a size change cannot move an unrelated sibling. This also
-guarantees that the complete Tile and all four handles stay above every sibling
-throughout edit mode.
+application and `LONG_PRESSED` enters edit mode and arms movement from the Tile body.
+The same held gesture can immediately drag the Tile; no corner is reserved as a move
+control. A plain `PRESSED` event, layout event, or the `PRESS_LOST`/`CLICKED` sequence
+that may follow a long press cannot enter an application or initialize editing. Edit
+mode disables desktop/tileview scrolling until editing ends. The selected Tile is
+moved to the container's last drawn child and paired with an equal-size placeholder.
+The desktop itself uses explicit responsive grid cells rather than Flex compaction,
+so a size change cannot move an unrelated sibling.
 
-The upper-left handle is a single centered, line-drawn four-way move symbol. Movement
-uses a two-stage snap state. While the dragged center is outside a pit's confirmation
-radius, the placeholder is hidden and every sibling stays at its gesture-start cell.
-Once the center enters that radius, the placeholder appears on the nearest aligned
-row-and-column pit; releasing forces confirmation of the nearest pit. Occupied pits
-are valid targets. Only after confirmation are the Tiles covered by the reservation
-moved to their nearest free cells with a 180 ms ease-out snap. This makes every middle,
-edge, empty, or occupied aligned pit selectable without reflowing the desktop during
-uncommitted pointer motion.
+Body movement uses a two-stage snap state. While the dragged center is outside a
+pit's confirmation radius, the placeholder is hidden and every sibling stays at its
+gesture-start cell. Once the center enters that radius, the placeholder appears on
+the nearest aligned row-and-column pit; releasing forces confirmation of the nearest
+pit. Occupied pits are valid targets. Only after confirmation are the Tiles covered
+by the reservation moved to their nearest free cells with a 180 ms ease-out snap.
+This makes every middle, edge, empty, or occupied aligned pit selectable without
+reflowing the desktop during uncommitted pointer motion.
 
-The other three corners use centered diagonal double-arrow symbols and resize
-continuously. The upper-right handle moves only the top and right edges, the lower-left
-moves only the left and bottom edges, and the lower-right moves only the right and
-bottom edges; the two opposite edges remain fixed for the whole gesture. Continuous
-pixel coverage is tracked separately from final rounded span: as soon as the growing
-rectangle enters an occupied grid cell, only the covered Tile snaps to the nearest
-free cell, while all non-conflicting Tiles keep their gesture-start cells. Shrinking
-back before release restores cells whose conflict disappeared. Each gesture computes
-the spans that still fit between the fixed opposite edges and the visible desktop
-boundary; reaching that limit stops growth rather than forcing a new row or column.
+All four corners contain a centered, two-stroke Chevron whose legs meet at exactly
+90 degrees and point toward that corner. They are resize controls only: upper-left
+moves the top and left edges,
+upper-right moves the top and right edges, lower-left moves the bottom and left edges,
+and lower-right moves the bottom and right edges. The two opposite edges remain fixed
+for the whole gesture. Continuous pixel coverage is tracked separately from final
+rounded span. The complete visible Tile body follows the pointer at pixel resolution;
+on release a 180 ms ease-out animation settles its position and size onto the rounded
+legal grid rectangle. As soon as the growing rectangle enters an occupied grid cell,
+only the
+covered Tile snaps to the nearest free cell, while all non-conflicting Tiles keep their
+gesture-start cells. Shrinking back before release restores cells whose conflict
+disappeared. Each gesture computes the spans that still fit between the fixed opposite
+edges and the logical desktop boundary; reaching that limit stops growth rather than
+forcing a new row or column. Holding the Tile body or a lower resize handle in the
+top/bottom edge zone scrolls that logical desktop by bounded steps. The floating Tile
+remains under the pointer while the snap solver evaluates newly exposed rows, so the
+bottom of the screen is a scroll trigger, not an artificial placement or resize limit.
 
 Move and resize release both settle the selected Tile and placeholder on the committed
-explicit cell, keep the Tile as the foreground child, and resume its breathing
+explicit cell, keep the Tile as the foreground child, and resume its body-scale
 animation. Geometry remains responsive column/row spans rather than absolute
 480 x 800 coordinates. Tap the selected Tile again, tap empty desktop space, switch
 to All Apps, or use Home/Back to leave edit mode.
@@ -191,17 +252,24 @@ sibling. LVGL still includes the parent's scroll offset in `lv_obj_get_x/y()` fo
 such a child, while `lv_obj_set_pos()` expects the unscrolled local style position.
 The move/resize path therefore records and updates `style_x/style_y`, and converts
 grid coordinates explicitly when entering the floating layer. This keeps the Tile
-under the pointer even after the Start page has been scrolled. A single viewport
-repair is scheduled when the interaction or its final snap animation completes; no
-full-page redraw is performed for every pointer sample.
+under the pointer even after the Start page has been scrolled. A single viewport repair
+is scheduled when the interaction or its final snap animation completes. If the old/new
+visual area crosses the content/navigation seam, only a narrow screen-root stripe is
+redrawn in Shell child order (content first, navigation last); no full-page redraw is
+performed for every pointer sample.
 
-The handles intentionally extend beyond both the Tile and desktop-container bounds.
-Because this port uses LVGL partial rendering, `OVERFLOW_VISIBLE` alone is not enough:
-the Tile and its container also report a responsive 32 px extended draw area through
-`LV_EVENT_REFR_EXT_DRAW_SIZE`. Handle visibility changes invalidate the full extended
-area before and after the flag transition. This keeps parent clipping and dirty-area
-refresh aligned, so corner circles are complete and hiding or moving them cannot leave
-old pixels in the permanent display framebuffer.
+The edit chrome is deliberately self-contained. A fixed transparent outer Tile owns
+input and clipping, while an inner body contains the accent background, application
+icon, labels, pattern, and live content. The complete inner body scales from 248/256
+back to its original size around its center, so the Tile visibly breathes without ever
+leaving its own rectangle. Four transparent 35 px touch targets plus an 8 px extended
+hit margin provide an effective clipped corner target of about 51 x 51 px. They are
+siblings of the body, remain fixed during that animation, and draw only their compact
+Chevron; the central area remains owned by body long-press movement. The
+outer Tile does not enable `OVERFLOW_VISIBLE` or report an extended draw area, so
+editing cannot paint into the desktop scrollbar or content/navigation seam. Edit mode
+still exposes a bounded logical workspace; leaving edit collapses its physical extent
+to the lowest real Tile so normal use does not expose an artificial blank desktop.
 
 The top-level content object is a hard clip viewport between the status and navigation
 bars. Local Tile overflow is therefore permitted inside the desktop but can never draw

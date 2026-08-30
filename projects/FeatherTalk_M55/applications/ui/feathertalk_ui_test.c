@@ -9,7 +9,7 @@
 #define FT_UI_TEST_START_DELAY_MS 1800U
 #define FT_UI_TEST_STEP_MS         320U
 #define FT_UI_TEST_ROUTE_LIMIT     8U
-#define FT_UI_TEST_MEDIA_INDEX     2U
+#define FT_UI_TEST_MEDIA_INDEX     1U
 
 typedef enum
 {
@@ -193,18 +193,21 @@ static void run_settings_test(void)
     size_t accent_count = ft_pages_test_accent_count();
     size_t opacity_count = ft_pages_test_opacity_count();
     size_t background_count = ft_pages_test_background_count();
-    const size_t preference_base = 9U;
+    const size_t preference_base = 18U;
     char detail[24];
     if (s_control_index == 0U)
     {
-        test_record(ft_pages_test_settings_count() == 4U &&
-                    ft_pages_test_settings_visible_count() == 4U,
-                    "settings.categories", "4 configurable entries");
+        test_record(ft_pages_test_settings_count() == 7U &&
+                    ft_pages_test_settings_visible_count() == 7U,
+                    "settings.categories", "5 controls + system information + about");
         test_record(ft_pages_test_settings_page_id(0U) == FT_PAGE_SETTINGS_DISPLAY &&
                     ft_pages_test_settings_page_id(1U) == FT_PAGE_SETTINGS_WIFI &&
                     ft_pages_test_settings_page_id(2U) == FT_PAGE_SETTINGS_BLUETOOTH &&
-                    ft_pages_test_settings_page_id(3U) == FT_PAGE_SETTINGS_PERSONALIZATION,
-                    "settings.scope", "only board-backed configuration");
+                    ft_pages_test_settings_page_id(3U) == FT_PAGE_SETTINGS_TIME_LANGUAGE &&
+                    ft_pages_test_settings_page_id(4U) == FT_PAGE_SETTINGS_PERSONALIZATION &&
+                    ft_pages_test_settings_page_id(5U) == FT_PAGE_SYSTEM &&
+                    ft_pages_test_settings_page_id(6U) == FT_PAGE_ABOUT,
+                    "settings.scope", "board controls plus device information");
     }
     else if (s_control_index == 1U)
     {
@@ -231,7 +234,7 @@ static void run_settings_test(void)
         lv_textarea_set_text(ft_pages_test_get_settings_search_box(), "");
         (void)lv_obj_send_event(ft_pages_test_get_settings_search_box(),
                                 LV_EVENT_VALUE_CHANGED, RT_NULL);
-        test_record(ft_pages_test_settings_visible_count() == 4U,
+        test_record(ft_pages_test_settings_visible_count() == 7U,
                     "settings.search.clear", "all categories restored");
     }
     else if (s_control_index == 4U)
@@ -280,6 +283,102 @@ static void run_settings_test(void)
     else if (s_control_index == 8U)
     {
         (void)test_click(ft_pages_test_get_settings_result(3U),
+                         "settings.open", "Time & language");
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS_TIME_LANGUAGE &&
+                    ft_router_depth() == 3U &&
+                    ft_pages_test_get_time_format_button(0U) != RT_NULL &&
+                    ft_pages_test_get_timezone_dropdown() != RT_NULL &&
+                    ft_pages_test_get_language_button(0U) != RT_NULL,
+                    "settings.time_language", "format, time zone and language controls");
+    }
+    else if (s_control_index == 9U)
+    {
+        (void)test_click(ft_pages_test_get_time_format_button(1U),
+                         "settings.time_format", "12-hour");
+        test_record(!preferences->use_24_hour,
+                    "settings.time_format.state", "12-hour selected");
+        (void)test_click(ft_pages_test_get_time_format_button(0U),
+                         "settings.time_format", "24-hour");
+        test_record(preferences->use_24_hour,
+                    "settings.time_format.restore", "24-hour restored");
+    }
+    else if (s_control_index == 10U)
+    {
+        lv_obj_t *dropdown = ft_pages_test_get_timezone_dropdown();
+        uint32_t timezone_index = 2U;
+        lv_dropdown_set_selected(dropdown, timezone_index);
+        (void)test_event(dropdown, LV_EVENT_VALUE_CHANGED,
+                         "settings.timezone", "UTC+00:00");
+        test_record(preferences->timezone_offset_minutes ==
+                    ft_pages_test_timezone_offset(timezone_index),
+                    "settings.timezone.state", "fixed UTC offset selected");
+        lv_dropdown_set_selected(dropdown, 5U);
+        (void)lv_obj_send_event(dropdown, LV_EVENT_VALUE_CHANGED, RT_NULL);
+        test_record(preferences->timezone_offset_minutes == 480,
+                    "settings.timezone.restore", "UTC+08:00 restored");
+    }
+    else if (s_control_index == 11U)
+    {
+        (void)test_click(ft_pages_test_get_language_button(FT_LANGUAGE_EN_US),
+                         "settings.language", "English");
+        test_record(preferences->language == FT_LANGUAGE_EN_US,
+                    "settings.language.state", "English selected");
+    }
+    else if (s_control_index == 12U)
+    {
+        test_record(preferences->language == FT_LANGUAGE_EN_US &&
+                    ft_router_current_page() == FT_PAGE_SETTINGS_TIME_LANGUAGE &&
+                    ft_pages_test_language_surface(FT_LANGUAGE_EN_US) &&
+                    ft_ui_test_language_surface(FT_LANGUAGE_EN_US),
+                    "settings.language.surface", "English applied to pages, tiles and shell");
+        (void)test_click(ft_pages_test_get_language_button(FT_LANGUAGE_ZH_CN),
+                         "settings.language", "Simplified Chinese");
+        test_record(preferences->language == FT_LANGUAGE_ZH_CN,
+                    "settings.language.state", "Simplified Chinese selected");
+    }
+    else if (s_control_index == 13U)
+    {
+        test_record(preferences->language == FT_LANGUAGE_ZH_CN &&
+                    ft_router_current_page() == FT_PAGE_SETTINGS_TIME_LANGUAGE &&
+                    ft_pages_test_language_surface(FT_LANGUAGE_ZH_CN) &&
+                    ft_ui_test_language_surface(FT_LANGUAGE_ZH_CN),
+                    "settings.language.surface", "Chinese applied to pages, tiles and shell");
+    }
+    else if (s_control_index == 14U)
+    {
+        (void)ft_router_back();
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS &&
+                    ft_router_depth() == 2U,
+                    "settings.back", "time & language -> settings");
+    }
+    else if (s_control_index == 15U)
+    {
+        (void)test_click(ft_pages_test_get_settings_result(5U),
+                         "settings.open", "System information");
+        test_record(ft_router_current_page() == FT_PAGE_SYSTEM &&
+                    ft_router_depth() == 3U &&
+                    ft_pages_test_system_info_complete(),
+                    "settings.system", "summary cards and expandable inventory");
+        (void)ft_router_back();
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS &&
+                    ft_router_depth() == 2U,
+                    "settings.back", "system information -> settings");
+    }
+    else if (s_control_index == 16U)
+    {
+        (void)test_click(ft_pages_test_get_settings_result(6U),
+                         "settings.open", "About FeatherTalk");
+        test_record(ft_router_current_page() == FT_PAGE_ABOUT &&
+                    ft_router_depth() == 3U,
+                    "settings.about", "product and version information");
+        (void)ft_router_back();
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS &&
+                    ft_router_depth() == 2U,
+                    "settings.back", "about -> settings");
+    }
+    else if (s_control_index == 17U)
+    {
+        (void)test_click(ft_pages_test_get_settings_result(4U),
                          "settings.open", "Personalization");
         test_record(ft_router_current_page() == FT_PAGE_SETTINGS_PERSONALIZATION &&
                     ft_router_depth() == 3U,
@@ -331,13 +430,15 @@ static void run_media_test(void)
     case 1U:
         (void)test_click(ft_pages_test_get_media_button(), "media.play", RT_NULL);
         label = ft_pages_test_get_media_label();
-        test_record(ft_pages_test_media_is_playing() && label != RT_NULL && strstr(label, "Pause") != RT_NULL,
+        test_record(ft_pages_test_media_is_playing() && label != RT_NULL &&
+                    (strstr(label, "Pause") != RT_NULL || strstr(label, "暂停") != RT_NULL),
                     "media.state", "playing/Pause");
         break;
     case 2U:
         (void)test_click(ft_pages_test_get_media_button(), "media.pause", RT_NULL);
         label = ft_pages_test_get_media_label();
-        test_record(!ft_pages_test_media_is_playing() && label != RT_NULL && strstr(label, "Play") != RT_NULL,
+        test_record(!ft_pages_test_media_is_playing() && label != RT_NULL &&
+                    (strstr(label, "Play") != RT_NULL || strstr(label, "播放") != RT_NULL),
                     "media.state", "paused/Play");
         break;
     case 3U:
@@ -394,7 +495,13 @@ static void run_files_test(void)
 
 static void run_page_control_test(const ft_app_descriptor_t *app)
 {
-    if (app->page_id == FT_PAGE_SETTINGS) run_settings_test();
+    if (app->page_id == FT_PAGE_SYSTEM)
+    {
+        test_record(ft_pages_test_system_info_complete(), "system.inventory",
+                    "summary cards/specifications/collapsed details");
+        finish_page_controls();
+    }
+    else if (app->page_id == FT_PAGE_SETTINGS) run_settings_test();
     else if (app->page_id == FT_PAGE_MEDIA) run_media_test();
     else if (app->page_id == FT_PAGE_MESSAGES) run_message_test();
     else if (app->page_id == FT_PAGE_FILES) run_files_test();
@@ -427,12 +534,16 @@ static void ui_test_timer_cb(lv_timer_t *timer)
                     (long)layout->screen_width, (long)layout->screen_height,
                     layout->tile_columns, (long)layout->scale_percent);
         test_record(home_start_is_ready(), "shell.start", "home/start");
-        test_record(app_count == 6U, "registry.count", "6 applications");
+        test_record(app_count == 4U, "registry.count", "4 standalone applications");
+        test_record(ft_pages_test_icon_assignments_unique(), "icons.entity.unique",
+                    "apps/settings/cards use distinct semantic icons");
         test_record(ft_layout_profiles_self_test(), "layout.profiles",
                     "240x320 through 720x1280 + landscape");
         test_record(layout->tile_column_width > 0 &&
                     layout->status_bar_height + layout->nav_bar_height < layout->screen_height,
                     "layout.current", detail);
+        test_record(ft_ui_test_status_monitor_visible(), "status.monitor",
+                    "present FPS / refresh Hz / RT heap");
         ft_ui_test_notification_reset();
         s_shade_render_before = ft_ui_test_notification_render_count();
         ft_metrics_route_baseline();
@@ -602,8 +713,12 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         break;
     case FT_TEST_QUEUE_ADD:
         s_action_count += 2U;
-        feathertalk_ui_notify("System", "First notification", "Swipe test item");
-        feathertalk_ui_notify("Messages", "Second notification", "Clear-all test item");
+        /* Exercise the real Simplified-Chinese notification rendering path.
+         * Keep product and radio keywords untranslated by design. */
+        feathertalk_ui_notify("FeatherTalk", "系统通知",
+                              "Wi-Fi 与蓝牙服务状态测试。");
+        feathertalk_ui_notify("消息", "第二条通知",
+                              "左右滑动删除，或点击清除。");
         test_record(ft_ui_test_notification_count() == 2U &&
                     ft_ui_test_notification_unread() == 2U,
                     "notification.queue", "2 total / 2 unread");
@@ -790,8 +905,8 @@ static void ui_test_timer_cb(lv_timer_t *timer)
     case FT_TEST_TILE_MODEL:
         test_record(apps[0].tile.column_span == 2U && apps[0].tile.row_span == 1U &&
                     apps[0].tile.opacity == 255U &&
-                    apps[0].app.app_icon == FT_ICON_SYSTEM,
-                    "tile.model.common", "System 2x1 / opacity / icon");
+                    apps[0].app.app_icon == FT_ICON_SETTINGS,
+                    "tile.model.common", "Settings 2x1 / opacity / icon");
         test_record(apps[FT_UI_TEST_MEDIA_INDEX].app.loop_enabled &&
                     apps[FT_UI_TEST_MEDIA_INDEX].app.live_content != RT_NULL &&
                     apps[FT_UI_TEST_MEDIA_INDEX].app.loop_period_ms > 0U,
@@ -807,7 +922,7 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         test_record(!ft_pages_test_tile_editing() && ft_router_depth() == 1U,
                     "tile.press.guard", "press alone opens nothing");
         (void)test_event(tile, LV_EVENT_LONG_PRESSED,
-                         "tile.long_press", "System edit mode");
+                         "tile.long_press", "Settings edit mode");
         /* Real pointers can report PRESS_LOST before the post-long-press CLICKED.
          * Neither event is allowed to cancel edit mode or launch the app. */
         (void)test_event(tile, LV_EVENT_PRESS_LOST,
@@ -821,24 +936,29 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         test_record(ft_pages_test_tile_editing() &&
                     ft_pages_test_tile_selected() == 0U &&
                     ft_router_depth() == 1U,
-                    "tile.edit", "selected System / app not opened");
+                    "tile.edit", "selected Settings / app not opened");
         test_record(ft_pages_test_tile_handle_count() == 4U,
-                    "tile.handles", "move + three diagonal resize handles");
+                    "tile.handles", "four inset 90-degree resize Chevrons");
         test_record(ft_pages_test_tile_handle_geometry(),
-                    "tile.handles.geometry", "foreground circles centered on four corners");
+                    "tile.handles.geometry",
+                    "body scales inside Tile; 51px corner targets stay fixed");
         s_test_phase = FT_TEST_TILE_MOVE;
         break;
     case FT_TEST_TILE_MOVE:
         s_action_count++;
         test_record(ft_pages_test_tile_move(0U, 2U),
-                    "tile.move", "pending stays still; confirmed occupied pit reflows");
+                    "tile.move",
+                    "long-press body drag; pending still; occupied pit reflows");
         test_record(ft_pages_test_tile_layout_valid(), "tile.reflow", "only confirmed conflicts move");
         test_record(ft_pages_test_tile_layout_settled(),
                     "tile.move.settled", "all Tiles final; selected animation continues");
         test_record(ft_pages_test_tile_move_nearest(1U),
                     "tile.move.nearest", "middle / edge / occupied pits selectable");
-        test_record(ft_pages_test_tile_move_scrolled(5U),
+        test_record(ft_pages_test_tile_move_scrolled(3U),
                     "tile.move.scrolled", "foreground Tile remains under pointer after scroll");
+        test_record(ft_pages_test_tile_move_edge_autoscroll(3U),
+                    "tile.move.edge_scroll",
+                    "bottom edge scrolls desktop and exposes a legal snap pit");
         s_test_phase = FT_TEST_TILE_RESIZE;
         break;
     case FT_TEST_TILE_RESIZE:
@@ -846,7 +966,7 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         test_record(ft_pages_test_tile_resize(FT_UI_TEST_MEDIA_INDEX, 2U, 2U) &&
                     ft_pages_test_tile_columns(FT_UI_TEST_MEDIA_INDEX) == 2U &&
                     ft_pages_test_tile_rows(FT_UI_TEST_MEDIA_INDEX) == 2U,
-                    "tile.resize", "Media snapped to 2x2");
+                    "tile.resize", "live body follows; release animates to 2x2");
         test_record(ft_pages_test_tile_resize_collision(),
                     "tile.resize.collision",
                     "covered Tiles animate to nearest free pits; others stay");
@@ -856,17 +976,20 @@ static void ui_test_timer_cb(lv_timer_t *timer)
                     "all siblings remain in grid");
         test_record(ft_pages_test_tile_resize_boundary(),
                     "tile.resize.boundary", "clamped in current row / desktop bounds");
+        test_record(ft_pages_test_tile_resize_edge_autoscroll(3U),
+                    "tile.resize.edge_scroll",
+                    "bottom resize scrolls through the logical desktop");
         test_record(ft_pages_test_tile_resize_anchors(FT_UI_TEST_MEDIA_INDEX),
-                    "tile.resize.anchors", "TR/BL/BR keep opposite edges fixed");
+                    "tile.resize.anchors", "TL/TR/BL/BR keep opposite edges fixed");
         s_test_phase = FT_TEST_TILE_PROPERTIES;
         break;
     case FT_TEST_TILE_PROPERTIES:
         s_action_count++;
-        test_record(ft_pages_test_tile_set_common(1U, "Settings+", 192U,
-                                                   FT_ICON_SETTINGS) &&
-                    strcmp(ft_pages_test_tile_name(1U), "Settings+") == 0 &&
-                    ft_pages_test_tile_opacity(1U) == 192U &&
-                    ft_pages_test_tile_pattern(1U) == FT_ICON_SETTINGS,
+        test_record(ft_pages_test_tile_set_common(0U, "Settings+", 192U,
+                                                   FT_ICON_TILE_PATTERN) &&
+                    strcmp(ft_pages_test_tile_name(0U), "Settings+") == 0 &&
+                    ft_pages_test_tile_opacity(0U) == 192U &&
+                    ft_pages_test_tile_pattern(0U) == FT_ICON_TILE_PATTERN,
                     "tile.properties", "name / opacity / pattern mutable");
         s_test_phase = FT_TEST_TILE_LIVE;
         break;
@@ -892,7 +1015,9 @@ static void ui_test_timer_cb(lv_timer_t *timer)
     }
     case FT_TEST_TILE_RESTORE:
         s_action_count++;
-        (void)ft_pages_test_tile_set_common(1U, "Settings", 255U, FT_ICON_COUNT);
+        (void)ft_pages_test_tile_set_common(0U,
+                                            ft_preferences_text("设置", "Settings"),
+                                            255U, FT_ICON_COUNT);
         (void)ft_pages_test_tile_resize(FT_UI_TEST_MEDIA_INDEX, 1U, 1U);
         (void)ft_pages_test_tile_restore_layout();
         test_record(!ft_pages_test_tile_editing() &&
@@ -935,7 +1060,7 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         break;
     case FT_TEST_LIFECYCLE_SEARCH_OPEN:
         (void)test_click(ft_ui_test_get_nav_button(FT_NAV_SEARCH),
-                         "lifecycle.search.open", "after System release");
+                         "lifecycle.search.open", "after application release");
         s_lifecycle_wait_steps = 0U;
         s_test_phase = FT_TEST_LIFECYCLE_SEARCH_WAIT;
         break;
@@ -950,7 +1075,7 @@ static void ui_test_timer_cb(lv_timer_t *timer)
         break;
     case FT_TEST_LIFECYCLE_SEARCH_RESULT:
         (void)test_click(ft_pages_test_get_search_result(FT_UI_TEST_MEDIA_INDEX),
-                         "lifecycle.search.result", "Media after System");
+                         "lifecycle.search.result", "Media after prior routes");
         s_test_phase = FT_TEST_LIFECYCLE_SEARCH_RESULT_VERIFY;
         break;
     case FT_TEST_LIFECYCLE_SEARCH_RESULT_VERIFY:

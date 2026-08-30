@@ -294,6 +294,48 @@
 - 自动测试新增 Settings 分类数量/范围、搜索 `wifi`、键盘覆盖几何与收起、4 个分类逐页 push/pop、亮度从 65% 实写到可稳定回读的 30% 后恢复、全部个性化控件和最终 transient slot 释放检查。
 - 最终 M55 clean 构建通过：text=908,968、data=3,768、bss=4,307,828 字节；HEX 2,567,381 字节，SHA-256 `90BD54EAF695FD559995EF846A463730A9D1A50FFAF7E12EC5D749A1C5F10581`。Infineon Customized OpenOCD 5.19.0.4782 写入 917,504 字节并校验 912,736 字节。板端完整自动化为 `255 PASS / 0 FAIL / 122 actions`，耗时 56,613 ms；最终 route 对象增量 0、堆 122,872 / 1,441,752 字节、对象峰值 155，M55 IPC tx/rx/err=19/57/0。完整日志：`tools/freather/serial-monitor/logs/settings-scope-icons-clean-board.log`；UI 状态：`settings-scope-icons-clean-status.log`；IPC 状态：`settings-scope-icons-ipc-status.log`。
 
+## 2026-08-30 详细 System 硬件与资源信息
+
+- System 应用从简短的 M33/性能状态扩展为七个可滚动分区：双核运行状态、处理器与时钟域、片上存储、片外 Flash/HyperRAM、通信与显示链路、M55 已注册外设、UI 运行指标。页面明确区分物理容量、链接槽分配、运行期实际占用和当前核心不可观测的数据。
+- 新增 M55 平台采集器：核心/M33/NPU/GFX 时钟使用 PDL 运行期接口，I/D Cache 读取当前 CPU 状态；内外部 heap 使用 RT-Thread `rt_memory_info()` / `rt_memheap_info()` 获取 current/total/peak；RT-Thread device object list 在运行期枚举，不维护易过期的静态设备名单。
+- 链接器新增只读诊断边界。最终映射核准 M55 XIP 为 `0x60580000..0x60660AD0`，实际跨度 920,272 字节（含 1 KiB MCUboot header），DTCM 静态区结束于 `0x2000EB10`，GFX 静态缓冲为 `0x26200000..0x2646D000`（2,484 KiB / 3 MiB）。
+- 片上资源现在完整显示 64 KiB Boot ROM、512 KiB 物理 RRAM、328 KiB 用户可寻址 RRAM 窗口、512 KiB M55 TCM、1 MiB M33 SRAM、5 MiB SoC memory；片外显示 16 MiB S25FS128S Flash 与 16 MiB S70KS1283 HyperRAM 的当前分区、M55 XIP 使用率以及 8 MiB `hyperam` heap 的实时 current/peak。
+- 通信/显示信息覆盖 SMIF0 200 MHz x4 SDR、SMIF1 399 MHz x8 DDR、MIPI-DSI 2 × 900 Mb/s / 33.984 MHz pixel clock、UART2 115200 8-N-1、I2C0 100 kHz、software I2C1、ABI 4 / 16-byte IPC frame、5 kHz 背光 PWM 和 8 KiB AXI-DMA 阈值。未启用的 Wi-Fi/Bluetooth、audio、SDHC、USB、CAN-FD、I3C、PDM、TDM 继续明确标记为无产品驱动。
+- 新增 `system.inventory` 板端断言并扩展 transient-object 生命周期检查；详细口径、地址窗口和权威数据源记录在 `SYSTEM_INFORMATION_zh.md`。
+- 最终 M55 `-Clean` 构建通过：text=914,640、data=4,608、bss=4,307,852 字节；HEX 2,585,713 字节，SHA-256 `E016E4110267937DB0F08AE568BEDD3531CD711A4404BBD79483D5996BEB1F35`。
+- 使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 烧录并校验：写入 921,600 字节、校验 919,248 字节。板端全量自动化为 `255 PASS / 0 FAIL / 122 actions`，耗时 56,797 ms；最终 route 对象增量 0、堆 123,224 / 1,441,752 字节、峰值 591,632 字节、对象峰值 155，M55 IPC tx/rx/err=93/281/0。
+- 完整日志：`tools/freather/serial-monitor/logs/system-information-clean-board.log`；最终 UI/IPC/CPU 状态：`tools/freather/serial-monitor/logs/system-information-clean-status.log`。
+
+## 2026-08-30 System 概览卡片与折叠详情
+
+- 保留上一阶段全部硬件采集字段，但把七段连续诊断文字重构为“摘要卡 + 折叠分组”。480×800 默认使用 2×2 卡片显示 16 MiB 存储、16 MiB 片外 RAM、6.50 MiB 片上 RAM和 PSoC Edge E84/双核主频；宽屏和横屏配置可自适应为一行四卡。
+- 设备规格默认展开；存储与内存、接口与外设、运行状态默认折叠。每个字段改为固定名称列和可换行值列，信息仍然完整，但用户不再进入页面就面对全部低层参数。新增 storage 与 memory 两个产品化 SVG/A8 图标，未复制参考系统品牌资产。
+- `system.inventory` 板端测试现在同时检查四张卡片均有运行期值、四个分组的默认展开状态、真实点击可展开并再次收回，以及关键 SoC/Flash/HyperRAM/MIPI/RT-device 字段。页面销毁后还逐一断言卡片、分组和字段对象槽位清空。
+- M55 `-Clean` 构建通过：text=925,016、data=4,624、bss=4,308,004 字节；HEX 2,614,947 字节，SHA-256 `65EEE91111AACD89DBA44BABD4B27AA873A52FE3A90381B20AE2E1963CB8976D`。
+- 使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 烧录并校验：写入 933,888 字节、校验 929,640 字节。板端全量自动化为 `255 PASS / 0 FAIL / 122 actions`，耗时 58,469 ms，IPC err=0。完整日志：`tools/freather/serial-monitor/logs/system-info-card-layout-board.log`。
+
+## 2026-08-30 Start Tile 底部工作区与导航接缝闭环
+
+- 本轮把“Tile 自身边界”和“桌面/导航栏边界”彻底拆开。Tile 继续报告 32 px 扩展绘制区并允许四角手柄越出自身矩形；桌面容器不再设置 `LV_OBJ_FLAG_OVERFLOW_VISIBLE`，因此浮动 Tile 本体和控制柄都不能穿过页面硬裁剪写入导航栏。
+- 原接缝修复只对 Start 页面对象失效。若旧的浮动对象已经碰到导航栏扫描线，页面重绘没有权限覆盖导航栏像素，便会保留 Tile 本体或圆圈的旧块。现在交互旧/新扩展区域接近底部时，只把一条窄带提交给活动 Screen 根对象重绘，顺序固定为内容在前、导航栏在后；交互结束再执行页面收敛和同一接缝修复，不把全屏失效重新塞回每个 `PRESSING` 采样。
+- 桌面网格现明确区分逻辑范围和物理滚动范围。编辑态至少提供 12 行合法坑位，并在最底行后额外预留一个完整控制柄半径；正常态的物理范围只到最低的真实 Tile，避免出现大段无意义空白。长按进入编辑时会把目标轻微滚入完整手柄可见区，退出编辑时收缩范围并钳制旧滚动位置。
+- 移动或向下缩放进入上下 48 px 边缘区后，以 14 px 有界步长自动滚动；浮动 Tile 仍使用屏幕坐标跟手，坑位解析使用滚动后的逻辑原点。底部不再是死边界：继续按住即可暴露更低的空坑位，确认后才触发被覆盖 Tile 的就近避让。三个缩放角仍只改变各自拥有的两条边，行跨度保持产品约束 1..3。
+- 板上回归覆盖 `tile.move.scrolled`、`tile.move.edge_scroll`、`tile.resize.edge_scroll`、`tile.resize.boundary`、`tile.resize.anchors` 等专项，最终 clean 镜像为 `243 PASS / 0 FAIL / 114 actions`，耗时 52,988 ms。第一次回归的唯一失败来自旧断言要求进入编辑前后屏幕坐标不变；新产品行为会为完整圆圈主动微调滚动，断言已改为检查微调后的拖动增量严格等于触点增量。
+- 最终 M55 `-Clean` 镜像构建为 text=954,976、data=4,624、bss=4,308,028 字节；HEX 2,699,203 字节，SHA-256 `9D7DD9716432880CDBF48B5EB3AC1A391E033D65D80134C5FF603D2AA463CD3E`。Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 写入 M55 962,560 字节并校验 959,600 字节；随后写入签名 M33 167,936 字节并校验 160,536 字节。
+- 自动测试结束后通过 OpenOCD 直接读取 `0x263A5000` 的 819,200 字节 RGB565 常驻显存，生成 `tools/freather/serial-monitor/logs/tile-seam-current.rgb565/png` 及 `tile-seam-current-seam.png`。像素统计确认 `y=716..735` 每行 480 个可见像素全部为黑色，导航栏从 `y=736` 开始每行恰有 480 个非黑像素；Tile 本体、四角圆圈和强调色旧块均未越过交界。
+- 完整 clean 板端日志为 `tools/freather/serial-monitor/logs/COM17-20260830-085233.log`；最终 `feather_ui_status` 报告 auto-test passed=243/fail=0、route-depth=1、editing=0、IPC seq 持续递增且 err=0。
+
+## 2026-08-30 Start Tile 内嵌 Chevron 与本体长按移动
+
+- 移除四个外置圆圈以及左上角专用移动图标。编辑态现在只显示四个两笔 Chevron，两条线严格呈 90° 并分别指向左上、右上、左下、右下；四个角全部只负责缩放，对应 TL/TR/BL/BR 各自移动相邻的两条边，另外两条对边固定。
+- 移动入口改为 Tile 本体：持续按住 500 ms 进入编辑后，同一次按压可直接拖动，短按仍只打开应用。原有“未确认不让位、进入最近合法吸附坑后才让位、占用坑允许覆盖并就近重排”的移动事务保持不变。
+- 操作图标使用 35 px 全透明点击对象并增加 8 px 扩展命中边距，父级裁剪后的角部有效区域约为 51×51 px；四个区域只占据角部，中央和四边中段仍由本体长按移动使用。不再使用外圆、阴影、扩展绘制区或 `LV_OBJ_FLAG_OVERFLOW_VISIBLE`，因此四角控件没有机会写到侧边滚动条或内容/导航栏接缝。
+- Tile 现在拆成固定透明外壳和内部视觉本体：外壳负责触摸、网格几何及硬裁剪；背景、图标、名称、图案和 Live Content 全部位于视觉本体。呼吸动画把完整视觉本体从 248/256 缩放回 256/256，标签本身确实弹跳；四角 Chevron 是视觉本体的同级对象，位置和尺寸不随动画改变。动画无效区仍被外壳限制在 Tile 自身范围内。
+- 缩放手势现在同步更新外层几何和完整视觉本体，拖动每个像素都会实时改变背景、图标、文字、图案及 Live Content 的可见宽高；模型的最终列/行跨度继续单独取整。松手后从当前像素矩形执行 180 ms ease-out 动画，位置和尺寸共同吸附到最终合法网格矩形，然后恢复呼吸动画。自动测试故意在距离 2×2 标准尺寸 8 px 处松手，确认动画已建立后再检查最终尺寸。
+- 自动测试扩展为四角锚点和新绘制约束：`tile.handles` 检查四个斜向 Chevron，`tile.handles.geometry` 检查完整视觉本体在 Tile 内缩放且透明点击目标固定，`tile.move` 检查长按本体移动，`tile.resize.anchors` 逐一验证 TL/TR/BL/BR 的对边固定关系。相关的滚动后跟手、底部边缘滚动、边界钳制、碰撞避让和最终收敛测试继续通过。
+- 最终 M55 clean 构建为 text=956,984、data=4,624、bss=4,308,132 字节；HEX 2,704,857 字节，SHA-256 `372982F081FD0CDF0313FC7DC9689436DEAD5E95D31369B3904E3D8CDD78E48E`。
+- 使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 重新烧录并校验 M55 和签名 M33 镜像。最终板端状态为 `243 PASS / 0 FAIL / 114 actions`、耗时 52,757 ms、route depth=1、route object delta=0、IPC err=0；专项输出明确为 `four inset 90-degree resize Chevrons`、`body scales inside Tile; 51px corner targets stay fixed`、`live body follows; release animates to 2x2` 和 `TL/TR/BL/BR keep opposite edges fixed`。最终 clean 回归日志：`tools/freather/serial-monitor/logs/COM17-20260830-094804.log`。
+
 ## 已知边界
 
 - 电池、电源采样、Wi-Fi/网络、蓝牙、屏幕旋转和外部存储的板级驱动尚未在产品配置中启用；UI 与 ABI 4 IPC 已具备能力、启用、连接和 Wi-Fi 信号强度接入点，并明确显示不可用。显示亮度已经接入 M55 `pwm18`。
@@ -301,3 +343,28 @@
 - 自动测试宏当前为板级验收而启用；发布固件应关闭 `CONFIG_FEATHERTALK_UI_TEST_MODE`。
 
 后续每次板测继续在本文末尾追加构建、镜像、自动测试和 IPC 结果。
+
+## 2026-08-30 时间与语言设置及无线设置图标修订
+
+- Settings 新增独立“时间和语言”分类，不与 System 信息页混放。默认偏好为简体中文、UTC+08:00 和 24 小时制；用户可在 12/24 小时制、7 个固定 UTC 偏移及简体中文/English 之间切换。
+- 状态栏在 M33 `FEATHERTALK_SYSTEM_TIME_VALID` 有效时，把 Unix 时间按选定偏移和制式格式化；RTC 未就绪时继续明确显示 `UP` 启动计时，不把 uptime 冒充本地时间。System 运行状态同步显示本地时间、UTC 偏移和 12/24 小时制。
+- 当前产品没有时区数据库和夏令时服务，因此页面明确标记为固定 UTC 偏移；这些偏好与强调色等设置一样暂存于内存后端，重启后恢复默认。这里没有增加虚假的手动 RTC 写入能力。
+- Settings 主页的标题、说明、搜索提示、分类名称/摘要和键盘收起文字增加简体中文/English 双语数据；搜索始终同时匹配中英文名称、摘要和关键字。
+- 新增独立的时钟+地球 SVG/A8 图标。Wi-Fi 设置图标改为对称三层信号弧，Bluetooth 设置图标改为标准六段轮廓，均移除原先容易造成误读的调节滑块叠加图形；状态栏仍使用其独立状态资产。
+- 自动测试扩展为 7 个设置入口，并真实触发 12/24 小时切换、UTC+00:00/UTC+08:00 选择、中英文切换和最终恢复，同时把新增控件纳入路由销毁后的 transient slot 检查。
+
+## 2026-08-30 全局中英文切换与完整简体中文基础字库
+
+- 语言不再只是“时间和语言”页面里的一个偏好值。桌面 Start Tile 名称、All Apps、搜索、设置分类与子页、System 信息、媒体、消息、文件、About、状态栏运行文字、快捷设置和通知面板全部统一使用 `ft_preferences_text()`。切换后路由器按原有页面栈重建可销毁页面，Shell 常驻对象原地刷新；自定义过的 Tile 名称不会被语言切换覆盖。
+- 自动测试把 English 与简体中文拆为两个真实异步阶段，分别检查当前路由、设置分类、桌面 Tile、快捷面板标题和蓝牙名称已经更新，再切回默认中文。板端结果包含 `settings.language.surface` 的英文、中文两项 PASS。
+- 最初仅从源码收集 288 个静态中文字形，无法覆盖 IPC/设备数据、后续新增文字和未直接写在 UI 源文件里的运行期字符串，实际板上会出现空白占位符。现改为产品基础字库：GB2312 一级、二级全部 6763 个简体中文汉字，再合并源码里的中文标点、全角字符和 GB2312 以外字形，本次合计 6771 个字形。
+- 字体源使用 Google Fonts 官方 Noto Sans SC 可变 TTF，固定 SHA-256 `A3041811A78C361B1DE50F953C805E0244951C21C5BD412F7232EF0D899AF0DA`，许可证为 SIL OFL 1.1。TTF、Node 模块只进入 Git 忽略的主机缓存；`lv_font_conv 1.5.3` 生成 12/14/16/22 px、2 bpp、无 RLE 压缩的 LVGL C 字体，Montserrat 继续作为 ASCII/LVGL symbol fallback。可复现脚本和许可证位于 `tools/freather/fonts/`。
+- 完整基础字库镜像构建为 text=3,130,384、data=4,712、bss=4,308,196 字节；HEX 8,818,340 字节，SHA-256 `22E2379E9EC7C80FDCA1CA80354D86A73468CB8A5E51F121D9452B53C923FB1D`。实际 M55 XIP 有效写入/校验为 3,137,536 / 3,135,096 字节，仍在 8 MiB 分区内；M33 写入/校验 167,936 / 160,536 字节。
+- 使用 Infineon Customized OpenOCD 5.19.0.4782 和 KitProg3 `0D141868022E2400` 完成双核烧录。完整板端回归为 `259 PASS / 0 FAIL / 120 actions`，耗时 56,631 ms，路由对象无泄漏、IPC err=0。日志：`tools/freather/serial-monitor/logs/gb2312-font-board-test.log`。
+
+## 2026-08-30 通知栏字体与真实横滑删除修复
+
+- 全局主题普通字体改为 Noto Sans SC 14，并对通知面板标题、汇总、清除、亮度、空状态、通知来源、标题和正文分别显式绑定 12/14/16 px 应用字体。已从 `0x263A5000` 读取 480×800 RGB565 显存，完整展开的中文通知栏无方框占位符；抓帧为 `tools/freather/serial-monitor/logs/notification-font-preview.bmp`。
+- 语言切换只翻译界面语义，不翻译产品、平台和协议关键词；`FeatherTalk`、`Feather`、`PSoC`、`M33/M55`、`Wi-Fi` 等保持原文。媒体曲目中的“羽翼序曲”相应修正为“Feather 序曲”。
+- 单条通知不再依赖容易被父级滚动容器抢走的最终 `LV_EVENT_GESTURE`。卡片现在处理 `PRESSED/PRESSING/RELEASED`：横向拖动实时跟手，超过卡片宽度 1/4 或释放速度达到阈值时删除，否则 160 ms 回弹；纵向动作继续用于通知列表滚动和上滑关闭。
+- 最新固件重新构建、烧录并完成 `259 PASS / 0 FAIL / 120 actions` 全量板端回归，日志为 `tools/freather/serial-monitor/logs/notification-swipe-board-test.log`。测试模式命令 `feather_ui_notification_preview` 可稳定打开两条中文通知，供真机触摸和显存复核。

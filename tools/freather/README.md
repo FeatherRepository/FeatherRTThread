@@ -122,6 +122,17 @@ geometry. Unsupported SVG features fail the build instead of being silently
 discarded. Generated files are compiled into the M55 project by the product
 UI `SConscript`; the SDK-native tool directories remain untouched.
 
+## UI Chinese fonts
+
+- Source: official Google Fonts Noto Sans SC, cached locally with a pinned SHA-256
+- Coverage: all 6,763 GB2312 Han characters plus UI-source extras
+- Output: LVGL C fonts at 12/14/16/22 px, 2 bpp, Montserrat ASCII fallback
+- Launcher: `fonts/build-ui-fonts.cmd`
+- License/provenance: `fonts/README.md` and `fonts/OFL-NotoSansSC.txt`
+
+The TTF and `lv_font_conv` package remain under the Git-ignored `fonts/cache/`;
+only the reproducible scripts, license, and generated firmware C assets are tracked.
+
 ## Serial monitor
 
 - Runtime: bundled CPython 3.14.7

@@ -109,6 +109,34 @@ void ft_router_home(void)
     ft_pages_show_start();
 }
 
+int ft_router_refresh_all(void)
+{
+    ft_page_id_t page_ids[FT_ROUTER_MAX_DEPTH];
+    size_t depth = s_route_depth;
+    size_t i;
+    int result = RT_EOK;
+
+    if (s_route_host == RT_NULL || depth == 0U) return -RT_EINVAL;
+    for (i = 0U; i < depth; i++)
+        page_ids[i] = s_route_stack[i].definition->id;
+    while (s_route_depth > 0U)
+    {
+        ft_route_entry_t *top = &s_route_stack[s_route_depth - 1U];
+        if (top->definition != RT_NULL && top->definition->on_leave != RT_NULL)
+            top->definition->on_leave();
+        if (top->view != RT_NULL) lv_obj_delete(top->view);
+        top->definition = RT_NULL;
+        top->view = RT_NULL;
+        s_route_depth--;
+    }
+    for (i = 0U; i < depth; i++)
+    {
+        result = ft_router_push(page_ids[i]);
+        if (result != RT_EOK) break;
+    }
+    return result;
+}
+
 size_t ft_router_depth(void)
 {
     return s_route_depth;

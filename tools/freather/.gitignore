@@ -4,3 +4,6 @@ serial-monitor/__pycache__/
 
 # PyOCD route: pip-installed dependencies stay local (recreated via uv/pip).
 pyocd-lib/
+
+# Reproducible font source/tool cache. Generated C fonts are tracked with UI.
+fonts/cache/

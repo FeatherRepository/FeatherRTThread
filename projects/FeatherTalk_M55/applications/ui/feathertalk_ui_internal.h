@@ -22,6 +22,7 @@ typedef enum
     FT_PAGE_SETTINGS_DISPLAY,
     FT_PAGE_SETTINGS_WIFI,
     FT_PAGE_SETTINGS_BLUETOOTH,
+    FT_PAGE_SETTINGS_TIME_LANGUAGE,
     FT_PAGE_SETTINGS_PERSONALIZATION,
     FT_PAGE_COUNT
 } ft_page_id_t;
@@ -88,11 +89,21 @@ typedef enum
     FT_BACKGROUND_COUNT
 } ft_background_mode_t;
 
+typedef enum
+{
+    FT_LANGUAGE_ZH_CN = 0,
+    FT_LANGUAGE_EN_US,
+    FT_LANGUAGE_COUNT
+} ft_language_t;
+
 typedef struct
 {
     uint32_t accent_rgb;
     uint8_t tile_opa;
     ft_background_mode_t background;
+    bool use_24_hour;
+    int16_t timezone_offset_minutes;
+    ft_language_t language;
     uint32_t revision;
 } ft_ui_preferences_t;
 
@@ -120,6 +131,7 @@ int ft_router_init(lv_obj_t *host);
 int ft_router_push(ft_page_id_t page_id);
 bool ft_router_back(void);
 void ft_router_home(void);
+int ft_router_refresh_all(void);
 size_t ft_router_depth(void);
 ft_page_id_t ft_router_current_page(void);
 
@@ -129,6 +141,7 @@ void ft_pages_show_start(void);
 void ft_pages_show_all_apps(void);
 void ft_pages_open_search(void);
 void ft_pages_apply_preferences(void);
+void ft_pages_apply_language(void);
 void ft_pages_update_system_status(const char *system_text, const char *metrics_text);
 void ft_pages_live_tile_update(const char *line);
 
@@ -136,6 +149,10 @@ int ft_tiles_create(lv_obj_t *container, const ft_app_descriptor_t *apps, size_t
 void ft_tiles_exit_edit(void);
 void ft_tiles_apply_opacity(uint8_t global_opacity);
 void ft_tiles_set_external_text(ft_page_id_t page_id, const char *text);
+void ft_tiles_set_localized_name(ft_page_id_t page_id,
+                                 const char *english_name,
+                                 const char *chinese_name,
+                                 const char *display_name);
 void ft_tiles_set_live_loop(ft_page_id_t page_id, bool enabled);
 bool ft_tiles_editing(void);
 size_t ft_tiles_selected(void);
@@ -145,6 +162,12 @@ const ft_ui_preferences_t *ft_preferences_get(void);
 void ft_preferences_set_accent(uint32_t rgb);
 void ft_preferences_set_tile_opa(uint8_t opa);
 void ft_preferences_set_background(ft_background_mode_t background);
+void ft_preferences_set_24_hour(bool enabled);
+void ft_preferences_set_timezone(int16_t offset_minutes);
+void ft_preferences_set_language(ft_language_t language);
+const char *ft_preferences_text(const char *zh_cn, const char *en_us);
+void ft_preferences_format_clock(uint32_t seconds, bool utc_time,
+                                 char *buffer, size_t buffer_size);
 void ft_preferences_reset(void);
 
 void ft_metrics_init(lv_display_t *display, lv_obj_t *root);
@@ -162,10 +185,12 @@ bool ft_tiles_test_handle_geometry(void);
 bool ft_tiles_test_move(size_t app_index, size_t target_index);
 bool ft_tiles_test_move_nearest(size_t app_index);
 bool ft_tiles_test_move_scrolled(size_t app_index);
+bool ft_tiles_test_move_edge_autoscroll(size_t app_index);
 bool ft_tiles_test_layout_settled(void);
 bool ft_tiles_test_resize(size_t app_index, uint8_t columns, uint8_t rows);
 bool ft_tiles_test_resize_collision(void);
 bool ft_tiles_test_resize_boundary(void);
+bool ft_tiles_test_resize_edge_autoscroll(size_t app_index);
 bool ft_tiles_test_resize_anchors(size_t app_index);
 size_t ft_tiles_test_order(size_t app_index);
 uint8_t ft_tiles_test_columns(size_t app_index);
@@ -183,6 +208,7 @@ bool ft_tiles_test_live_enabled(size_t app_index);
 
 lv_obj_t *ft_ui_test_get_nav_button(ft_nav_button_id_t button_id);
 lv_obj_t *ft_ui_test_get_status_bar(void);
+bool ft_ui_test_status_monitor_visible(void);
 lv_obj_t *ft_ui_test_get_notification_panel(void);
 int32_t ft_ui_test_notification_y(void);
 void ft_ui_test_notification_drag_begin(int32_t pointer_y);
@@ -200,6 +226,7 @@ bool ft_ui_test_quick_enabled(feathertalk_quick_control_t control);
 bool ft_ui_test_quick_connected(feathertalk_quick_control_t control);
 uint8_t ft_ui_test_quick_signal(void);
 bool ft_ui_test_status_radio_icons_present(void);
+bool ft_ui_test_language_surface(ft_language_t language);
 ft_icon_id_t ft_ui_test_wifi_signal_icon(bool connected, uint8_t signal_percent);
 uint8_t ft_ui_test_brightness(void);
 size_t ft_ui_test_notification_count(void);
@@ -213,17 +240,25 @@ uint32_t ft_ui_test_notification_render_count(void);
 lv_obj_t *ft_ui_test_get_alert_button(void);
 bool ft_ui_test_notification_is_visible(void);
 lv_obj_t *ft_pages_test_get_start_button(size_t app_index);
+bool ft_pages_test_icon_assignments_unique(void);
 lv_obj_t *ft_pages_test_get_apps_button(size_t app_index);
 lv_obj_t *ft_pages_test_get_accent_button(size_t color_index);
 lv_obj_t *ft_pages_test_get_settings_search_box(void);
 lv_obj_t *ft_pages_test_get_settings_keyboard_hide(void);
 bool ft_pages_test_settings_keyboard_visible(void);
 bool ft_pages_test_settings_keyboard_overlay_ok(void);
+bool ft_pages_test_system_info_complete(void);
+bool ft_pages_test_language_surface(ft_language_t language);
 lv_obj_t *ft_pages_test_get_settings_result(size_t index);
 size_t ft_pages_test_settings_count(void);
 size_t ft_pages_test_settings_visible_count(void);
 ft_page_id_t ft_pages_test_settings_page_id(size_t index);
 lv_obj_t *ft_pages_test_get_settings_brightness(void);
+lv_obj_t *ft_pages_test_get_time_format_button(size_t index);
+lv_obj_t *ft_pages_test_get_timezone_dropdown(void);
+lv_obj_t *ft_pages_test_get_language_button(size_t index);
+size_t ft_pages_test_timezone_count(void);
+int16_t ft_pages_test_timezone_offset(size_t index);
 lv_obj_t *ft_pages_test_get_media_button(void);
 const char *ft_pages_test_get_media_label(void);
 bool ft_pages_test_media_is_playing(void);
@@ -260,10 +295,12 @@ bool ft_pages_test_tile_handle_geometry(void);
 bool ft_pages_test_tile_move(size_t app_index, size_t target_index);
 bool ft_pages_test_tile_move_nearest(size_t app_index);
 bool ft_pages_test_tile_move_scrolled(size_t app_index);
+bool ft_pages_test_tile_move_edge_autoscroll(size_t app_index);
 bool ft_pages_test_tile_layout_settled(void);
 bool ft_pages_test_tile_resize(size_t app_index, uint8_t columns, uint8_t rows);
 bool ft_pages_test_tile_resize_collision(void);
 bool ft_pages_test_tile_resize_boundary(void);
+bool ft_pages_test_tile_resize_edge_autoscroll(size_t app_index);
 bool ft_pages_test_tile_resize_anchors(size_t app_index);
 size_t ft_pages_test_tile_order(size_t app_index);
 uint8_t ft_pages_test_tile_columns(size_t app_index);
@@ -292,6 +329,8 @@ void ft_ui_register_accent(lv_obj_t *obj, ft_accent_target_t target);
 size_t ft_ui_accent_object_count(void);
 void ft_ui_notification_toggle(void);
 bool ft_ui_notification_visible(void);
+void ft_ui_preferences_changed(void);
+void ft_ui_apply_language(void);
 
 void ft_ui_style_panel(lv_obj_t *obj);
 void ft_ui_style_page(lv_obj_t *obj);

@@ -20,6 +20,7 @@ typedef struct
 {
     lv_obj_t *button;
     lv_obj_t *icon;
+    lv_obj_t *name_label;
     lv_obj_t *state_label;
     bool available;
     bool enabled;
@@ -36,6 +37,20 @@ typedef struct
 
 typedef struct
 {
+    lv_obj_t *card;
+    uint32_t notification_id;
+    int32_t press_x;
+    int32_t press_y;
+    int32_t last_x;
+    int32_t velocity_x;
+    uint32_t last_ms;
+    bool tracking;
+    bool horizontal;
+    bool vertical;
+} ft_notification_swipe_t;
+
+typedef struct
+{
     lv_obj_t *obj;
     ft_accent_target_t target;
 } ft_accent_slot_t;
@@ -43,6 +58,7 @@ typedef struct
 static bool s_ui_initialized;
 static lv_obj_t *s_status_bar;
 static lv_obj_t *s_status_uptime;
+static lv_obj_t *s_status_metrics;
 static lv_obj_t *s_status_wifi;
 static lv_obj_t *s_status_bluetooth;
 static ft_icon_id_t s_status_wifi_icon_id = FT_ICON_WIFI_OFF;
@@ -57,6 +73,10 @@ static lv_obj_t *s_notification_panel;
 static lv_obj_t *s_notification_badge;
 static lv_obj_t *s_notification_summary;
 static lv_obj_t *s_notification_clear;
+static lv_obj_t *s_notification_panel_title;
+static lv_obj_t *s_notification_clear_label;
+static lv_obj_t *s_notification_brightness_name;
+static lv_obj_t *s_notification_list_title;
 static lv_obj_t *s_notification_list;
 static lv_obj_t *s_brightness_slider;
 static lv_obj_t *s_brightness_value;
@@ -81,8 +101,12 @@ static uint32_t s_notification_mask_applied;
 static uint32_t s_notification_mask_skipped;
 static uint32_t s_notification_render_count;
 static uint32_t s_notification_render_skipped;
+static ft_notification_swipe_t s_notification_swipe;
 static lv_obj_t *s_alert;
 static lv_obj_t *s_alert_button;
+#ifdef FEATHERTALK_UI_TEST_MODE
+static volatile bool s_notification_preview_requested;
+#endif
 
 static void notification_settle(bool visible);
 static void notification_render(void);
@@ -240,6 +264,7 @@ void ft_ui_style_panel(lv_obj_t *obj)
     lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN);
     lv_obj_set_style_radius(obj, 0, LV_PART_MAIN);
     lv_obj_set_style_text_color(obj, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(obj, ft_layout_font(14), LV_PART_MAIN);
 }
 
 void ft_ui_style_page(lv_obj_t *obj)
@@ -250,6 +275,7 @@ void ft_ui_style_page(lv_obj_t *obj)
     lv_obj_set_style_radius(obj, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(obj, 0, LV_PART_MAIN);
     lv_obj_set_style_text_color(obj, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(obj, ft_layout_font(14), LV_PART_MAIN);
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
 }
 
@@ -274,10 +300,14 @@ static const char *network_name(uint8_t state)
 {
     switch (state)
     {
-    case FEATHERTALK_NETWORK_CONNECTED: return "connected";
-    case FEATHERTALK_NETWORK_CONNECTING: return "connecting";
-    case FEATHERTALK_NETWORK_DISCONNECTED: return "disconnected";
-    default: return "unavailable";
+    case FEATHERTALK_NETWORK_CONNECTED:
+        return ft_preferences_text("已连接", "connected");
+    case FEATHERTALK_NETWORK_CONNECTING:
+        return ft_preferences_text("正在连接", "connecting");
+    case FEATHERTALK_NETWORK_DISCONNECTED:
+        return ft_preferences_text("未连接", "disconnected");
+    default:
+        return ft_preferences_text("不可用", "unavailable");
     }
 }
 
@@ -395,7 +425,8 @@ static void quick_view_apply(feathertalk_quick_control_t control)
             char value[12];
             lv_snprintf(value, sizeof(value), "%u%%", view->value);
             (void)label_set_text_changed(s_brightness_value,
-                                         view->available ? value : "Unavailable");
+                                         view->available ? value :
+                                         ft_preferences_text("不可用", "Unavailable"));
         }
     }
 
@@ -404,7 +435,8 @@ static void quick_view_apply(feathertalk_quick_control_t control)
         lv_obj_add_state(view->button, LV_STATE_DISABLED);
         lv_obj_set_style_bg_color(view->button, lv_color_hex(0x242424), LV_PART_MAIN);
         lv_obj_set_style_image_recolor(view->icon, lv_color_hex(0x777777), LV_PART_MAIN);
-        lv_label_set_text(view->state_label, "Unavailable");
+        lv_label_set_text(view->state_label,
+                          ft_preferences_text("不可用", "Unavailable"));
     }
     else
     {
@@ -426,27 +458,37 @@ static void quick_view_apply(feathertalk_quick_control_t control)
         else if (control == FEATHERTALK_QUICK_WIFI)
         {
             if (!view->enabled)
-                lv_label_set_text(view->state_label, "Off");
+                lv_label_set_text(view->state_label,
+                                  ft_preferences_text("已关闭", "Off"));
             else if (!view->connected)
-                lv_label_set_text(view->state_label, "Not connected");
+                lv_label_set_text(view->state_label,
+                                  ft_preferences_text("未连接", "Not connected"));
             else if (view->signal_percent == FEATHERTALK_SYSTEM_VALUE_UNKNOWN)
-                lv_label_set_text(view->state_label, "Connected");
+                lv_label_set_text(view->state_label,
+                                  ft_preferences_text("已连接", "Connected"));
             else
             {
-                lv_snprintf(state, sizeof(state), "Connected %u%%", view->signal_percent);
+                lv_snprintf(state, sizeof(state),
+                            ft_preferences_text("已连接 %u%%", "Connected %u%%"),
+                            view->signal_percent);
                 lv_label_set_text(view->state_label, state);
             }
         }
         else if (control == FEATHERTALK_QUICK_BLUETOOTH)
         {
             if (!view->enabled)
-                lv_label_set_text(view->state_label, "Off");
+                lv_label_set_text(view->state_label,
+                                  ft_preferences_text("已关闭", "Off"));
             else
                 lv_label_set_text(view->state_label,
-                                  view->connected ? "Connected" : "Not connected");
+                                  view->connected ?
+                                  ft_preferences_text("已连接", "Connected") :
+                                  ft_preferences_text("未连接", "Not connected"));
         }
         else
-            lv_label_set_text(view->state_label, view->enabled ? "On" : "Off");
+            lv_label_set_text(view->state_label,
+                              view->enabled ? ft_preferences_text("已开启", "On") :
+                                              ft_preferences_text("已关闭", "Off"));
     }
     view->rendered = true;
     view->rendered_available = view->available;
@@ -506,7 +548,8 @@ static void quick_button_cb(lv_event_t *event)
     {
         target = view->enabled ? 0U : 1U;
         if (feathertalk_ipc_set_quick_control((uint8_t)control, target) == RT_EOK)
-            lv_label_set_text(view->state_label, "Working...");
+            lv_label_set_text(view->state_label,
+                              ft_preferences_text("处理中…", "Working..."));
     }
 }
 
@@ -519,28 +562,61 @@ static void brightness_changed_cb(lv_event_t *event)
     if (ft_platform_set_brightness(value) == RT_EOK) quick_views_refresh();
 }
 
+static void status_metrics_refresh(const ft_ui_metrics_t *metrics)
+{
+    const ft_ui_layout_t *layout = ft_layout_get();
+    char text[64];
+    if (metrics == RT_NULL || s_status_metrics == RT_NULL) return;
+    if (layout->compact)
+        lv_snprintf(text, sizeof(text), "F%lu/%lu M%luK",
+                    (unsigned long)metrics->fps,
+                    (unsigned long)metrics->refresh_fps,
+                    (unsigned long)(metrics->heap_used / 1024U));
+    else
+        lv_snprintf(text, sizeof(text), "FPS %lu/%lu  MEM %lu/%luK",
+                    (unsigned long)metrics->fps,
+                    (unsigned long)metrics->refresh_fps,
+                    (unsigned long)(metrics->heap_used / 1024U),
+                    (unsigned long)(metrics->heap_total / 1024U));
+    (void)label_set_text_changed(s_status_metrics, text);
+}
+
 static void status_timer_cb(lv_timer_t *timer)
 {
     feathertalk_system_status_t status;
     ft_ui_metrics_t metrics;
     uint32_t seconds;
     uint32_t minutes;
+    bool time_valid;
     char bar[56];
+    char clock[20];
+    char timezone[16];
     char system_text[256];
     char metrics_text[256];
     char tile[64];
     const char *battery = "--";
-    const char *network = "unavailable";
+    const char *network = ft_preferences_text("不可用", "unavailable");
     char battery_value[8];
     char network_value[40];
 
-    if (timer != RT_NULL && (s_notification_dragging || s_notification_animating)) return;
     ft_metrics_get(&metrics);
+    status_metrics_refresh(&metrics);
+    if (timer != RT_NULL && (s_notification_dragging || s_notification_animating)) return;
     if (feathertalk_ipc_get_system_status(&status) == RT_EOK)
     {
-        seconds = ((status.flags & FEATHERTALK_SYSTEM_TIME_VALID) != 0U) ?
+        const ft_ui_preferences_t *preferences = ft_preferences_get();
+        int16_t timezone_minutes = preferences->timezone_offset_minutes;
+        char sign = timezone_minutes < 0 ? '-' : '+';
+        uint16_t timezone_abs = (uint16_t)(timezone_minutes < 0 ?
+                                           -timezone_minutes : timezone_minutes);
+        time_valid = (status.flags & FEATHERTALK_SYSTEM_TIME_VALID) != 0U;
+        seconds = time_valid ?
                   status.unix_time : status.m33_uptime_ms / 1000U;
         minutes = seconds / 60U;
+        ft_preferences_format_clock(seconds, time_valid, clock, sizeof(clock));
+        lv_snprintf(timezone, sizeof(timezone), "UTC%c%02u:%02u", sign,
+                    (unsigned)(timezone_abs / 60U),
+                    (unsigned)(timezone_abs % 60U));
         if ((status.flags & FEATHERTALK_SYSTEM_BATTERY_VALID) != 0U)
         {
             lv_snprintf(battery_value, sizeof(battery_value), "%u%%", status.battery_percent);
@@ -553,41 +629,62 @@ static void status_timer_cb(lv_timer_t *timer)
                 status.signal_percent != FEATHERTALK_SYSTEM_VALUE_UNKNOWN)
             {
                 lv_snprintf(network_value, sizeof(network_value),
-                            "connected, signal %u%%", status.signal_percent);
+                            ft_preferences_text("已连接，信号 %u%%",
+                                                "connected, signal %u%%"),
+                            status.signal_percent);
                 network = network_value;
             }
         }
-        lv_snprintf(bar, sizeof(bar), "%02lu:%02lu  %s",
-                    (unsigned long)((minutes / 60U) % 24U),
-                    (unsigned long)(minutes % 60U), battery);
-        lv_snprintf(system_text, sizeof(system_text),
+        if (time_valid)
+            lv_snprintf(bar, sizeof(bar), "%s  %s", clock, battery);
+        else
+            lv_snprintf(bar, sizeof(bar),
+                        ft_preferences_text("运行 %02lu:%02lu  %s",
+                                            "UP %02lu:%02lu  %s"),
+                        (unsigned long)(minutes / 60U),
+                        (unsigned long)(minutes % 60U), battery);
+        lv_snprintf(system_text, sizeof(system_text), ft_preferences_text(
+                    "M33 IPC：在线，序号 %lu，延迟 %lu ms\n"
+                    "RTC：%s，本地时间 %s，%s，%s\n电源/电池：%s\nWi-Fi：%s",
                     "M33 IPC: online, seq %lu, age %lums\n"
-                    "RTC: %s, time %02lu:%02lu\nPower/battery: %s\nWi-Fi: %s",
+                    "RTC: %s, local time %s, %s, %s\nPower/battery: %s\nWi-Fi: %s"),
                     (unsigned long)status.sequence,
                     (unsigned long)(rt_tick_get_millisecond() - status.received_ms),
-                    ((status.flags & FEATHERTALK_SYSTEM_RTC_PRESENT) != 0U) ? "present" : "unavailable",
-                    (unsigned long)((minutes / 60U) % 24U),
-                    (unsigned long)(minutes % 60U), battery, network);
-        lv_snprintf(tile, sizeof(tile), "M33 %s  %02lu:%02lu", network,
-                    (unsigned long)((minutes / 60U) % 24U),
-                    (unsigned long)(minutes % 60U));
+                    ((status.flags & FEATHERTALK_SYSTEM_RTC_PRESENT) != 0U) ?
+                        ft_preferences_text("存在", "present") :
+                        ft_preferences_text("不可用", "unavailable"),
+                    clock, timezone,
+                    preferences->use_24_hour ?
+                        ft_preferences_text("24 小时制", "24-hour") :
+                        ft_preferences_text("12 小时制", "12-hour"),
+                    battery, network);
+        lv_snprintf(tile, sizeof(tile), "M33 %s  %s", network, clock);
     }
     else
     {
         seconds = rt_tick_get_millisecond() / 1000U;
         minutes = seconds / 60U;
-        lv_snprintf(bar, sizeof(bar), "UP %02lu:%02lu  --",
+        lv_snprintf(bar, sizeof(bar),
+                    ft_preferences_text("运行 %02lu:%02lu  --",
+                                        "UP %02lu:%02lu  --"),
                     (unsigned long)(minutes / 60U), (unsigned long)(minutes % 60U));
-        lv_snprintf(system_text, sizeof(system_text),
-                     "M33 IPC: waiting\nRTC: unavailable\nPower/battery: unavailable\nWi-Fi: unavailable");
-        lv_snprintf(tile, sizeof(tile), "M33 waiting  UP %02lu:%02lu",
+        lv_snprintf(system_text, sizeof(system_text), ft_preferences_text(
+                     "M33 IPC：等待中\nRTC：不可用\n电源/电池：不可用\nWi-Fi：不可用",
+                     "M33 IPC: waiting\nRTC: unavailable\nPower/battery: unavailable\nWi-Fi: unavailable"));
+        lv_snprintf(tile, sizeof(tile),
+                    ft_preferences_text("M33 等待中  运行 %02lu:%02lu",
+                                        "M33 waiting  UP %02lu:%02lu"),
                     (unsigned long)(minutes / 60U), (unsigned long)(minutes % 60U));
     }
-    lv_snprintf(metrics_text, sizeof(metrics_text),
+    lv_snprintf(metrics_text, sizeof(metrics_text), ft_preferences_text(
+                "M55 UI：当前 %lu FPS，调度 %lu Hz\n"
+                "帧 %lu，刷新 %lu，%lu 像素/秒\n渲染 %lu ms，峰值 %lu ms\n"
+                "堆：%lu/%lu 字节，峰值 %lu\nUI 对象峰值：%lu\n"
+                "上次路由变化：对象 %ld，堆 %ld",
                 "M55 UI: present %lu FPS, scheduler %lu Hz\n"
                 "Frames %lu, flush %lu, %lu pixels/s\nRender %lu ms, peak %lu ms\n"
                 "Heap: %lu/%lu bytes, peak %lu\nUI objects peak: %lu\n"
-                "Last route delta: objects %ld, heap %ld",
+                "Last route delta: objects %ld, heap %ld"),
                 (unsigned long)metrics.fps, (unsigned long)metrics.refresh_fps,
                 (unsigned long)metrics.render_count, (unsigned long)metrics.flush_count,
                 (unsigned long)metrics.flushed_pixels_per_second,
@@ -600,6 +697,66 @@ static void status_timer_cb(lv_timer_t *timer)
     ft_pages_update_system_status(system_text, metrics_text);
     ft_pages_live_tile_update(tile);
     quick_views_refresh();
+#ifdef FEATHERTALK_UI_TEST_MODE
+    if (s_notification_preview_requested)
+    {
+        s_notification_preview_requested = false;
+        ft_notifications_clear();
+        (void)ft_notifications_push("FeatherTalk", "系统通知",
+                                    "Wi-Fi 与蓝牙服务状态测试。");
+        (void)ft_notifications_push("消息", "第二条通知",
+                                    "左右滑动删除，或点击清除。");
+        notification_render();
+        notification_settle(true);
+    }
+#endif
+}
+
+void ft_ui_apply_language(void)
+{
+    static const char *quick_names_zh[FEATHERTALK_QUICK_COUNT] =
+        {"Wi-Fi", "蓝牙", "亮度", "自动旋转"};
+    static const char *quick_names_en[FEATHERTALK_QUICK_COUNT] =
+        {"Wi-Fi", "Bluetooth", "Brightness", "Auto-rotate"};
+    size_t i;
+
+    for (i = 0U; i < FEATHERTALK_QUICK_COUNT; i++)
+    {
+        ft_quick_view_t *view = &s_quick_views[i];
+        if (view->name_label != RT_NULL && lv_obj_is_valid(view->name_label))
+            lv_label_set_text(view->name_label,
+                              ft_preferences_text(quick_names_zh[i], quick_names_en[i]));
+        view->rendered = false;
+    }
+    if (s_notification_panel_title != RT_NULL &&
+        lv_obj_is_valid(s_notification_panel_title))
+        lv_label_set_text(s_notification_panel_title,
+                          ft_preferences_text("快捷设置", "Quick settings"));
+    if (s_notification_clear_label != RT_NULL &&
+        lv_obj_is_valid(s_notification_clear_label))
+        lv_label_set_text(s_notification_clear_label,
+                          ft_preferences_text("清除", "Clear"));
+    if (s_notification_brightness_name != RT_NULL &&
+        lv_obj_is_valid(s_notification_brightness_name))
+        lv_label_set_text(s_notification_brightness_name,
+                          ft_preferences_text("亮度", "Brightness"));
+    if (s_notification_list_title != RT_NULL &&
+        lv_obj_is_valid(s_notification_list_title))
+        lv_label_set_text(s_notification_list_title,
+                          ft_preferences_text("通知（左右滑动可删除）",
+                                              "Notifications (swipe sideways to delete)"));
+    s_notification_render_revision = UINT32_MAX;
+    if (s_notification_list != RT_NULL && lv_obj_is_valid(s_notification_list))
+        notification_render();
+    if (s_quick_views[0].button != RT_NULL)
+        quick_views_refresh();
+}
+
+void ft_ui_preferences_changed(void)
+{
+    ft_ui_apply_language();
+    if (s_status_uptime != RT_NULL && lv_obj_is_valid(s_status_uptime))
+        status_timer_cb(RT_NULL);
 }
 
 static int32_t notification_closed_y(void)
@@ -884,16 +1041,128 @@ static void notification_remove_async(void *user_data)
     if (ft_notifications_remove(id)) notification_render();
 }
 
+static void notification_card_translate_anim_cb(void *object, int32_t value)
+{
+    lv_obj_t *card = (lv_obj_t *)object;
+    if (card != RT_NULL && lv_obj_is_valid(card))
+        lv_obj_set_style_translate_x(card, value, LV_PART_MAIN);
+}
+
+static void notification_card_restore(lv_obj_t *card)
+{
+    lv_anim_t animation;
+    int32_t offset;
+    if (card == RT_NULL || !lv_obj_is_valid(card)) return;
+    offset = lv_obj_get_style_translate_x(card, LV_PART_MAIN);
+    lv_anim_delete(card, notification_card_translate_anim_cb);
+    if (offset == 0) return;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, card);
+    lv_anim_set_exec_cb(&animation, notification_card_translate_anim_cb);
+    lv_anim_set_values(&animation, offset, 0);
+    lv_anim_set_duration(&animation, 160U);
+    lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
+    (void)lv_anim_start(&animation);
+}
+
+static void notification_card_swipe_finish(lv_obj_t *card, uint32_t id)
+{
+    const ft_ui_layout_t *layout = ft_layout_get();
+    int32_t offset;
+    int32_t width;
+    bool remove;
+    if (!s_notification_swipe.tracking || s_notification_swipe.card != card) return;
+    offset = card != RT_NULL && lv_obj_is_valid(card) ?
+             lv_obj_get_style_translate_x(card, LV_PART_MAIN) : 0;
+    width = card != RT_NULL && lv_obj_is_valid(card) ?
+            lv_obj_get_width(card) : layout->screen_width;
+    if ((rt_tick_get_millisecond() - s_notification_swipe.last_ms) > 120U)
+        s_notification_swipe.velocity_x = 0;
+    remove = s_notification_swipe.horizontal &&
+             (LV_ABS(offset) >= width / 4 ||
+              LV_ABS(s_notification_swipe.velocity_x) >= ft_layout_px(650));
+    s_notification_swipe.tracking = false;
+    s_notification_swipe.card = RT_NULL;
+    if (remove)
+    {
+        notification_card_translate_anim_cb(card,
+            offset < 0 ? -layout->screen_width : layout->screen_width);
+        (void)lv_async_call(notification_remove_async, (void *)(uintptr_t)id);
+    }
+    else
+        notification_card_restore(card);
+}
+
 static void notification_card_gesture_cb(lv_event_t *event)
 {
+    const ft_ui_layout_t *layout = ft_layout_get();
+    lv_event_code_t code = lv_event_get_code(event);
+    lv_obj_t *card = (lv_obj_t *)lv_event_get_current_target(event);
+    uint32_t id = (uint32_t)(uintptr_t)lv_event_get_user_data(event);
     lv_indev_t *indev = lv_indev_active();
-    lv_dir_t direction;
+    lv_point_t point;
+    uint32_t now;
+    int32_t dx;
+    int32_t dy;
+    int32_t threshold = ft_layout_px(8);
+
+    if (code == LV_EVENT_DELETE)
+    {
+        if (s_notification_swipe.card == card)
+        {
+            s_notification_swipe.tracking = false;
+            s_notification_swipe.card = RT_NULL;
+        }
+        return;
+    }
     if (indev == RT_NULL) return;
-    direction = lv_indev_get_gesture_dir(indev);
-    if (direction == LV_DIR_LEFT || direction == LV_DIR_RIGHT)
-        (void)lv_async_call(notification_remove_async, lv_event_get_user_data(event));
-    else if (direction == LV_DIR_TOP)
-        notification_settle(false);
+    if (code == LV_EVENT_GESTURE)
+    {
+        if (!s_notification_swipe.horizontal &&
+            lv_indev_get_gesture_dir(indev) == LV_DIR_TOP)
+            notification_settle(false);
+        return;
+    }
+    lv_indev_get_point(indev, &point);
+    now = rt_tick_get_millisecond();
+    if (code == LV_EVENT_PRESSED)
+    {
+        lv_anim_delete(card, notification_card_translate_anim_cb);
+        memset(&s_notification_swipe, 0, sizeof(s_notification_swipe));
+        s_notification_swipe.card = card;
+        s_notification_swipe.notification_id = id;
+        s_notification_swipe.press_x = point.x;
+        s_notification_swipe.press_y = point.y;
+        s_notification_swipe.last_x = point.x;
+        s_notification_swipe.last_ms = now;
+        s_notification_swipe.tracking = true;
+        return;
+    }
+    if (!s_notification_swipe.tracking || s_notification_swipe.card != card) return;
+    if (code == LV_EVENT_PRESSING)
+    {
+        dx = point.x - s_notification_swipe.press_x;
+        dy = point.y - s_notification_swipe.press_y;
+        if (!s_notification_swipe.horizontal && !s_notification_swipe.vertical &&
+            (LV_ABS(dx) >= threshold || LV_ABS(dy) >= threshold))
+        {
+            s_notification_swipe.horizontal = LV_ABS(dx) > LV_ABS(dy);
+            s_notification_swipe.vertical = !s_notification_swipe.horizontal;
+        }
+        if (!s_notification_swipe.horizontal) return;
+        if (now > s_notification_swipe.last_ms)
+            s_notification_swipe.velocity_x =
+                (point.x - s_notification_swipe.last_x) * 1000 /
+                (int32_t)(now - s_notification_swipe.last_ms);
+        s_notification_swipe.last_x = point.x;
+        s_notification_swipe.last_ms = now;
+        if (dx > layout->screen_width) dx = layout->screen_width;
+        if (dx < -layout->screen_width) dx = -layout->screen_width;
+        lv_obj_set_style_translate_x(card, dx, LV_PART_MAIN);
+        lv_event_stop_bubbling(event);
+    }
+    else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST)
+        notification_card_swipe_finish(card, id);
 }
 
 static void notification_child_gesture_cb(lv_event_t *event)
@@ -935,7 +1204,9 @@ static void notification_render(void)
     notification_badge_update();
     if (s_notification_summary != RT_NULL && lv_obj_is_valid(s_notification_summary))
     {
-        lv_snprintf(summary, sizeof(summary), "%lu unread / %lu total",
+        lv_snprintf(summary, sizeof(summary),
+                    ft_preferences_text("%lu 条未读 / 共 %lu 条",
+                                        "%lu unread / %lu total"),
                     (unsigned long)unread, (unsigned long)count);
         lv_label_set_text(s_notification_summary, summary);
     }
@@ -949,7 +1220,8 @@ static void notification_render(void)
     if (count == 0U)
     {
         lv_obj_t *empty = lv_label_create(s_notification_list);
-        lv_label_set_text(empty, "No notifications");
+        lv_label_set_text(empty, ft_preferences_text("暂无通知", "No notifications"));
+        lv_obj_set_style_text_font(empty, ft_layout_font(14), LV_PART_MAIN);
         lv_obj_set_style_text_color(empty, lv_color_hex(0xA0A0A0), LV_PART_MAIN);
         lv_obj_set_style_pad_top(empty, ft_layout_px(16), LV_PART_MAIN);
         return;
@@ -975,10 +1247,12 @@ static void notification_render(void)
         lv_obj_set_style_radius(card, ft_layout_px(4), LV_PART_MAIN);
         lv_obj_set_style_pad_all(card, ft_layout_px(10), LV_PART_MAIN);
         lv_obj_set_style_pad_row(card, ft_layout_px(3), LV_PART_MAIN);
+        lv_obj_set_style_text_font(card, ft_layout_font(14), LV_PART_MAIN);
         lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-        lv_obj_add_event_cb(card, notification_card_gesture_cb, LV_EVENT_GESTURE,
+        lv_obj_add_event_cb(card, notification_card_gesture_cb, LV_EVENT_ALL,
                             (void *)(uintptr_t)item.id);
-        lv_snprintf(meta_text, sizeof(meta_text), "%s  %lus",
+        lv_snprintf(meta_text, sizeof(meta_text),
+                    ft_preferences_text("%s  %lu 秒", "%s  %lus"),
                     item.source[0] != '\0' ? item.source : "FeatherTalk",
                     (unsigned long)(item.created_ms / 1000U));
         meta = lv_label_create(card);
@@ -987,10 +1261,12 @@ static void notification_render(void)
         lv_obj_set_style_text_color(meta, lv_color_hex(0xAAAAAA), LV_PART_MAIN);
         title = lv_label_create(card);
         lv_label_set_text(title, item.title);
+        lv_obj_set_style_text_font(title, ft_layout_font(16), LV_PART_MAIN);
         lv_obj_set_width(title, lv_pct(100));
         lv_label_set_long_mode(title, LV_LABEL_LONG_WRAP);
         body = lv_label_create(card);
         lv_label_set_text(body, item.body);
+        lv_obj_set_style_text_font(body, ft_layout_font(14), LV_PART_MAIN);
         lv_obj_set_width(body, lv_pct(100));
         lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
         lv_obj_set_style_text_color(body, lv_color_hex(0xD0D0D0), LV_PART_MAIN);
@@ -1085,7 +1361,6 @@ static lv_obj_t *create_quick_button(lv_obj_t *parent,
                                      const char *name)
 {
     ft_quick_view_t *view = &s_quick_views[control];
-    lv_obj_t *name_label;
     view->button = lv_button_create(parent);
     lv_obj_set_height(view->button, lv_pct(100));
     lv_obj_set_width(view->button, 0);
@@ -1101,14 +1376,14 @@ static lv_obj_t *create_quick_button(lv_obj_t *parent,
                         (void *)(uintptr_t)control);
     view->icon = ft_icon_create(view->button, icon_id,
                                 ft_layout_icon_size(32U), false);
-    name_label = lv_label_create(view->button);
-    lv_label_set_text(name_label, name);
-    lv_obj_set_width(name_label, lv_pct(100));
-    lv_obj_set_style_text_align(name_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_set_style_text_font(name_label, ft_layout_font(12), LV_PART_MAIN);
-    lv_label_set_long_mode(name_label, LV_LABEL_LONG_WRAP);
+    view->name_label = lv_label_create(view->button);
+    lv_label_set_text(view->name_label, name);
+    lv_obj_set_width(view->name_label, lv_pct(100));
+    lv_obj_set_style_text_align(view->name_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_font(view->name_label, ft_layout_font(12), LV_PART_MAIN);
+    lv_label_set_long_mode(view->name_label, LV_LABEL_LONG_WRAP);
     view->state_label = lv_label_create(view->button);
-    lv_label_set_text(view->state_label, "Unavailable");
+    lv_label_set_text(view->state_label, ft_preferences_text("不可用", "Unavailable"));
     lv_obj_set_width(view->state_label, lv_pct(100));
     lv_obj_set_style_text_align(view->state_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(view->state_label, ft_layout_font(12), LV_PART_MAIN);
@@ -1126,6 +1401,22 @@ lv_obj_t *ft_ui_test_get_nav_button(ft_nav_button_id_t button_id)
 }
 
 lv_obj_t *ft_ui_test_get_status_bar(void) { return s_status_bar; }
+bool ft_ui_test_status_monitor_visible(void)
+{
+    lv_area_t bar_area;
+    lv_area_t monitor_area;
+    const char *text;
+    if (s_status_bar == RT_NULL || !lv_obj_is_valid(s_status_bar) ||
+        s_status_metrics == RT_NULL || !lv_obj_is_valid(s_status_metrics) ||
+        lv_obj_has_flag(s_status_metrics, LV_OBJ_FLAG_HIDDEN)) return false;
+    lv_obj_update_layout(s_status_bar);
+    lv_obj_get_coords(s_status_bar, &bar_area);
+    lv_obj_get_coords(s_status_metrics, &monitor_area);
+    text = lv_label_get_text(s_status_metrics);
+    return text != RT_NULL && text[0] == 'F' && strstr(text, "M") != RT_NULL &&
+           monitor_area.x1 >= bar_area.x1 && monitor_area.x2 <= bar_area.x2 &&
+           monitor_area.y1 >= bar_area.y1 && monitor_area.y2 <= bar_area.y2;
+}
 lv_obj_t *ft_ui_test_get_notification_panel(void) { return s_notification_panel; }
 int32_t ft_ui_test_notification_y(void)
 {
@@ -1207,6 +1498,18 @@ void ft_ui_test_notification_reset(void)
     ft_notifications_clear();
     notification_render();
 }
+bool ft_ui_test_language_surface(ft_language_t language)
+{
+    const char *bluetooth = language == FT_LANGUAGE_ZH_CN ? "蓝牙" : "Bluetooth";
+    const char *panel = language == FT_LANGUAGE_ZH_CN ? "快捷设置" : "Quick settings";
+    return s_quick_views[FEATHERTALK_QUICK_BLUETOOTH].name_label != RT_NULL &&
+           lv_obj_is_valid(s_quick_views[FEATHERTALK_QUICK_BLUETOOTH].name_label) &&
+           strcmp(lv_label_get_text(s_quick_views[FEATHERTALK_QUICK_BLUETOOTH].name_label),
+                  bluetooth) == 0 &&
+           s_notification_panel_title != RT_NULL &&
+           lv_obj_is_valid(s_notification_panel_title) &&
+           strcmp(lv_label_get_text(s_notification_panel_title), panel) == 0;
+}
 uint32_t ft_ui_test_notification_drag_applied(void) { return s_notification_drag_applied; }
 uint32_t ft_ui_test_notification_drag_skipped(void) { return s_notification_drag_skipped; }
 uint32_t ft_ui_test_notification_mask_applied(void) { return s_notification_mask_applied; }
@@ -1247,10 +1550,10 @@ int feathertalk_ui_init(void)
     display = lv_display_get_default();
     if (display == RT_NULL) return -RT_ERROR;
 #if LV_USE_SYSMON && LV_USE_PERF_MONITOR
-    /* FeatherTalk reports FPS, refresh count and memory through its status
-     * command.  LVGL's default bottom-left debug label overlaps the product
-     * navigation bar and looks like a stale dirty block, so keep the metrics
-     * backend but hide that screen-system-layer label. */
+    /* Keep LVGL's backend active, but replace its bottom-left overlay with the
+     * product status-bar monitor below.  The default label crosses the hard
+     * content/navigation boundary on 480 x 800 and previously looked like a
+     * stale dirty block. */
     lv_sysmon_hide_performance(display);
 #endif
     result = ft_platform_touch_configure();
@@ -1258,6 +1561,17 @@ int feathertalk_ui_init(void)
                result == RT_EOK ? "ready" : "unavailable");
     ft_layout_init(display);
     layout = ft_layout_get();
+    /* LVGL creates each display with LV_FONT_DEFAULT (Montserrat 14).  Most
+     * FeatherTalk labels select an application font explicitly, but labels
+     * created by stock widgets or simple status rows otherwise keep that
+     * Latin-only theme font and render Chinese as placeholder boxes.  Make
+     * the 14 px Noto Sans SC build the display-wide normal font; its fallback
+     * remains Montserrat, so LVGL symbols and Latin text are preserved. */
+    (void)lv_theme_default_init(display,
+                                lv_palette_main(LV_PALETTE_BLUE),
+                                lv_palette_main(LV_PALETTE_RED),
+                                LV_THEME_DEFAULT_DARK,
+                                ft_layout_font(14));
     s_accent = lv_color_hex(FT_DEFAULT_ACCENT);
     s_page_background = lv_color_black();
     ft_preferences_init();
@@ -1289,6 +1603,15 @@ int feathertalk_ui_init(void)
     lv_label_set_text(brand, layout->compact ? "FT" : "FeatherTalk");
     lv_obj_set_style_text_font(brand, ft_layout_font(14), LV_PART_MAIN);
     ft_ui_register_accent(brand, FT_ACCENT_TEXT);
+
+    s_status_metrics = lv_label_create(status);
+    lv_label_set_text(s_status_metrics, layout->compact ? "F--/-- M--K" :
+                      "FPS --/--  MEM --/--K");
+    lv_obj_set_style_text_font(s_status_metrics,
+                               ft_layout_font(layout->compact ? 10 : 12),
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_status_metrics, lv_color_hex(0xB8B8B8),
+                                LV_PART_MAIN);
 
     status_info = lv_obj_create(status);
     lv_obj_remove_style_all(status_info);
@@ -1373,11 +1696,13 @@ int feathertalk_ui_init(void)
     lv_obj_add_event_cb(panel_header, notification_child_gesture_cb,
                         LV_EVENT_GESTURE, RT_NULL);
     panel_title = lv_label_create(panel_header);
-    lv_label_set_text(panel_title, "Quick settings");
+    s_notification_panel_title = panel_title;
+    lv_label_set_text(panel_title, ft_preferences_text("快捷设置", "Quick settings"));
     lv_obj_set_style_text_font(panel_title, ft_layout_font(16), LV_PART_MAIN);
     lv_obj_set_flex_grow(panel_title, 1);
     s_notification_summary = lv_label_create(panel_header);
-    lv_label_set_text(s_notification_summary, "0 unread / 0 total");
+    lv_label_set_text(s_notification_summary,
+                      ft_preferences_text("0 条未读 / 共 0 条", "0 unread / 0 total"));
     lv_obj_set_style_text_font(s_notification_summary, ft_layout_font(12), LV_PART_MAIN);
     lv_obj_set_style_text_color(s_notification_summary, lv_color_hex(0xB0B0B0), LV_PART_MAIN);
     s_notification_clear = lv_button_create(panel_header);
@@ -1387,7 +1712,9 @@ int feathertalk_ui_init(void)
     lv_obj_set_style_pad_hor(s_notification_clear, ft_layout_px(6), LV_PART_MAIN);
     lv_obj_add_event_cb(s_notification_clear, notification_clear_cb, LV_EVENT_CLICKED, RT_NULL);
     clear_label = lv_label_create(s_notification_clear);
-    lv_label_set_text(clear_label, "Clear");
+    s_notification_clear_label = clear_label;
+    lv_label_set_text(clear_label, ft_preferences_text("清除", "Clear"));
+    lv_obj_set_style_text_font(clear_label, ft_layout_font(12), LV_PART_MAIN);
     lv_obj_center(clear_label);
 
     quick_row = lv_obj_create(s_notification_panel);
@@ -1400,11 +1727,14 @@ int feathertalk_ui_init(void)
     lv_obj_add_event_cb(quick_row, notification_child_gesture_cb, LV_EVENT_GESTURE, RT_NULL);
     (void)create_quick_button(quick_row, FEATHERTALK_QUICK_WIFI, FT_ICON_WIFI, "Wi-Fi");
     (void)create_quick_button(quick_row, FEATHERTALK_QUICK_BLUETOOTH,
-                              FT_ICON_BLUETOOTH, "Bluetooth");
+                              FT_ICON_BLUETOOTH,
+                              ft_preferences_text("蓝牙", "Bluetooth"));
     (void)create_quick_button(quick_row, FEATHERTALK_QUICK_BRIGHTNESS,
-                              FT_ICON_BRIGHTNESS, "Brightness");
+                              FT_ICON_BRIGHTNESS,
+                              ft_preferences_text("亮度", "Brightness"));
     (void)create_quick_button(quick_row, FEATHERTALK_QUICK_ROTATION,
-                              FT_ICON_ROTATION, "Rotation");
+                              FT_ICON_ROTATION,
+                              ft_preferences_text("自动旋转", "Auto-rotate"));
 
     brightness_row = lv_obj_create(s_notification_panel);
     lv_obj_remove_style_all(brightness_row);
@@ -1417,7 +1747,9 @@ int feathertalk_ui_init(void)
                                      ft_layout_icon_size(24U), false);
     LV_UNUSED(brightness_icon);
     brightness_name = lv_label_create(brightness_row);
-    lv_label_set_text(brightness_name, "Brightness");
+    s_notification_brightness_name = brightness_name;
+    lv_label_set_text(brightness_name, ft_preferences_text("亮度", "Brightness"));
+    lv_obj_set_style_text_font(brightness_name, ft_layout_font(14), LV_PART_MAIN);
     s_brightness_slider = lv_slider_create(brightness_row);
     lv_obj_set_width(s_brightness_slider, 0);
     lv_obj_set_flex_grow(s_brightness_slider, 1);
@@ -1427,11 +1759,15 @@ int feathertalk_ui_init(void)
                         LV_EVENT_VALUE_CHANGED, RT_NULL);
     s_brightness_value = lv_label_create(brightness_row);
     lv_label_set_text(s_brightness_value, "100%");
+    lv_obj_set_style_text_font(s_brightness_value, ft_layout_font(14), LV_PART_MAIN);
     lv_obj_set_width(s_brightness_value, ft_layout_px(78));
     lv_obj_set_style_text_align(s_brightness_value, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
 
     notifications_title = lv_label_create(s_notification_panel);
-    lv_label_set_text(notifications_title, "Notifications  (swipe sideways to delete)");
+    s_notification_list_title = notifications_title;
+    lv_label_set_text(notifications_title,
+                      ft_preferences_text("通知（左右滑动可删除）",
+                                          "Notifications (swipe sideways to delete)"));
     lv_obj_set_style_text_font(notifications_title, ft_layout_font(14), LV_PART_MAIN);
     s_notification_list = lv_obj_create(s_notification_panel);
     ft_ui_style_panel(s_notification_list);
@@ -1444,6 +1780,7 @@ int feathertalk_ui_init(void)
     lv_obj_set_scroll_dir(s_notification_list, LV_DIR_VER);
     lv_obj_add_event_cb(s_notification_list, notification_child_gesture_cb,
                         LV_EVENT_GESTURE, RT_NULL);
+    ft_ui_apply_language();
     quick_views_refresh();
     notification_render();
 
@@ -1542,4 +1879,16 @@ static int feather_ui_status(void)
     return 0;
 }
 MSH_CMD_EXPORT(feather_ui_status, Show FeatherTalk M55 UI shell status);
+#ifdef FEATHERTALK_UI_TEST_MODE
+static int feather_ui_notification_preview(void)
+{
+    if (!s_ui_initialized) return -RT_ERROR;
+    /* The LVGL timer consumes this request in its own thread. */
+    s_notification_preview_requested = true;
+    rt_kprintf("FeatherTalk UI: notification preview requested\n");
+    return 0;
+}
+MSH_CMD_EXPORT(feather_ui_notification_preview,
+               Open the Simplified-Chinese notification preview);
+#endif
 #endif
