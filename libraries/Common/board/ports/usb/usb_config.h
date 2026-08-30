@@ -79,8 +79,25 @@
 #define CONFIG_USBDEV_MSC_MAX_LUN 1
 #endif
 
+/* FeatherTalk exports the fixed internal Flash FAT volume as LUN 0 and the
+ * removable SD card as LUN 1.  Keep the SDK-wide default at one LUN for all
+ * other projects. */
+#ifdef FEATHERTALK_USING_USB_MSC
+#undef CONFIG_USBDEV_MSC_MAX_LUN
+#define CONFIG_USBDEV_MSC_MAX_LUN 2
+#endif
+
 #ifndef CONFIG_USBDEV_MSC_MAX_BUFSIZE
 #define CONFIG_USBDEV_MSC_MAX_BUFSIZE 512
+#endif
+
+/* A one-sector MSC buffer turns every host transfer into an individual SDHC
+ * request. FeatherTalk has enough M55 RAM for a complete 128-sector SCSI
+ * transfer, which materially reduces RT-device and card command overhead. */
+#if defined(FEATHERTALK_USING_USB_MSC) && \
+    (CONFIG_USBDEV_MSC_MAX_BUFSIZE < 65536)
+#undef CONFIG_USBDEV_MSC_MAX_BUFSIZE
+#define CONFIG_USBDEV_MSC_MAX_BUFSIZE 65536
 #endif
 
 #ifndef CONFIG_USBDEV_MSC_MANUFACTURER_STRING
@@ -98,8 +115,10 @@
 /* move msc read & write from isr to while(1), you should call usbd_msc_polling in while(1) */
 // #define CONFIG_USBDEV_MSC_POLLING
 
-/* move msc read & write from isr to thread */
-// #define CONFIG_USBDEV_MSC_THREAD
+/* Move SD-card I/O out of the USB interrupt for FeatherTalk Device MSC. */
+#ifdef FEATHERTALK_USING_USB_MSC
+#define CONFIG_USBDEV_MSC_THREAD
+#endif
 
 #ifndef CONFIG_USBDEV_MSC_PRIO
 #define CONFIG_USBDEV_MSC_PRIO 4

@@ -4,6 +4,7 @@
 #include <string.h>
 #include <feathertalk/version.h>
 #include "feathertalk_storage.h"
+#include "feathertalk_usb.h"
 #include "ipc/feathertalk_ipc.h"
 #include "feathertalk_ui.h"
 #include "feathertalk_ui_internal.h"
@@ -11,12 +12,24 @@
 
 #define FT_ACCENT_COUNT      5U
 #define FT_OPACITY_COUNT     3U
-#define FT_SETTINGS_COUNT    7U
+#define FT_SETTINGS_COUNT    9U
 #define FT_TIME_FORMAT_COUNT 2U
 #define FT_TIMEZONE_COUNT    7U
 #define FT_SYSTEM_SUMMARY_COUNT 4U
 #define FT_SYSTEM_SECTION_COUNT 4U
 #define FT_FILES_PREVIEW_BYTES  384U
+#define FT_STORAGE_FORMAT_IDLE    0U
+#define FT_STORAGE_FORMAT_RUNNING 1U
+#define FT_STORAGE_FORMAT_SUCCESS 2U
+#define FT_STORAGE_FORMAT_FAILED  3U
+#define FT_STORAGE_DEVICE_COUNT    2U
+
+typedef enum
+{
+    FT_STORAGE_DEVICE_FLASH = 0,
+    FT_STORAGE_DEVICE_SD,
+    FT_STORAGE_DEVICE_INVALID
+} ft_storage_device_t;
 
 typedef enum
 {
@@ -57,6 +70,8 @@ static lv_obj_t *create_about_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_display_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_wifi_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent);
+static lv_obj_t *create_settings_storage_page(lv_obj_t *parent);
+static lv_obj_t *create_settings_usb_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_time_language_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_personalization_page(lv_obj_t *parent);
 static void files_page_enter(void);
@@ -65,6 +80,10 @@ static void files_page_leave(void);
 static void files_refresh_view(bool manual_refresh);
 static void files_format_bytes(uint64_t bytes, char *text, size_t text_size);
 static void settings_time_language_refresh(void);
+static void settings_usb_page_enter(void);
+static void settings_usb_page_leave(void);
+static void settings_storage_page_enter(void);
+static void settings_storage_page_leave(void);
 static void language_refresh_async_cb(void *user_data);
 static void media_tile_live_content(lv_obj_t *content_host,
                                     uint32_t frame, void *context);
@@ -118,6 +137,12 @@ static const ft_settings_entry_t s_settings[FT_SETTINGS_COUNT] =
     {FT_PAGE_SETTINGS_BLUETOOTH, FT_ICON_BLUETOOTH_SETTINGS, "Bluetooth",
      "Radio and connection state", "ble device radio wireless",
      "蓝牙", "蓝牙开关与连接状态", "蓝牙 设备 无线 连接"},
+    {FT_PAGE_SETTINGS_STORAGE, FT_ICON_SD_STORAGE, "Storage",
+     "Internal Flash and SD card capacity and actions", "storage flash sd card disk format capacity",
+     "存储", "内置 Flash 与 SD 卡容量和操作", "存储 Flash SD卡 磁盘 格式化 容量"},
+    {FT_PAGE_SETTINGS_USB, FT_ICON_USB, "USB",
+     "Device role, SD storage and USB Audio", "usb device storage sd card audio uac",
+     "USB", "设备角色、SD 卡存储与 USB 音频", "USB 设备 存储 SD卡 音频 UAC"},
     {FT_PAGE_SETTINGS_TIME_LANGUAGE, FT_ICON_TIME_LANGUAGE, "Time & language",
      "Clock format, time zone and display language", "time clock timezone language locale",
      "时间和语言", "时间格式、时区和界面语言", "时间 时钟 时区 语言"},
@@ -176,6 +201,10 @@ static const ft_page_definition_t s_pages[] =
     {FT_PAGE_SETTINGS_DISPLAY, "Display & brightness", create_settings_display_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_WIFI, "Wi-Fi", create_settings_wifi_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_BLUETOOTH, "Bluetooth", create_settings_bluetooth_page, RT_NULL, RT_NULL, RT_NULL},
+    {FT_PAGE_SETTINGS_STORAGE, "Storage", create_settings_storage_page,
+     settings_storage_page_enter, RT_NULL, settings_storage_page_leave},
+    {FT_PAGE_SETTINGS_USB, "USB", create_settings_usb_page,
+     settings_usb_page_enter, RT_NULL, settings_usb_page_leave},
     {FT_PAGE_SETTINGS_TIME_LANGUAGE, "Time & language", create_settings_time_language_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_PERSONALIZATION, "Personalization", create_settings_personalization_page, RT_NULL, RT_NULL, RT_NULL},
 };
@@ -204,6 +233,37 @@ static lv_obj_t *s_settings_brightness_slider;
 static lv_obj_t *s_settings_brightness_value;
 static lv_obj_t *s_settings_radio_status;
 static lv_obj_t *s_settings_radio_button;
+static lv_obj_t *s_usb_role_buttons[2];
+static lv_obj_t *s_usb_function_buttons[2];
+static lv_obj_t *s_usb_stop_button;
+static lv_obj_t *s_usb_status_label;
+static lv_timer_t *s_usb_monitor_timer;
+static lv_obj_t *s_storage_device_buttons[FT_STORAGE_DEVICE_COUNT];
+static lv_obj_t *s_storage_device_icons[FT_STORAGE_DEVICE_COUNT];
+static lv_obj_t *s_storage_device_capacity[FT_STORAGE_DEVICE_COUNT];
+static lv_obj_t *s_storage_device_state[FT_STORAGE_DEVICE_COUNT];
+static lv_obj_t *s_storage_detail_icon;
+static lv_obj_t *s_storage_detail_title;
+static lv_obj_t *s_storage_detail_state;
+static lv_obj_t *s_storage_capacity_caption;
+static lv_obj_t *s_storage_capacity_total;
+static lv_obj_t *s_storage_capacity_track;
+static lv_obj_t *s_storage_capacity_fill;
+static lv_obj_t *s_storage_used_label;
+static lv_obj_t *s_storage_free_label;
+static lv_obj_t *s_storage_volume_label;
+static lv_obj_t *s_storage_browse_button;
+static lv_obj_t *s_storage_format_button;
+static lv_obj_t *s_storage_confirm_box;
+static lv_obj_t *s_storage_confirm_cancel;
+static lv_obj_t *s_storage_confirm_continue;
+static lv_timer_t *s_storage_monitor_timer;
+static volatile uint8_t s_storage_format_state;
+static volatile int s_storage_format_result;
+static uint8_t s_storage_confirm_stage;
+static bool s_storage_result_notified;
+static ft_storage_device_t s_storage_selected_device = FT_STORAGE_DEVICE_FLASH;
+static volatile ft_storage_device_t s_storage_format_target = FT_STORAGE_DEVICE_INVALID;
 static lv_obj_t *s_time_format_buttons[FT_TIME_FORMAT_COUNT];
 static lv_obj_t *s_timezone_dropdown;
 static lv_obj_t *s_language_buttons[FT_LANGUAGE_COUNT];
@@ -232,7 +292,10 @@ static lv_obj_t *s_files_up_button;
 static lv_obj_t *s_files_list;
 static lv_timer_t *s_files_monitor_timer;
 static char s_files_current_path[FT_STORAGE_PATH_MAX];
+static ft_storage_device_t s_files_requested_device = FT_STORAGE_DEVICE_INVALID;
 static bool s_files_last_mounted;
+static bool s_files_last_flash_mounted;
+static bool s_files_last_sd_mounted;
 static size_t s_files_directory_count;
 static size_t s_files_file_count;
 static uint32_t s_files_refresh_count;
@@ -942,6 +1005,7 @@ static void refresh_system_hardware(void)
 {
     ft_platform_system_info_t info;
     ft_storage_volume_info_t sd_volume;
+    ft_usb_status_t usb_status;
     char text[384];
     char note[128];
     char sd_total[24];
@@ -951,6 +1015,7 @@ static void refresh_system_hardware(void)
     uint32_t hyperram_percent;
 
     ft_platform_get_system_info(&info);
+    ft_usb_get_status(&usb_status);
     xip_percent = info.firmware_capacity_bytes != 0U ?
                   (uint32_t)(((uint64_t)info.firmware_used_bytes * 100U) /
                              info.firmware_capacity_bytes) : 0U;
@@ -1025,20 +1090,33 @@ static void refresh_system_hardware(void)
         files_format_bytes(sd_volume.free_bytes, sd_free, sizeof(sd_free));
         lv_snprintf(text, sizeof(text),
                     ft_preferences_text(
-                    "S25FS128S QSPI NOR，物理容量 %lu MiB；2.25 MiB 未分配\n"
+                    "S25FS128S QSPI NOR，物理容量 %lu MiB；末尾 2 MiB 为 /flash FAT 用户盘\n"
                     "SDHC1 4-bit：%s，已挂载 /sdcard，可用 %s",
-                    "S25FS128S QSPI NOR, %lu MiB physical; 2.25 MiB unassigned\n"
+                    "S25FS128S QSPI NOR, %lu MiB physical; final 2 MiB is the /flash FAT user volume\n"
                     "SDHC1 4-bit: %s mounted at /sdcard, %s free"),
                     (unsigned long)(info.external_flash_bytes / (1024U * 1024U)),
                     sd_total, sd_free);
+    }
+    else if (usb_status.active && usb_status.function == FT_USB_FUNCTION_STORAGE)
+    {
+        uint64_t usb_sd_bytes = (uint64_t)usb_status.block_size *
+                                usb_status.block_count;
+        lv_snprintf(text, sizeof(text),
+                    ft_preferences_text(
+                    "S25FS128S QSPI NOR，物理容量 %lu MiB；末尾 2 MiB 作为 USB LUN 0\n"
+                    "SDHC1 4-bit：%lu MiB，正由 USB Device MSC 独占",
+                    "S25FS128S QSPI NOR, %lu MiB physical; final 2 MiB exported as USB LUN 0\n"
+                    "SDHC1 4-bit: %lu MiB, exclusively exported by USB Device MSC"),
+                    (unsigned long)(info.external_flash_bytes / (1024U * 1024U)),
+                    (unsigned long)(usb_sd_bytes / (1024U * 1024U)));
     }
     else
     {
         lv_snprintf(text, sizeof(text),
                     ft_preferences_text(
-                    "S25FS128S QSPI NOR，物理容量 %lu MiB；2.25 MiB 未分配\n"
+                    "S25FS128S QSPI NOR，物理容量 %lu MiB；末尾 2 MiB 为 /flash FAT 用户盘\n"
                     "SDHC1 4-bit：驱动就绪，等待 SD 卡",
-                    "S25FS128S QSPI NOR, %lu MiB physical; 2.25 MiB unassigned\n"
+                    "S25FS128S QSPI NOR, %lu MiB physical; final 2 MiB is the /flash FAT user volume\n"
                     "SDHC1 4-bit: driver ready, waiting for a card"),
                     (unsigned long)(info.external_flash_bytes / (1024U * 1024U)));
     }
@@ -1125,8 +1203,8 @@ static void refresh_system_hardware(void)
     system_label_set_text(&s_system_fields[FT_SYSTEM_FIELD_DEVICES], text);
     system_label_set_text(&s_system_fields[FT_SYSTEM_FIELD_UNAVAILABLE],
                           ft_preferences_text(
-                          "Wi-Fi/蓝牙、音频、USB、CAN-FD、I3C、PDM 和 TDM 驱动",
-                          "Wi-Fi/Bluetooth, audio, USB, CAN-FD, I3C, PDM and TDM drivers"));
+                          "Wi-Fi/蓝牙、USB Audio、USB Host、CAN-FD、I3C、PDM 和 TDM 驱动",
+                          "Wi-Fi/Bluetooth, USB Audio, USB Host, CAN-FD, I3C, PDM and TDM drivers"));
 }
 
 static lv_obj_t *create_system_page(lv_obj_t *parent)
@@ -1609,6 +1687,954 @@ static void settings_choice_refresh(lv_obj_t *button, bool selected)
                             LV_PART_MAIN);
     lv_obj_set_style_border_width(button, selected ? 2 : 0, LV_PART_MAIN);
     lv_obj_set_style_border_color(button, lv_color_white(), LV_PART_MAIN);
+}
+
+static const char *settings_storage_device_title(ft_storage_device_t device)
+{
+    return device == FT_STORAGE_DEVICE_SD ?
+           ft_preferences_text("SD 卡", "SD card") :
+           ft_preferences_text("内置 Flash", "Internal Flash");
+}
+
+static const char *settings_storage_device_mount(ft_storage_device_t device)
+{
+    return device == FT_STORAGE_DEVICE_SD ?
+           FT_STORAGE_SD_MOUNT_PATH : FT_STORAGE_FLASH_MOUNT_PATH;
+}
+
+static ft_icon_id_t settings_storage_device_icon(ft_storage_device_t device)
+{
+    return device == FT_STORAGE_DEVICE_SD ?
+           FT_ICON_SD_DEVICE : FT_ICON_FLASH_DEVICE;
+}
+
+static int settings_storage_get_info(ft_storage_device_t device,
+                                     ft_storage_device_info_t *info)
+{
+    if (device == FT_STORAGE_DEVICE_FLASH)
+        return ft_storage_get_flash_info(info);
+    if (device == FT_STORAGE_DEVICE_SD)
+        return ft_storage_get_device_info(info);
+    if (info != RT_NULL) rt_memset(info, 0, sizeof(*info));
+    return -RT_EINVAL;
+}
+
+static void settings_storage_set_device_style(size_t index, bool selected)
+{
+    lv_obj_t *button;
+    lv_color_t highlight = ft_ui_accent_color();
+
+    if (index >= FT_STORAGE_DEVICE_COUNT) return;
+    button = s_storage_device_buttons[index];
+    if (button == RT_NULL || !lv_obj_is_valid(button)) return;
+    lv_obj_set_style_bg_color(button,
+                              selected ? lv_color_hex(0x242424) :
+                                         lv_color_hex(0x181818),
+                              LV_PART_MAIN);
+    lv_obj_set_style_border_width(button, selected ? 2 : 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(button,
+                                  selected ? highlight :
+                                             lv_color_hex(0x444444),
+                                  LV_PART_MAIN);
+    if (s_storage_device_icons[index] != RT_NULL &&
+        lv_obj_is_valid(s_storage_device_icons[index]))
+        lv_obj_set_style_image_recolor(s_storage_device_icons[index],
+                                       selected ? highlight : lv_color_white(),
+                                       LV_PART_MAIN);
+    if (s_storage_device_state[index] != RT_NULL &&
+        lv_obj_is_valid(s_storage_device_state[index]))
+        lv_obj_set_style_text_color(s_storage_device_state[index],
+                                    selected ? highlight :
+                                               lv_color_hex(0xA0A0A0),
+                                    LV_PART_MAIN);
+}
+
+static void settings_storage_close_confirmation(void)
+{
+    s_storage_confirm_stage = 0U;
+    if (s_storage_confirm_box != RT_NULL &&
+        lv_obj_is_valid(s_storage_confirm_box))
+        lv_msgbox_close(s_storage_confirm_box);
+    s_storage_confirm_box = RT_NULL;
+    s_storage_confirm_cancel = RT_NULL;
+    s_storage_confirm_continue = RT_NULL;
+}
+
+static void settings_storage_cancel_clicked_cb(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    settings_storage_close_confirmation();
+    s_storage_format_target = FT_STORAGE_DEVICE_INVALID;
+}
+
+static void settings_storage_format_worker(void *parameter)
+{
+    int result;
+    LV_UNUSED(parameter);
+    result = s_storage_format_target == FT_STORAGE_DEVICE_FLASH ?
+             ft_storage_format_flash() : ft_storage_format_sd();
+    s_storage_format_result = result;
+    s_storage_format_state = result == RT_EOK ?
+                             FT_STORAGE_FORMAT_SUCCESS :
+                             FT_STORAGE_FORMAT_FAILED;
+}
+
+static void settings_storage_refresh(void);
+
+static void settings_storage_start_format(void)
+{
+    ft_storage_device_info_t info;
+    rt_thread_t thread;
+    ft_storage_device_t target = s_storage_format_target;
+
+    if (s_storage_format_state == FT_STORAGE_FORMAT_RUNNING) return;
+    if (target >= FT_STORAGE_DEVICE_INVALID)
+        target = s_storage_selected_device;
+    if (settings_storage_get_info(target, &info) != RT_EOK ||
+        !info.can_format)
+    {
+        feathertalk_ui_alert(
+            ft_preferences_text("无法格式化", "Unable to format"),
+            target == FT_STORAGE_DEVICE_SD ?
+            ft_preferences_text(
+                "SD 卡当前不可用或正由 USB 存储占用。请先停止 USB 存储并关闭正在访问 SD 卡的文件。",
+                "The SD card is unavailable or owned by USB storage. Stop USB storage and close files that are using the card.") :
+            ft_preferences_text(
+                "内置 Flash 当前不可用或正由 USB 存储占用。请先停止 USB 存储并关闭正在访问它的文件。",
+                "Internal Flash is unavailable or owned by USB storage. Stop USB storage and close files that are using it."));
+        s_storage_format_target = FT_STORAGE_DEVICE_INVALID;
+        return;
+    }
+
+    s_storage_format_target = target;
+    s_storage_result_notified = false;
+    s_storage_format_result = RT_EOK;
+    s_storage_format_state = FT_STORAGE_FORMAT_RUNNING;
+    thread = rt_thread_create("stg_fmt", settings_storage_format_worker,
+                              RT_NULL, 4096,
+                              RT_THREAD_PRIORITY_MAX - 5, 10);
+    if (thread == RT_NULL)
+    {
+        s_storage_format_result = -RT_ENOMEM;
+        s_storage_format_state = FT_STORAGE_FORMAT_FAILED;
+    }
+    else
+    {
+        rt_thread_startup(thread);
+    }
+    settings_storage_refresh();
+}
+
+static void settings_storage_final_confirm_clicked_cb(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    settings_storage_close_confirmation();
+    settings_storage_start_format();
+}
+
+static void settings_storage_show_confirmation(uint8_t stage);
+
+static void settings_storage_continue_clicked_cb(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    settings_storage_show_confirmation(2U);
+}
+
+static void settings_storage_show_confirmation(uint8_t stage)
+{
+    lv_obj_t *title;
+    lv_obj_t *text;
+    bool flash = s_storage_format_target == FT_STORAGE_DEVICE_FLASH;
+
+    settings_storage_close_confirmation();
+    s_storage_confirm_stage = stage;
+    track_object(&s_storage_confirm_box, lv_msgbox_create(RT_NULL));
+    lv_obj_set_width(s_storage_confirm_box, lv_pct(88));
+    title = lv_msgbox_add_title(
+        s_storage_confirm_box,
+        stage == 1U ?
+        (flash ? ft_preferences_text("格式化内置 Flash？", "Format Internal Flash?") :
+                 ft_preferences_text("格式化 SD 卡？", "Format SD card?")) :
+        ft_preferences_text("最后确认", "Final confirmation"));
+    text = lv_msgbox_add_text(
+        s_storage_confirm_box,
+        stage == 1U ?
+        (flash ?
+         ft_preferences_text(
+             "这会删除内置 Flash 用户盘中的全部文件，不会影响固件或 SD 卡。",
+             "This deletes every file on the Internal Flash user volume. Firmware and the SD card are not affected.") :
+         ft_preferences_text(
+             "这会卸载 SD 卡，并删除整张卡上的全部分区、文件和文件夹。电脑端创建的分区也会被删除。",
+             "This unmounts the SD card and deletes every partition, file and folder on the entire card, including partitions created by a computer.")) :
+        (flash ?
+         ft_preferences_text(
+             "此操作不可撤销。确认后将内置 Flash 用户盘重建为 FAT 卷。不要断电。",
+             "This cannot be undone. Internal Flash will be rebuilt as a FAT volume. Do not remove power.") :
+         ft_preferences_text(
+             "此操作不可撤销。确认后将整张 SD 卡重建为一个 FAT 卷；当前容量通常会使用 FAT32。不要断电或拔卡。",
+             "This cannot be undone. The entire SD card will be rebuilt as one FAT volume; this card size normally uses FAT32. Do not remove power or the card.")));
+    lv_obj_set_style_text_font(title, ft_layout_font(16), LV_PART_MAIN);
+    lv_obj_set_style_text_font(text, ft_layout_font(14), LV_PART_MAIN);
+    track_object(&s_storage_confirm_cancel,
+                 lv_msgbox_add_footer_button(
+                     s_storage_confirm_box,
+                     ft_preferences_text("取消", "Cancel")));
+    track_object(&s_storage_confirm_continue,
+                 lv_msgbox_add_footer_button(
+                     s_storage_confirm_box,
+                     stage == 1U ? ft_preferences_text("继续", "Continue") :
+                                   ft_preferences_text("擦除并格式化", "Erase and format")));
+    lv_obj_add_event_cb(s_storage_confirm_cancel,
+                        settings_storage_cancel_clicked_cb,
+                        LV_EVENT_CLICKED, RT_NULL);
+    lv_obj_add_event_cb(s_storage_confirm_continue,
+                        stage == 1U ? settings_storage_continue_clicked_cb :
+                                      settings_storage_final_confirm_clicked_cb,
+                        LV_EVENT_CLICKED, RT_NULL);
+    if (stage == 2U)
+    {
+        lv_obj_set_style_bg_color(s_storage_confirm_continue,
+                                  lv_color_hex(0xE81123), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(s_storage_confirm_continue,
+                                LV_OPA_COVER, LV_PART_MAIN);
+    }
+}
+
+static void settings_storage_format_clicked_cb(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    s_storage_format_target = s_storage_selected_device;
+    settings_storage_show_confirmation(1U);
+}
+
+static void settings_storage_device_clicked_cb(lv_event_t *event)
+{
+    ft_storage_device_t device =
+        (ft_storage_device_t)(uintptr_t)lv_event_get_user_data(event);
+    if (device >= FT_STORAGE_DEVICE_INVALID ||
+        s_storage_format_state == FT_STORAGE_FORMAT_RUNNING)
+        return;
+    s_storage_selected_device = device;
+    s_storage_format_target = FT_STORAGE_DEVICE_INVALID;
+    settings_storage_refresh();
+}
+
+static void settings_storage_browse_clicked_cb(lv_event_t *event)
+{
+    ft_storage_device_info_t info;
+    LV_UNUSED(event);
+    if (settings_storage_get_info(s_storage_selected_device, &info) != RT_EOK ||
+        !info.mounted || info.usb_exported)
+    {
+        feathertalk_ui_alert(
+            ft_preferences_text("无法浏览", "Unable to browse"),
+            ft_preferences_text(
+                "所选设备当前未挂载，或正在由电脑通过 USB 使用。",
+                "The selected device is not mounted or is currently owned by the computer over USB."));
+        return;
+    }
+    s_files_requested_device = s_storage_selected_device;
+    if (ft_router_push(FT_PAGE_FILES) != RT_EOK)
+        s_files_requested_device = FT_STORAGE_DEVICE_INVALID;
+}
+
+static void settings_storage_refresh(void)
+{
+    ft_storage_device_info_t info[FT_STORAGE_DEVICE_COUNT];
+    int result[FT_STORAGE_DEVICE_COUNT];
+    ft_storage_device_info_t *selected;
+    int selected_result;
+    char physical_total[24];
+    char volume_total[24];
+    char used_text[24];
+    char free_text[24];
+    char volume_state[160];
+    const char *state;
+    const char *filesystem;
+    const char *scheme;
+    uint64_t capacity_total;
+    uint64_t used_bytes;
+    uint64_t free_bytes;
+    uint32_t used_percent = 0U;
+    bool usage_valid;
+    bool formatting = s_storage_format_state == FT_STORAGE_FORMAT_RUNNING;
+    size_t index;
+
+    result[FT_STORAGE_DEVICE_FLASH] =
+        ft_storage_get_flash_info(&info[FT_STORAGE_DEVICE_FLASH]);
+    result[FT_STORAGE_DEVICE_SD] =
+        ft_storage_get_device_info(&info[FT_STORAGE_DEVICE_SD]);
+
+    for (index = 0U; index < FT_STORAGE_DEVICE_COUNT; index++)
+    {
+        bool valid = result[index] == RT_EOK && info[index].present;
+        if (valid)
+            files_format_bytes(info[index].total_bytes, physical_total,
+                               sizeof(physical_total));
+        else
+            lv_snprintf(physical_total, sizeof(physical_total), "--");
+        state = !valid ?
+                (index == FT_STORAGE_DEVICE_SD ?
+                 ft_preferences_text("未插卡", "Not inserted") :
+                 ft_preferences_text("不可用", "Unavailable")) :
+                info[index].usb_exported ?
+                 ft_preferences_text("USB 使用中", "In use by USB") :
+                info[index].busy ?
+                 ft_preferences_text("处理中", "Working") :
+                info[index].mounted ?
+                 ft_preferences_text("已挂载", "Mounted") :
+                 ft_preferences_text("未挂载", "Not mounted");
+        if (s_storage_device_capacity[index] != RT_NULL &&
+            lv_obj_is_valid(s_storage_device_capacity[index]))
+            lv_label_set_text(s_storage_device_capacity[index], physical_total);
+        if (s_storage_device_state[index] != RT_NULL &&
+            lv_obj_is_valid(s_storage_device_state[index]))
+            lv_label_set_text(s_storage_device_state[index], state);
+        settings_storage_set_device_style(
+            index, index == (size_t)s_storage_selected_device);
+        if (s_storage_device_buttons[index] != RT_NULL &&
+            lv_obj_is_valid(s_storage_device_buttons[index]))
+        {
+            if (formatting)
+                lv_obj_add_state(s_storage_device_buttons[index],
+                                 LV_STATE_DISABLED);
+            else
+                lv_obj_remove_state(s_storage_device_buttons[index],
+                                    LV_STATE_DISABLED);
+        }
+    }
+
+    selected = &info[s_storage_selected_device];
+    selected_result = result[s_storage_selected_device];
+    if (s_storage_detail_icon != RT_NULL &&
+        lv_obj_is_valid(s_storage_detail_icon))
+        ft_icon_set(s_storage_detail_icon,
+                    settings_storage_device_icon(s_storage_selected_device),
+                    ft_layout_icon_size(32U));
+    if (s_storage_detail_title != RT_NULL &&
+        lv_obj_is_valid(s_storage_detail_title))
+        lv_label_set_text(s_storage_detail_title,
+                          settings_storage_device_title(
+                              s_storage_selected_device));
+
+    if (selected_result != RT_EOK || !selected->present)
+        state = s_storage_selected_device == FT_STORAGE_DEVICE_SD ?
+                ft_preferences_text("未插卡", "Not inserted") :
+                ft_preferences_text("不可用", "Unavailable");
+    else if (selected->usb_exported)
+        state = ft_preferences_text("电脑正在使用", "Used by computer");
+    else if (selected->busy || formatting)
+        state = formatting ?
+                ft_preferences_text("正在格式化", "Formatting") :
+                ft_preferences_text("处理中", "Working");
+    else
+        state = selected->mounted ?
+                ft_preferences_text("已挂载", "Mounted") :
+                ft_preferences_text("未挂载", "Not mounted");
+    if (s_storage_detail_state != RT_NULL &&
+        lv_obj_is_valid(s_storage_detail_state))
+        lv_label_set_text(s_storage_detail_state, state);
+
+    usage_valid = selected_result == RT_EOK && selected->present &&
+                  selected->mounted && selected->volume_total_bytes > 0U &&
+                  selected->volume_free_bytes <= selected->volume_total_bytes;
+    capacity_total = usage_valid ? selected->volume_total_bytes :
+                                   selected->total_bytes;
+    used_bytes = usage_valid ? capacity_total - selected->volume_free_bytes : 0U;
+    free_bytes = usage_valid ? selected->volume_free_bytes : 0U;
+    if (usage_valid && capacity_total > 0U)
+    {
+        used_percent = used_bytes >= capacity_total ? 100U :
+                       (uint32_t)((used_bytes * 100U) / capacity_total);
+        if (used_bytes > 0U && used_percent == 0U) used_percent = 1U;
+    }
+    files_format_bytes(capacity_total, volume_total, sizeof(volume_total));
+    if (s_storage_capacity_caption != RT_NULL &&
+        lv_obj_is_valid(s_storage_capacity_caption))
+        lv_label_set_text(s_storage_capacity_caption,
+                          usage_valid ?
+                          ft_preferences_text("当前卷", "Current volume") :
+                          ft_preferences_text("设备容量", "Device capacity"));
+    if (s_storage_capacity_total != RT_NULL &&
+        lv_obj_is_valid(s_storage_capacity_total))
+        lv_label_set_text(s_storage_capacity_total,
+                          capacity_total > 0U ? volume_total : "--");
+    if (s_storage_capacity_fill != RT_NULL &&
+        lv_obj_is_valid(s_storage_capacity_fill))
+        lv_obj_set_width(s_storage_capacity_fill, lv_pct((int32_t)used_percent));
+    if (s_storage_capacity_track != RT_NULL &&
+        lv_obj_is_valid(s_storage_capacity_track))
+        lv_obj_set_style_opa(s_storage_capacity_track,
+                             usage_valid ? LV_OPA_COVER : LV_OPA_50,
+                             LV_PART_MAIN);
+    if (usage_valid)
+    {
+        files_format_bytes(used_bytes, used_text, sizeof(used_text));
+        files_format_bytes(free_bytes, free_text, sizeof(free_text));
+    }
+    else
+    {
+        lv_snprintf(used_text, sizeof(used_text), "--");
+        lv_snprintf(free_text, sizeof(free_text), "--");
+    }
+    if (s_storage_used_label != RT_NULL &&
+        lv_obj_is_valid(s_storage_used_label))
+    {
+        lv_snprintf(physical_total, sizeof(physical_total),
+                    ft_preferences_text("已用 %s", "Used %s"), used_text);
+        lv_label_set_text(s_storage_used_label, physical_total);
+    }
+    if (s_storage_free_label != RT_NULL &&
+        lv_obj_is_valid(s_storage_free_label))
+    {
+        lv_snprintf(physical_total, sizeof(physical_total),
+                    ft_preferences_text("可用 %s", "Free %s"), free_text);
+        lv_label_set_text(s_storage_free_label, physical_total);
+    }
+
+    filesystem = selected->filesystem[0] != '\0' ?
+                 (strcmp(selected->filesystem, "elm") == 0 ?
+                  "FAT" : selected->filesystem) : "--";
+    scheme = selected->partition_scheme == FT_STORAGE_PARTITION_GPT ? "GPT" :
+             selected->partition_scheme == FT_STORAGE_PARTITION_MBR ? "MBR" :
+             "--";
+    if (selected_result != RT_EOK || !selected->present)
+        lv_snprintf(volume_state, sizeof(volume_state), "%s",
+                    s_storage_selected_device == FT_STORAGE_DEVICE_SD ?
+                    ft_preferences_text("等待插入 SD 卡", "Waiting for SD card") :
+                    ft_preferences_text("设备不可用", "Device unavailable"));
+    else if (selected->usb_exported)
+        lv_snprintf(volume_state, sizeof(volume_state),
+                    ft_preferences_text("USB LUN %u · 电脑占用",
+                                        "USB LUN %u · used by computer"),
+                    s_storage_selected_device == FT_STORAGE_DEVICE_FLASH ? 0U : 1U);
+    else if (s_storage_selected_device == FT_STORAGE_DEVICE_SD)
+        lv_snprintf(volume_state, sizeof(volume_state),
+                    ft_preferences_text("%s · %s · %s · %u 个分区",
+                                        "%s · %s · %s · %u partitions"),
+                    filesystem, settings_storage_device_mount(
+                        s_storage_selected_device), scheme,
+                    (unsigned int)selected->partition_count);
+    else
+        lv_snprintf(volume_state, sizeof(volume_state), "%s · %s",
+                    filesystem, settings_storage_device_mount(
+                        s_storage_selected_device));
+    if (s_storage_volume_label != RT_NULL &&
+        lv_obj_is_valid(s_storage_volume_label))
+        lv_label_set_text(s_storage_volume_label, volume_state);
+
+    if (s_storage_browse_button != RT_NULL &&
+        lv_obj_is_valid(s_storage_browse_button))
+    {
+        if (selected_result == RT_EOK && selected->mounted &&
+            !selected->usb_exported && !formatting)
+            lv_obj_remove_state(s_storage_browse_button, LV_STATE_DISABLED);
+        else
+            lv_obj_add_state(s_storage_browse_button, LV_STATE_DISABLED);
+    }
+    if (s_storage_format_button != RT_NULL &&
+        lv_obj_is_valid(s_storage_format_button))
+    {
+        lv_obj_t *label = lv_obj_get_child(s_storage_format_button, 0U);
+        if (label != RT_NULL && lv_obj_check_type(label, &lv_label_class))
+            lv_label_set_text(label,
+                s_storage_selected_device == FT_STORAGE_DEVICE_SD ?
+                ft_preferences_text("格式化 SD 卡", "Format SD card") :
+                ft_preferences_text("格式化 Flash", "Format Flash"));
+        if (selected_result == RT_EOK && selected->can_format && !formatting)
+            lv_obj_remove_state(s_storage_format_button, LV_STATE_DISABLED);
+        else
+            lv_obj_add_state(s_storage_format_button, LV_STATE_DISABLED);
+    }
+
+    if ((s_storage_format_state == FT_STORAGE_FORMAT_SUCCESS ||
+         s_storage_format_state == FT_STORAGE_FORMAT_FAILED) &&
+        !s_storage_result_notified)
+    {
+        char message[160];
+        s_storage_result_notified = true;
+        if (s_storage_format_state == FT_STORAGE_FORMAT_SUCCESS)
+            feathertalk_ui_alert(
+                ft_preferences_text("格式化完成", "Format complete"),
+                s_storage_format_target == FT_STORAGE_DEVICE_FLASH ?
+                ft_preferences_text(
+                    "内置 Flash 已重建为 FAT 卷并重新挂载到 /flash。",
+                    "Internal Flash was rebuilt as a FAT volume and remounted at /flash.") :
+                ft_preferences_text(
+                    "SD 卡已重建为一个 FAT 卷并重新挂载到 /sdcard。",
+                    "The SD card was rebuilt as one FAT volume and remounted at /sdcard."));
+        else
+        {
+            lv_snprintf(message, sizeof(message),
+                        s_storage_format_target == FT_STORAGE_DEVICE_FLASH ?
+                        ft_preferences_text(
+                            "内置 Flash 格式化未完成（错误 %d）。请关闭正在使用它的文件后重试。",
+                            "Internal Flash formatting did not complete (error %d). Close files using it and try again.") :
+                        ft_preferences_text(
+                            "SD 卡格式化未完成（错误 %d）。请关闭正在使用它的文件后重试。",
+                            "SD card formatting did not complete (error %d). Close files using it and try again."),
+                        s_storage_format_result);
+            feathertalk_ui_alert(ft_preferences_text("格式化失败", "Format failed"),
+                                message);
+        }
+    }
+}
+
+static void settings_storage_monitor_cb(lv_timer_t *timer)
+{
+    LV_UNUSED(timer);
+    settings_storage_refresh();
+}
+
+static void settings_storage_page_enter(void)
+{
+    settings_storage_refresh();
+    if (s_storage_monitor_timer == RT_NULL)
+        s_storage_monitor_timer = lv_timer_create(
+            settings_storage_monitor_cb, 1000U, RT_NULL);
+}
+
+static void settings_storage_page_leave(void)
+{
+    settings_storage_close_confirmation();
+    if (s_storage_monitor_timer != RT_NULL)
+    {
+        lv_timer_delete(s_storage_monitor_timer);
+        s_storage_monitor_timer = RT_NULL;
+    }
+}
+
+static lv_obj_t *settings_storage_create_device_card(
+    lv_obj_t *parent, ft_storage_device_t device)
+{
+    const ft_ui_layout_t *layout = ft_layout_get();
+    size_t index = (size_t)device;
+    lv_obj_t *button;
+    lv_obj_t *title;
+    uint16_t icon_size = ft_layout_icon_size(32U);
+    int32_t text_x = (int32_t)icon_size + ft_layout_px(20);
+
+    track_object(&s_storage_device_buttons[index], lv_button_create(parent));
+    button = s_storage_device_buttons[index];
+    lv_obj_set_height(button, layout->compact ?
+                      layout->list_row_height + ft_layout_px(8) :
+                      ft_layout_px(104));
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x181818), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(button, ft_layout_px(4), LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(button, ft_layout_px(10), LV_PART_MAIN);
+    lv_obj_add_event_cb(button, settings_storage_device_clicked_cb,
+                        LV_EVENT_CLICKED, (void *)(uintptr_t)device);
+
+    track_object(&s_storage_device_icons[index],
+                 ft_icon_create(button, settings_storage_device_icon(device),
+                                icon_size, false));
+    lv_obj_align(s_storage_device_icons[index], LV_ALIGN_LEFT_MID, 0, 0);
+
+    title = lv_label_create(button);
+    lv_label_set_text(title, settings_storage_device_title(device));
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(title, lv_pct(68));
+    lv_obj_set_style_text_font(title, ft_layout_font(16), LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, text_x, 0);
+
+    track_object(&s_storage_device_capacity[index], lv_label_create(button));
+    lv_label_set_text(s_storage_device_capacity[index], "--");
+    lv_obj_set_style_text_font(s_storage_device_capacity[index],
+                               ft_layout_font(16), LV_PART_MAIN);
+    lv_obj_align(s_storage_device_capacity[index], LV_ALIGN_LEFT_MID,
+                 text_x, ft_layout_px(3));
+
+    track_object(&s_storage_device_state[index], lv_label_create(button));
+    lv_label_set_text(s_storage_device_state[index], "--");
+    lv_obj_set_style_text_font(s_storage_device_state[index],
+                               ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_align(s_storage_device_state[index], LV_ALIGN_BOTTOM_LEFT,
+                 text_x, 0);
+    return button;
+}
+
+static lv_obj_t *create_settings_storage_page(lv_obj_t *parent)
+{
+    const ft_ui_layout_t *layout = ft_layout_get();
+    lv_obj_t *page = lv_obj_create(parent);
+    lv_obj_t *title;
+    lv_obj_t *section;
+    lv_obj_t *devices;
+    lv_obj_t *detail;
+    lv_obj_t *detail_header;
+    lv_obj_t *legend;
+    lv_obj_t *actions;
+    lv_obj_t *button;
+
+    ft_ui_style_page(page);
+    lv_obj_set_style_pad_all(page, layout->page_padding, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(page, ft_layout_px(12), LV_PART_MAIN);
+    lv_obj_set_flex_flow(page, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(page, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_add_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(page, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(page, LV_SCROLLBAR_MODE_AUTO);
+
+    title = lv_label_create(page);
+    lv_label_set_text(title, ft_preferences_text("磁盘", "Disks"));
+    lv_obj_set_style_text_font(title, ft_layout_font(22), LV_PART_MAIN);
+    ft_ui_register_accent(title, FT_ACCENT_TEXT);
+
+    section = lv_label_create(page);
+    lv_label_set_text(section, ft_preferences_text("存储设备", "Storage devices"));
+    lv_obj_set_style_text_font(section, ft_layout_font(14), LV_PART_MAIN);
+    lv_obj_set_style_text_color(section, lv_color_hex(0xB8B8B8), LV_PART_MAIN);
+
+    devices = lv_obj_create(page);
+    style_layout_container(devices);
+    lv_obj_set_width(devices, lv_pct(100));
+    lv_obj_set_height(devices, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_column(devices, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_style_pad_row(devices, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(devices, layout->compact ?
+                        LV_FLEX_FLOW_COLUMN : LV_FLEX_FLOW_ROW);
+    button = settings_storage_create_device_card(
+        devices, FT_STORAGE_DEVICE_FLASH);
+    if (layout->compact)
+        lv_obj_set_width(button, lv_pct(100));
+    else
+    {
+        lv_obj_set_width(button, 0);
+        lv_obj_set_flex_grow(button, 1);
+    }
+    button = settings_storage_create_device_card(devices, FT_STORAGE_DEVICE_SD);
+    if (layout->compact)
+        lv_obj_set_width(button, lv_pct(100));
+    else
+    {
+        lv_obj_set_width(button, 0);
+        lv_obj_set_flex_grow(button, 1);
+    }
+
+    detail = lv_obj_create(page);
+    ft_ui_style_panel(detail);
+    lv_obj_set_width(detail, lv_pct(100));
+    lv_obj_set_height(detail, LV_SIZE_CONTENT);
+    lv_obj_set_style_radius(detail, ft_layout_px(4), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(detail, ft_layout_px(14), LV_PART_MAIN);
+    lv_obj_set_style_pad_row(detail, ft_layout_px(9), LV_PART_MAIN);
+    lv_obj_set_flex_flow(detail, LV_FLEX_FLOW_COLUMN);
+    lv_obj_remove_flag(detail, LV_OBJ_FLAG_SCROLLABLE);
+
+    detail_header = lv_obj_create(detail);
+    style_layout_container(detail_header);
+    lv_obj_set_size(detail_header, lv_pct(100), ft_layout_px(40));
+    lv_obj_set_style_pad_column(detail_header, ft_layout_px(10), LV_PART_MAIN);
+    lv_obj_set_flex_flow(detail_header, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(detail_header, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    track_object(&s_storage_detail_icon,
+                 ft_icon_create(detail_header, FT_ICON_FLASH_DEVICE,
+                                ft_layout_icon_size(32U), true));
+    track_object(&s_storage_detail_title, lv_label_create(detail_header));
+    lv_obj_set_width(s_storage_detail_title, 0);
+    lv_obj_set_flex_grow(s_storage_detail_title, 1);
+    lv_label_set_long_mode(s_storage_detail_title, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(s_storage_detail_title,
+                               ft_layout_font(18), LV_PART_MAIN);
+    track_object(&s_storage_detail_state, lv_label_create(detail_header));
+    lv_obj_set_style_text_font(s_storage_detail_state,
+                               ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_storage_detail_state,
+                                lv_color_hex(0xB8B8B8), LV_PART_MAIN);
+
+    track_object(&s_storage_capacity_caption, lv_label_create(detail));
+    lv_obj_set_style_text_font(s_storage_capacity_caption,
+                               ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_storage_capacity_caption,
+                                lv_color_hex(0xA0A0A0), LV_PART_MAIN);
+    track_object(&s_storage_capacity_total, lv_label_create(detail));
+    lv_obj_set_style_text_font(s_storage_capacity_total,
+                               ft_layout_font(22), LV_PART_MAIN);
+
+    track_object(&s_storage_capacity_track, lv_obj_create(detail));
+    lv_obj_set_size(s_storage_capacity_track, lv_pct(100), ft_layout_px(20));
+    lv_obj_set_style_bg_color(s_storage_capacity_track,
+                              lv_color_hex(0x090909), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_storage_capacity_track, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_storage_capacity_track, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_storage_capacity_track,
+                                  lv_color_hex(0x555555), LV_PART_MAIN);
+    lv_obj_set_style_radius(s_storage_capacity_track, ft_layout_px(3), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_storage_capacity_track, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(s_storage_capacity_track, LV_OBJ_FLAG_SCROLLABLE);
+    track_object(&s_storage_capacity_fill,
+                 lv_obj_create(s_storage_capacity_track));
+    lv_obj_set_size(s_storage_capacity_fill, 0, lv_pct(100));
+    lv_obj_set_style_border_width(s_storage_capacity_fill, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_storage_capacity_fill, ft_layout_px(2), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_storage_capacity_fill, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(s_storage_capacity_fill, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_storage_capacity_fill, LV_ALIGN_LEFT_MID, 0, 0);
+    ft_ui_register_accent(s_storage_capacity_fill, FT_ACCENT_BACKGROUND);
+
+    legend = lv_obj_create(detail);
+    style_layout_container(legend);
+    lv_obj_set_size(legend, lv_pct(100), ft_layout_px(22));
+    lv_obj_set_flex_flow(legend, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(legend, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    track_object(&s_storage_used_label, lv_label_create(legend));
+    track_object(&s_storage_free_label, lv_label_create(legend));
+    lv_obj_set_style_text_font(s_storage_used_label,
+                               ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_storage_free_label,
+                               ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_storage_used_label,
+                                lv_color_hex(0xB8B8B8), LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_storage_free_label,
+                                lv_color_hex(0xB8B8B8), LV_PART_MAIN);
+
+    track_object(&s_storage_volume_label, lv_label_create(detail));
+    lv_obj_set_width(s_storage_volume_label, lv_pct(100));
+    lv_label_set_long_mode(s_storage_volume_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(s_storage_volume_label,
+                               ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_storage_volume_label,
+                                lv_color_hex(0xA0A0A0), LV_PART_MAIN);
+
+    actions = lv_obj_create(page);
+    style_layout_container(actions);
+    lv_obj_set_width(actions, lv_pct(100));
+    lv_obj_set_height(actions, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_column(actions, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_style_pad_row(actions, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(actions, layout->compact ?
+                        LV_FLEX_FLOW_COLUMN : LV_FLEX_FLOW_ROW);
+    track_object(&s_storage_browse_button,
+                 create_icon_button(actions, FT_ICON_FILES,
+                                    ft_preferences_text("浏览文件", "Browse files"),
+                                    settings_storage_browse_clicked_cb, RT_NULL,
+                                    RT_NULL, RT_NULL));
+    track_object(&s_storage_format_button,
+                 create_flat_button(actions, "--",
+                                    settings_storage_format_clicked_cb,
+                                    RT_NULL));
+    if (layout->compact)
+    {
+        lv_obj_set_width(s_storage_browse_button, lv_pct(100));
+        lv_obj_set_width(s_storage_format_button, lv_pct(100));
+    }
+    else
+    {
+        lv_obj_set_width(s_storage_browse_button, 0);
+        lv_obj_set_flex_grow(s_storage_browse_button, 1);
+        lv_obj_set_width(s_storage_format_button, 0);
+        lv_obj_set_flex_grow(s_storage_format_button, 1);
+    }
+    settings_storage_refresh();
+    return page;
+}
+
+static void settings_usb_refresh(void)
+{
+    ft_usb_status_t status;
+    char text[320];
+
+    ft_usb_get_status(&status);
+    settings_choice_refresh(s_usb_role_buttons[FT_USB_ROLE_DEVICE], true);
+    settings_choice_refresh(s_usb_role_buttons[FT_USB_ROLE_HOST], false);
+    settings_choice_refresh(s_usb_function_buttons[0],
+                            status.function == FT_USB_FUNCTION_STORAGE);
+    settings_choice_refresh(s_usb_function_buttons[1],
+                            status.function == FT_USB_FUNCTION_AUDIO);
+
+    if (s_usb_role_buttons[FT_USB_ROLE_HOST] != RT_NULL &&
+        lv_obj_is_valid(s_usb_role_buttons[FT_USB_ROLE_HOST]))
+        lv_obj_add_state(s_usb_role_buttons[FT_USB_ROLE_HOST], LV_STATE_DISABLED);
+    if (s_usb_function_buttons[0] != RT_NULL &&
+        lv_obj_is_valid(s_usb_function_buttons[0]))
+    {
+        if (status.storage_supported && (status.sd_present || status.active))
+            lv_obj_remove_state(s_usb_function_buttons[0], LV_STATE_DISABLED);
+        else
+            lv_obj_add_state(s_usb_function_buttons[0], LV_STATE_DISABLED);
+    }
+    if (s_usb_function_buttons[1] != RT_NULL &&
+        lv_obj_is_valid(s_usb_function_buttons[1]))
+        lv_obj_add_state(s_usb_function_buttons[1], LV_STATE_DISABLED);
+    if (s_usb_stop_button != RT_NULL && lv_obj_is_valid(s_usb_stop_button))
+    {
+        if (status.active)
+            lv_obj_remove_state(s_usb_stop_button, LV_STATE_DISABLED);
+        else
+            lv_obj_add_state(s_usb_stop_button, LV_STATE_DISABLED);
+    }
+
+    if (s_usb_status_label == RT_NULL || !lv_obj_is_valid(s_usb_status_label))
+        return;
+    if (status.active)
+    {
+        uint64_t flash_bytes = (uint64_t)status.flash_block_size *
+                               status.flash_block_count;
+        uint64_t sd_bytes = (uint64_t)status.sd_block_size *
+                            status.sd_block_count;
+        lv_snprintf(text, sizeof(text), ft_preferences_text(
+                    "存储器模式：运行中\n连接：%s\nLUN 0 内置 Flash：%lu MiB\nLUN 1 SD 卡：%lu MiB\n"
+                    "两块介质已从本机卸载，由电脑独占访问。请先停止 USB 存储再拔卡或断开连接。",
+                    "Storage mode: active\nConnection: %s\nLUN 0 Internal Flash: %lu MiB\nLUN 1 SD card: %lu MiB\n"
+                    "Both volumes are unmounted locally and owned exclusively by the computer. Stop USB storage before removing media or disconnecting."),
+                    status.configured ? ft_preferences_text("已枚举", "enumerated") :
+                    status.connected ? ft_preferences_text("已连接，等待枚举", "connected, enumerating") :
+                                       ft_preferences_text("等待电脑连接", "waiting for computer"),
+                    (unsigned long)(flash_bytes / (1024U * 1024U)),
+                    (unsigned long)(sd_bytes / (1024U * 1024U)));
+    }
+    else if (!status.storage_supported)
+    {
+        lv_snprintf(text, sizeof(text), "%s", ft_preferences_text(
+                    "USB Device MSC 未编入当前固件。",
+                    "USB Device MSC is not built into this firmware."));
+    }
+    else if (!status.sd_present)
+    {
+        lv_snprintf(text, sizeof(text), "%s", ft_preferences_text(
+                    "内置 Flash 已就绪，但未检测到已挂载的 SD 卡。当前双磁盘模式需要插卡后才能启动。",
+                    "Internal Flash is ready, but no mounted SD card was detected. Insert a card to start the current two-disk mode."));
+    }
+    else if (status.last_error != RT_EOK)
+    {
+        lv_snprintf(text, sizeof(text), ft_preferences_text(
+                    "Flash 和 SD 卡已就绪，但上次 USB 操作失败（错误 %d）。",
+                    "Flash and SD card are ready, but the last USB operation failed (error %d)."),
+                    status.last_error);
+    }
+    else
+    {
+        lv_snprintf(text, sizeof(text), "%s", ft_preferences_text(
+                    "内置 Flash 和 SD 卡已就绪。选择存储器模式后，电脑将看到两个逻辑磁盘，本机文件应用会暂时停止访问两块介质。",
+                    "Internal Flash and SD card are ready. Storage mode exposes two logical disks and temporarily pauses local Files access to both volumes."));
+    }
+    lv_label_set_text(s_usb_status_label, text);
+}
+
+static void settings_usb_storage_clicked_cb(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    (void)ft_usb_set_function(FT_USB_FUNCTION_STORAGE);
+    settings_usb_refresh();
+}
+
+static void settings_usb_stop_clicked_cb(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    (void)ft_usb_set_function(FT_USB_FUNCTION_NONE);
+    settings_usb_refresh();
+}
+
+static void settings_usb_monitor_cb(lv_timer_t *timer)
+{
+    LV_UNUSED(timer);
+    settings_usb_refresh();
+}
+
+static void settings_usb_page_enter(void)
+{
+    settings_usb_refresh();
+    if (s_usb_monitor_timer == RT_NULL)
+        s_usb_monitor_timer = lv_timer_create(settings_usb_monitor_cb, 500U, RT_NULL);
+}
+
+static void settings_usb_page_leave(void)
+{
+    if (s_usb_monitor_timer != RT_NULL)
+    {
+        lv_timer_delete(s_usb_monitor_timer);
+        s_usb_monitor_timer = RT_NULL;
+    }
+}
+
+static lv_obj_t *create_settings_usb_page(lv_obj_t *parent)
+{
+    const ft_ui_layout_t *layout = ft_layout_get();
+    lv_obj_t *page = create_text_page(
+        parent, "USB", FT_ICON_USB,
+        ft_preferences_text(
+        "此版硬件的 Type-C 用户口固定为 USB 设备/受电端；主机模式不可用。",
+        "This board revision fixes the user Type-C port as a USB device/sink; Host mode is unavailable."));
+    lv_obj_t *caption;
+    lv_obj_t *row;
+    lv_obj_t *note;
+
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("USB 角色", "USB role"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), layout->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    track_object(&s_usb_role_buttons[FT_USB_ROLE_DEVICE],
+                 create_flat_button(row,
+                                    ft_preferences_text("设备（默认）", "Device (default)"),
+                                    RT_NULL, RT_NULL));
+    track_object(&s_usb_role_buttons[FT_USB_ROLE_HOST],
+                 create_flat_button(row,
+                                    ft_preferences_text("主机", "Host"),
+                                    RT_NULL, RT_NULL));
+    lv_obj_set_width(s_usb_role_buttons[0], 0);
+    lv_obj_set_width(s_usb_role_buttons[1], 0);
+    lv_obj_set_flex_grow(s_usb_role_buttons[0], 1);
+    lv_obj_set_flex_grow(s_usb_role_buttons[1], 1);
+
+    note = lv_label_create(page);
+    lv_obj_set_width(note, lv_pct(100));
+    lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(note, ft_preferences_text(
+                      "主机模式需要 Type-C Rp 和 VBUS 5V 输出硬件，本板未实现。",
+                      "Host mode requires Type-C Rp and a switched 5 V VBUS source, which this board does not implement."));
+    lv_obj_set_style_text_color(note, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(note, ft_layout_font(12), LV_PART_MAIN);
+
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("设备功能", "Device function"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), layout->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    track_object(&s_usb_function_buttons[0],
+                 create_flat_button(row,
+                                    ft_preferences_text("存储器", "Storage"),
+                                    settings_usb_storage_clicked_cb, RT_NULL));
+    track_object(&s_usb_function_buttons[1],
+                 create_flat_button(row, "USB Audio (UAC)", RT_NULL, RT_NULL));
+    lv_obj_set_width(s_usb_function_buttons[0], 0);
+    lv_obj_set_width(s_usb_function_buttons[1], 0);
+    lv_obj_set_flex_grow(s_usb_function_buttons[0], 1);
+    lv_obj_set_flex_grow(s_usb_function_buttons[1], 1);
+
+    note = lv_label_create(page);
+    lv_obj_set_width(note, lv_pct(100));
+    lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(note, ft_preferences_text(
+                      "存储器模式共享 SD 卡；未插卡时不可选。USB Audio 将随音频链路后续启用。",
+                      "Storage shares the SD card and is disabled without media. USB Audio will be enabled with the audio path later."));
+    lv_obj_set_style_text_color(note, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(note, ft_layout_font(12), LV_PART_MAIN);
+
+    track_object(&s_usb_stop_button,
+                 create_flat_button(page,
+                                    ft_preferences_text("停止 USB 存储", "Stop USB storage"),
+                                    settings_usb_stop_clicked_cb, RT_NULL));
+    lv_obj_set_width(s_usb_stop_button, lv_pct(100));
+
+    track_object(&s_usb_status_label, lv_label_create(page));
+    lv_obj_set_width(s_usb_status_label, lv_pct(100));
+    lv_label_set_long_mode(s_usb_status_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_usb_status_label, ft_layout_font(14), LV_PART_MAIN);
+    ft_ui_register_accent(s_usb_status_label, FT_ACCENT_TEXT);
+    settings_usb_refresh();
+    return page;
 }
 
 static void settings_time_language_refresh(void)
@@ -2122,16 +3148,35 @@ static bool files_add_entry(const ft_storage_entry_t *entry, void *context)
 static void files_set_path_label(void)
 {
     char text[FT_STORAGE_PATH_MAX + 24U];
-    const char *relative = s_files_current_path + strlen(FT_STORAGE_SD_MOUNT_PATH);
+    const char *mount_path;
+    const char *title;
+    const char *relative;
 
     if (s_files_path_label == RT_NULL || !lv_obj_is_valid(s_files_path_label))
         return;
-    if (relative[0] == '\0')
-        lv_label_set_text(s_files_path_label, ft_preferences_text("SD 卡", "SD card"));
+    if (strcmp(s_files_current_path, FT_STORAGE_BROWSE_ROOT) == 0)
+    {
+        lv_label_set_text(s_files_path_label,
+                          ft_preferences_text("存储设备", "Storage devices"));
+        return;
+    }
+    if (strncmp(s_files_current_path, FT_STORAGE_FLASH_MOUNT_PATH,
+                strlen(FT_STORAGE_FLASH_MOUNT_PATH)) == 0)
+    {
+        mount_path = FT_STORAGE_FLASH_MOUNT_PATH;
+        title = ft_preferences_text("内置 Flash", "Internal Flash");
+    }
     else
     {
-        lv_snprintf(text, sizeof(text), ft_preferences_text("SD 卡  >  %s",
-                                                            "SD card  >  %s"),
+        mount_path = FT_STORAGE_SD_MOUNT_PATH;
+        title = ft_preferences_text("SD 卡", "SD card");
+    }
+    relative = s_files_current_path + strlen(mount_path);
+    if (relative[0] == '\0')
+        lv_label_set_text(s_files_path_label, title);
+    else
+    {
+        lv_snprintf(text, sizeof(text), "%s  >  %s", title,
                     relative[0] == '/' ? relative + 1 : relative);
         lv_label_set_text(s_files_path_label, text);
     }
@@ -2153,6 +3198,8 @@ static void files_add_empty_message(const char *message)
 static void files_refresh_view(bool manual_refresh)
 {
     ft_storage_volume_info_t volume;
+    ft_storage_volume_info_t flash_volume;
+    ft_storage_volume_info_t sd_volume;
     ft_files_list_context_t counts = {0U, 0U};
     char total_text[24];
     char free_text[24];
@@ -2165,23 +3212,63 @@ static void files_refresh_view(bool manual_refresh)
         s_files_status_label == RT_NULL || !lv_obj_is_valid(s_files_status_label))
         return;
 
+    s_files_last_flash_mounted =
+        ft_storage_get_volume(FT_STORAGE_FLASH_MOUNT_PATH,
+                              &flash_volume) == RT_EOK && flash_volume.mounted;
+    s_files_last_sd_mounted =
+        ft_storage_get_volume(FT_STORAGE_SD_MOUNT_PATH,
+                              &sd_volume) == RT_EOK && sd_volume.mounted;
     lv_obj_clean(s_files_list);
-    if (ft_storage_get_volume(FT_STORAGE_SD_MOUNT_PATH, &volume) != RT_EOK ||
-        !volume.mounted)
+
+    if (strcmp(s_files_current_path, FT_STORAGE_BROWSE_ROOT) == 0)
     {
-        s_files_last_mounted = false;
-        rt_strncpy(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH,
-                   sizeof(s_files_current_path) - 1U);
-        s_files_current_path[sizeof(s_files_current_path) - 1U] = '\0';
+        directories = ft_storage_list(FT_STORAGE_BROWSE_ROOT,
+                                      FT_STORAGE_ENTRY_DIRECTORY,
+                                      files_add_entry, &counts);
+        s_files_last_mounted = s_files_last_flash_mounted ||
+                               s_files_last_sd_mounted;
         files_set_path_label();
-        lv_label_set_text(s_files_status_label, ft_preferences_text(
-                          "未检测到已挂载的 SD 卡。插卡后系统会自动识别并挂载。",
-                          "No mounted SD card. Insert one and it will be detected and mounted automatically."));
-        files_add_empty_message(ft_preferences_text(
-                                "等待 SD 卡…\n支持 FAT12/FAT16/FAT32，挂载点 /sdcard",
-                                "Waiting for SD card…\nFAT12/FAT16/FAT32 at /sdcard"));
+        lv_snprintf(status, sizeof(status), ft_preferences_text(
+                    "内置 Flash：%s · SD 卡：%s\n选择一个存储设备查看文件。",
+                    "Internal Flash: %s · SD card: %s\nChoose a storage device to browse files."),
+                    s_files_last_flash_mounted ?
+                        ft_preferences_text("已挂载", "mounted") :
+                        ft_preferences_text("不可用", "unavailable"),
+                    s_files_last_sd_mounted ?
+                        ft_preferences_text("已挂载", "mounted") :
+                        ft_preferences_text("未插卡", "not inserted"));
+        lv_label_set_text(s_files_status_label, status);
+        if (directories <= 0)
+            files_add_empty_message(ft_preferences_text("没有可用的存储设备。",
+                                                        "No storage devices are available."));
         if (s_files_up_button != RT_NULL && lv_obj_is_valid(s_files_up_button))
             lv_obj_add_state(s_files_up_button, LV_STATE_DISABLED);
+        s_files_directory_count = counts.directories;
+        s_files_file_count = 0U;
+        return;
+    }
+
+    if (strncmp(s_files_current_path, FT_STORAGE_FLASH_MOUNT_PATH,
+                strlen(FT_STORAGE_FLASH_MOUNT_PATH)) == 0)
+        volume = flash_volume;
+    else
+        volume = sd_volume;
+    if (!volume.mounted)
+    {
+        bool is_sd = strncmp(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH,
+                             strlen(FT_STORAGE_SD_MOUNT_PATH)) == 0;
+        s_files_last_mounted = false;
+        files_set_path_label();
+        lv_label_set_text(s_files_status_label, is_sd ?
+            ft_preferences_text("SD 卡未插入或未挂载。插卡后系统会自动识别。",
+                                "The SD card is absent or not mounted. It will be detected automatically after insertion.") :
+            ft_preferences_text("内置 Flash 未挂载，请在存储设置中检查。",
+                                "Internal Flash is not mounted. Check Storage settings."));
+        files_add_empty_message(is_sd ?
+            ft_preferences_text("当前没有 SD 卡介质。", "No SD card media is present.") :
+            ft_preferences_text("内置 Flash 暂时不可用。", "Internal Flash is temporarily unavailable."));
+        if (s_files_up_button != RT_NULL && lv_obj_is_valid(s_files_up_button))
+            lv_obj_remove_state(s_files_up_button, LV_STATE_DISABLED);
         s_files_directory_count = 0U;
         s_files_file_count = 0U;
         return;
@@ -2196,9 +3283,9 @@ static void files_refresh_view(bool manual_refresh)
                             files_add_entry, &counts) : -RT_ERROR;
     if (directories < 0 || files < 0)
     {
-        if (strcmp(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH) != 0)
+        if (strcmp(s_files_current_path, FT_STORAGE_BROWSE_ROOT) != 0)
         {
-            rt_strncpy(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH,
+            rt_strncpy(s_files_current_path, FT_STORAGE_BROWSE_ROOT,
                        sizeof(s_files_current_path) - 1U);
             s_files_current_path[sizeof(s_files_current_path) - 1U] = '\0';
             files_refresh_view(false);
@@ -2206,8 +3293,8 @@ static void files_refresh_view(bool manual_refresh)
         }
         lv_obj_clean(s_files_list);
         lv_label_set_text(s_files_status_label,
-                          ft_preferences_text("SD 卡读取失败，请重新插入后重试。",
-                                              "Unable to read the SD card. Reinsert it and retry."));
+                          ft_preferences_text("存储设备读取失败，请返回后重试。",
+                                              "Unable to read the storage device. Go back and retry."));
         files_add_empty_message(ft_preferences_text("目录读取失败。",
                                                     "Directory read failed."));
         return;
@@ -2228,7 +3315,7 @@ static void files_refresh_view(bool manual_refresh)
                                                     "This folder is empty."));
     if (s_files_up_button != RT_NULL && lv_obj_is_valid(s_files_up_button))
     {
-        if (strcmp(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH) == 0)
+        if (strcmp(s_files_current_path, FT_STORAGE_BROWSE_ROOT) == 0)
             lv_obj_add_state(s_files_up_button, LV_STATE_DISABLED);
         else
             lv_obj_remove_state(s_files_up_button, LV_STATE_DISABLED);
@@ -2246,18 +3333,25 @@ static void files_refresh_cb(lv_event_t *event)
 static void files_up_cb(lv_event_t *event)
 {
     LV_UNUSED(event);
-    if (ft_storage_parent_path(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH))
+    if (ft_storage_parent_path(s_files_current_path, FT_STORAGE_BROWSE_ROOT))
         files_refresh_view(false);
 }
 
 static void files_monitor_cb(lv_timer_t *timer)
 {
-    ft_storage_volume_info_t volume;
-    bool mounted;
+    ft_storage_volume_info_t flash_volume;
+    ft_storage_volume_info_t sd_volume;
+    bool flash_mounted;
+    bool sd_mounted;
     LV_UNUSED(timer);
-    mounted = ft_storage_get_volume(FT_STORAGE_SD_MOUNT_PATH, &volume) == RT_EOK &&
-              volume.mounted;
-    if (mounted != s_files_last_mounted)
+    flash_mounted = ft_storage_get_volume(FT_STORAGE_FLASH_MOUNT_PATH,
+                                          &flash_volume) == RT_EOK &&
+                    flash_volume.mounted;
+    sd_mounted = ft_storage_get_volume(FT_STORAGE_SD_MOUNT_PATH,
+                                       &sd_volume) == RT_EOK &&
+                 sd_volume.mounted;
+    if (flash_mounted != s_files_last_flash_mounted ||
+        sd_mounted != s_files_last_sd_mounted)
         files_refresh_view(false);
 }
 
@@ -2270,7 +3364,7 @@ static void files_page_enter(void)
 
 static bool files_page_back(void)
 {
-    if (ft_storage_parent_path(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH))
+    if (ft_storage_parent_path(s_files_current_path, FT_STORAGE_BROWSE_ROOT))
     {
         files_refresh_view(false);
         return true;
@@ -2292,14 +3386,21 @@ static lv_obj_t *create_files_page(lv_obj_t *parent)
     const ft_ui_layout_t *layout = ft_layout_get();
     lv_obj_t *page = create_text_page(parent,
                                       ft_preferences_text("文件", "Files"), FT_ICON_FILES,
-                                      ft_preferences_text("SD 卡与可移动存储",
-                                                          "SD card and removable storage"));
+                                      ft_preferences_text("内置 Flash 与 SD 卡",
+                                                          "Internal Flash and SD card"));
     lv_obj_t *toolbar = lv_obj_create(page);
 
-    rt_strncpy(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH,
+    rt_strncpy(s_files_current_path,
+               s_files_requested_device == FT_STORAGE_DEVICE_FLASH ?
+                   FT_STORAGE_FLASH_MOUNT_PATH :
+               s_files_requested_device == FT_STORAGE_DEVICE_SD ?
+                   FT_STORAGE_SD_MOUNT_PATH : FT_STORAGE_BROWSE_ROOT,
                sizeof(s_files_current_path) - 1U);
     s_files_current_path[sizeof(s_files_current_path) - 1U] = '\0';
+    s_files_requested_device = FT_STORAGE_DEVICE_INVALID;
     s_files_last_mounted = false;
+    s_files_last_flash_mounted = false;
+    s_files_last_sd_mounted = false;
 
     track_object(&s_files_path_label, lv_label_create(page));
     lv_obj_set_width(s_files_path_label, lv_pct(100));
@@ -2450,6 +3551,148 @@ ft_page_id_t ft_pages_test_settings_page_id(size_t i)
 { return i < FT_SETTINGS_COUNT ? s_settings[i].page_id : FT_PAGE_COUNT; }
 lv_obj_t *ft_pages_test_get_settings_brightness(void)
 { return s_settings_brightness_slider; }
+lv_obj_t *ft_pages_test_get_usb_role_button(ft_usb_role_t role)
+{ return role <= FT_USB_ROLE_HOST ? s_usb_role_buttons[role] : RT_NULL; }
+lv_obj_t *ft_pages_test_get_usb_function_button(ft_usb_function_t function)
+{
+    if (function == FT_USB_FUNCTION_STORAGE) return s_usb_function_buttons[0];
+    if (function == FT_USB_FUNCTION_AUDIO) return s_usb_function_buttons[1];
+    return RT_NULL;
+}
+lv_obj_t *ft_pages_test_get_usb_stop_button(void) { return s_usb_stop_button; }
+bool ft_pages_test_usb_state_valid(void)
+{
+    ft_usb_status_t status;
+    if (s_usb_monitor_timer == RT_NULL ||
+        s_usb_role_buttons[FT_USB_ROLE_DEVICE] == RT_NULL ||
+        s_usb_role_buttons[FT_USB_ROLE_HOST] == RT_NULL ||
+        s_usb_function_buttons[0] == RT_NULL ||
+        s_usb_function_buttons[1] == RT_NULL ||
+        s_usb_stop_button == RT_NULL || s_usb_status_label == RT_NULL)
+        return false;
+    ft_usb_get_status(&status);
+    return !lv_obj_has_state(s_usb_role_buttons[FT_USB_ROLE_DEVICE], LV_STATE_DISABLED) &&
+           lv_obj_has_state(s_usb_role_buttons[FT_USB_ROLE_HOST], LV_STATE_DISABLED) &&
+           lv_obj_has_state(s_usb_function_buttons[1], LV_STATE_DISABLED) &&
+           lv_obj_has_state(s_usb_function_buttons[0], LV_STATE_DISABLED) ==
+               (!status.sd_present && !status.active) &&
+           lv_obj_has_state(s_usb_stop_button, LV_STATE_DISABLED) == !status.active;
+}
+lv_obj_t *ft_pages_test_get_storage_format_button(void)
+{ return s_storage_format_button; }
+lv_obj_t *ft_pages_test_get_storage_browse_button(void)
+{ return s_storage_browse_button; }
+lv_obj_t *ft_pages_test_get_storage_device_button(size_t index)
+{
+    return index < FT_STORAGE_DEVICE_COUNT ?
+           s_storage_device_buttons[index] : RT_NULL;
+}
+size_t ft_pages_test_storage_device_count(void)
+{ return FT_STORAGE_DEVICE_COUNT; }
+size_t ft_pages_test_storage_selected_device(void)
+{ return (size_t)s_storage_selected_device; }
+size_t ft_pages_test_storage_action_target(void)
+{
+    return s_storage_format_target < FT_STORAGE_DEVICE_INVALID ?
+           (size_t)s_storage_format_target : FT_STORAGE_DEVICE_COUNT;
+}
+lv_obj_t *ft_pages_test_get_storage_capacity_track(void)
+{ return s_storage_capacity_track; }
+lv_obj_t *ft_pages_test_get_storage_confirm_cancel(void)
+{ return s_storage_confirm_cancel; }
+lv_obj_t *ft_pages_test_get_storage_confirm_continue(void)
+{ return s_storage_confirm_continue; }
+uint8_t ft_pages_test_storage_confirm_stage(void)
+{ return s_storage_confirm_stage; }
+bool ft_pages_test_storage_visual_valid(void)
+{
+    ft_storage_device_info_t info;
+    lv_area_t track;
+    lv_area_t fill;
+    uint64_t total;
+    uint64_t used;
+    uint32_t expected_percent = 0U;
+    int32_t expected_width;
+    int32_t actual_width;
+    int result;
+
+    if (s_storage_capacity_track == RT_NULL ||
+        !lv_obj_is_valid(s_storage_capacity_track) ||
+        s_storage_capacity_fill == RT_NULL ||
+        !lv_obj_is_valid(s_storage_capacity_fill))
+        return false;
+    rt_memset(&info, 0, sizeof(info));
+    result = settings_storage_get_info(s_storage_selected_device, &info);
+    lv_obj_update_layout(s_storage_capacity_track);
+    lv_obj_get_coords(s_storage_capacity_track, &track);
+    lv_obj_get_coords(s_storage_capacity_fill, &fill);
+    if (track.x2 < track.x1 || track.y2 < track.y1 ||
+        fill.x1 < track.x1 || fill.y1 < track.y1 ||
+        fill.x2 > track.x2 || fill.y2 > track.y2)
+        return false;
+    total = result == RT_EOK && info.mounted ?
+            info.volume_total_bytes : 0U;
+    used = total >= info.volume_free_bytes ?
+           total - info.volume_free_bytes : 0U;
+    if (total > 0U)
+    {
+        expected_percent = used >= total ? 100U :
+                           (uint32_t)((used * 100U) / total);
+        if (used > 0U && expected_percent == 0U) expected_percent = 1U;
+    }
+    expected_width = lv_obj_get_content_width(s_storage_capacity_track) *
+                     (int32_t)expected_percent / 100;
+    actual_width = lv_obj_get_width(s_storage_capacity_fill);
+    return actual_width >= expected_width - 2 &&
+           actual_width <= expected_width + 2;
+}
+bool ft_pages_test_storage_state_valid(void)
+{
+    ft_storage_device_info_t info;
+    int result;
+    size_t index;
+    if (s_storage_selected_device >= FT_STORAGE_DEVICE_INVALID ||
+        s_storage_detail_title == RT_NULL ||
+        !lv_obj_is_valid(s_storage_detail_title) ||
+        s_storage_detail_state == RT_NULL ||
+        !lv_obj_is_valid(s_storage_detail_state) ||
+        s_storage_capacity_total == RT_NULL ||
+        !lv_obj_is_valid(s_storage_capacity_total) ||
+        s_storage_used_label == RT_NULL ||
+        !lv_obj_is_valid(s_storage_used_label) ||
+        s_storage_free_label == RT_NULL ||
+        !lv_obj_is_valid(s_storage_free_label) ||
+        s_storage_volume_label == RT_NULL ||
+        !lv_obj_is_valid(s_storage_volume_label) ||
+        s_storage_browse_button == RT_NULL ||
+        !lv_obj_is_valid(s_storage_browse_button) ||
+        s_storage_format_button == RT_NULL ||
+        !lv_obj_is_valid(s_storage_format_button) ||
+        s_storage_monitor_timer == RT_NULL ||
+        lv_label_get_text(s_storage_detail_title)[0] == '\0' ||
+        lv_label_get_text(s_storage_capacity_total)[0] == '\0' ||
+        !ft_pages_test_storage_visual_valid())
+        return false;
+    for (index = 0U; index < FT_STORAGE_DEVICE_COUNT; index++)
+    {
+        if (s_storage_device_buttons[index] == RT_NULL ||
+            !lv_obj_is_valid(s_storage_device_buttons[index]) ||
+            s_storage_device_icons[index] == RT_NULL ||
+            !lv_obj_is_valid(s_storage_device_icons[index]) ||
+            s_storage_device_capacity[index] == RT_NULL ||
+            !lv_obj_is_valid(s_storage_device_capacity[index]) ||
+            s_storage_device_state[index] == RT_NULL ||
+            !lv_obj_is_valid(s_storage_device_state[index]))
+            return false;
+    }
+    result = settings_storage_get_info(s_storage_selected_device, &info);
+    return lv_obj_has_state(s_storage_format_button, LV_STATE_DISABLED) ==
+               (result != RT_EOK || !info.can_format ||
+                s_storage_format_state == FT_STORAGE_FORMAT_RUNNING) &&
+           lv_obj_has_state(s_storage_browse_button, LV_STATE_DISABLED) ==
+               (result != RT_EOK || !info.mounted || info.usb_exported ||
+                s_storage_format_state == FT_STORAGE_FORMAT_RUNNING);
+}
 lv_obj_t *ft_pages_test_get_time_format_button(size_t i)
 { return i < FT_TIME_FORMAT_COUNT ? s_time_format_buttons[i] : RT_NULL; }
 lv_obj_t *ft_pages_test_get_timezone_dropdown(void)
@@ -2532,7 +3775,7 @@ bool ft_pages_test_files_browser_ready(void)
 }
 bool ft_pages_test_files_at_root(void)
 {
-    return strcmp(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH) == 0;
+    return strcmp(s_files_current_path, FT_STORAGE_BROWSE_ROOT) == 0;
 }
 bool ft_pages_test_files_mounted(void) { return s_files_last_mounted; }
 size_t ft_pages_test_files_entry_count(void)
@@ -2549,6 +3792,24 @@ bool ft_pages_test_transient_slots_clear(void)
         s_settings_keyboard != RT_NULL || s_settings_keyboard_hide != RT_NULL ||
         s_settings_brightness_slider != RT_NULL || s_settings_brightness_value != RT_NULL ||
         s_settings_radio_status != RT_NULL || s_settings_radio_button != RT_NULL ||
+        s_storage_detail_icon != RT_NULL ||
+        s_storage_detail_title != RT_NULL ||
+        s_storage_detail_state != RT_NULL ||
+        s_storage_capacity_caption != RT_NULL ||
+        s_storage_capacity_total != RT_NULL ||
+        s_storage_capacity_track != RT_NULL ||
+        s_storage_capacity_fill != RT_NULL ||
+        s_storage_used_label != RT_NULL ||
+        s_storage_free_label != RT_NULL ||
+        s_storage_volume_label != RT_NULL ||
+        s_storage_browse_button != RT_NULL ||
+        s_storage_format_button != RT_NULL ||
+        s_storage_confirm_box != RT_NULL ||
+        s_storage_confirm_cancel != RT_NULL ||
+        s_storage_confirm_continue != RT_NULL ||
+        s_storage_monitor_timer != RT_NULL ||
+        s_usb_stop_button != RT_NULL || s_usb_status_label != RT_NULL ||
+        s_usb_monitor_timer != RT_NULL ||
         s_timezone_dropdown != RT_NULL || s_time_preview != RT_NULL ||
         s_media_prev_button != RT_NULL || s_media_button != RT_NULL ||
         s_media_next_button != RT_NULL || s_media_label != RT_NULL ||
@@ -2577,6 +3838,14 @@ bool ft_pages_test_transient_slots_clear(void)
         if (s_time_format_buttons[i] != RT_NULL) return false;
     for (i = 0U; i < FT_LANGUAGE_COUNT; i++)
         if (s_language_buttons[i] != RT_NULL) return false;
+    for (i = 0U; i < 2U; i++)
+        if (s_usb_role_buttons[i] != RT_NULL ||
+            s_usb_function_buttons[i] != RT_NULL) return false;
+    for (i = 0U; i < FT_STORAGE_DEVICE_COUNT; i++)
+        if (s_storage_device_buttons[i] != RT_NULL ||
+            s_storage_device_icons[i] != RT_NULL ||
+            s_storage_device_capacity[i] != RT_NULL ||
+            s_storage_device_state[i] != RT_NULL) return false;
     for (i = 0U; i < sizeof(s_search_results) / sizeof(s_search_results[0]); i++)
         if (s_search_results[i] != RT_NULL) return false;
     for (i = 0U; i < FT_SETTINGS_COUNT; i++)

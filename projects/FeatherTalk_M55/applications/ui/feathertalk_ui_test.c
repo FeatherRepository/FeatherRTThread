@@ -193,20 +193,22 @@ static void run_settings_test(void)
     size_t accent_count = ft_pages_test_accent_count();
     size_t opacity_count = ft_pages_test_opacity_count();
     size_t background_count = ft_pages_test_background_count();
-    const size_t preference_base = 18U;
+    const size_t preference_base = 21U;
     char detail[24];
     if (s_control_index == 0U)
     {
-        test_record(ft_pages_test_settings_count() == 7U &&
-                    ft_pages_test_settings_visible_count() == 7U,
-                    "settings.categories", "5 controls + system information + about");
+        test_record(ft_pages_test_settings_count() == 9U &&
+                    ft_pages_test_settings_visible_count() == 9U,
+                    "settings.categories", "7 controls + system information + about");
         test_record(ft_pages_test_settings_page_id(0U) == FT_PAGE_SETTINGS_DISPLAY &&
                     ft_pages_test_settings_page_id(1U) == FT_PAGE_SETTINGS_WIFI &&
                     ft_pages_test_settings_page_id(2U) == FT_PAGE_SETTINGS_BLUETOOTH &&
-                    ft_pages_test_settings_page_id(3U) == FT_PAGE_SETTINGS_TIME_LANGUAGE &&
-                    ft_pages_test_settings_page_id(4U) == FT_PAGE_SETTINGS_PERSONALIZATION &&
-                    ft_pages_test_settings_page_id(5U) == FT_PAGE_SYSTEM &&
-                    ft_pages_test_settings_page_id(6U) == FT_PAGE_ABOUT,
+                    ft_pages_test_settings_page_id(3U) == FT_PAGE_SETTINGS_STORAGE &&
+                    ft_pages_test_settings_page_id(4U) == FT_PAGE_SETTINGS_USB &&
+                    ft_pages_test_settings_page_id(5U) == FT_PAGE_SETTINGS_TIME_LANGUAGE &&
+                    ft_pages_test_settings_page_id(6U) == FT_PAGE_SETTINGS_PERSONALIZATION &&
+                    ft_pages_test_settings_page_id(7U) == FT_PAGE_SYSTEM &&
+                    ft_pages_test_settings_page_id(8U) == FT_PAGE_ABOUT,
                     "settings.scope", "board controls plus device information");
     }
     else if (s_control_index == 1U)
@@ -234,7 +236,7 @@ static void run_settings_test(void)
         lv_textarea_set_text(ft_pages_test_get_settings_search_box(), "");
         (void)lv_obj_send_event(ft_pages_test_get_settings_search_box(),
                                 LV_EVENT_VALUE_CHANGED, RT_NULL);
-        test_record(ft_pages_test_settings_visible_count() == 7U,
+        test_record(ft_pages_test_settings_visible_count() == 9U,
                     "settings.search.clear", "all categories restored");
     }
     else if (s_control_index == 4U)
@@ -282,7 +284,101 @@ static void run_settings_test(void)
     }
     else if (s_control_index == 8U)
     {
+        lv_obj_t *flash_button;
+        lv_obj_t *sd_button;
         (void)test_click(ft_pages_test_get_settings_result(3U),
+                         "settings.open", "Storage");
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS_STORAGE &&
+                    ft_router_depth() == 3U &&
+                    ft_pages_test_storage_state_valid(),
+                    "settings.storage", "two-device capacity and action view");
+        test_record(ft_pages_test_storage_device_count() == 2U &&
+                    ft_pages_test_get_storage_capacity_track() != RT_NULL,
+                    "settings.storage.devices", "Flash and SD with visual capacity bar");
+        flash_button = ft_pages_test_get_storage_device_button(0U);
+        sd_button = ft_pages_test_get_storage_device_button(1U);
+        (void)test_click(flash_button, "settings.storage.select", "Internal Flash");
+        test_record(ft_pages_test_storage_selected_device() == 0U &&
+                    ft_pages_test_storage_visual_valid() &&
+                    ft_pages_test_storage_state_valid(),
+                    "settings.storage.flash", "independent Flash view and actions");
+        if (ft_pages_test_get_storage_format_button() != RT_NULL &&
+            !lv_obj_has_state(ft_pages_test_get_storage_format_button(),
+                              LV_STATE_DISABLED))
+        {
+            lv_obj_t *cancel;
+            (void)test_click(ft_pages_test_get_storage_format_button(),
+                             "settings.storage.flash.confirm", "stage 1");
+            test_record(ft_pages_test_storage_confirm_stage() == 1U &&
+                        ft_pages_test_storage_action_target() == 0U,
+                        "settings.storage.flash.target", "Flash target captured");
+            cancel = ft_pages_test_get_storage_confirm_cancel();
+            s_action_count++;
+            if (cancel != RT_NULL && lv_obj_is_valid(cancel))
+                (void)lv_obj_send_event(cancel, LV_EVENT_CLICKED, RT_NULL);
+            test_record(ft_pages_test_storage_confirm_stage() == 0U,
+                        "settings.storage.flash.cancel",
+                        "Flash destructive action cancelled");
+        }
+        (void)test_click(sd_button, "settings.storage.select", "SD card");
+        test_record(ft_pages_test_storage_selected_device() == 1U &&
+                    ft_pages_test_storage_visual_valid() &&
+                    ft_pages_test_storage_state_valid(),
+                    "settings.storage.sd", "independent SD view and actions");
+    }
+    else if (s_control_index == 9U)
+    {
+        lv_obj_t *format = ft_pages_test_get_storage_format_button();
+        if (format != RT_NULL && lv_obj_is_valid(format) &&
+            !lv_obj_has_state(format, LV_STATE_DISABLED))
+        {
+            lv_obj_t *control;
+            (void)test_click(format, "settings.storage.confirm", "stage 1");
+            test_record(ft_pages_test_storage_confirm_stage() == 1U &&
+                        ft_pages_test_storage_action_target() == 1U &&
+                        ft_pages_test_get_storage_confirm_cancel() != RT_NULL &&
+                        ft_pages_test_get_storage_confirm_continue() != RT_NULL,
+                        "settings.storage.confirm", "first warning shown");
+            control = ft_pages_test_get_storage_confirm_continue();
+            s_action_count++;
+            if (control != RT_NULL && lv_obj_is_valid(control))
+                (void)lv_obj_send_event(control, LV_EVENT_CLICKED, RT_NULL);
+            test_record(ft_pages_test_storage_confirm_stage() == 2U &&
+                        ft_pages_test_get_storage_confirm_cancel() != RT_NULL,
+                        "settings.storage.confirm", "final warning shown; no erase");
+            control = ft_pages_test_get_storage_confirm_cancel();
+            s_action_count++;
+            if (control != RT_NULL && lv_obj_is_valid(control))
+                (void)lv_obj_send_event(control, LV_EVENT_CLICKED, RT_NULL);
+            test_record(ft_pages_test_storage_confirm_stage() == 0U,
+                        "settings.storage.cancel", "destructive action cancelled");
+        }
+        else
+        {
+            test_record(ft_pages_test_storage_state_valid(),
+                        "settings.storage.gate", "format safely unavailable");
+        }
+        (void)ft_router_back();
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS &&
+                    ft_router_depth() == 2U,
+                    "settings.back", "storage -> settings");
+    }
+    else if (s_control_index == 10U)
+    {
+        (void)test_click(ft_pages_test_get_settings_result(4U),
+                         "settings.open", "USB");
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS_USB &&
+                    ft_router_depth() == 3U &&
+                    ft_pages_test_usb_state_valid(),
+                    "settings.usb", "device-only roles and media-gated functions");
+        (void)ft_router_back();
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS &&
+                    ft_router_depth() == 2U,
+                    "settings.back", "USB -> settings");
+    }
+    else if (s_control_index == 11U)
+    {
+        (void)test_click(ft_pages_test_get_settings_result(5U),
                          "settings.open", "Time & language");
         test_record(ft_router_current_page() == FT_PAGE_SETTINGS_TIME_LANGUAGE &&
                     ft_router_depth() == 3U &&
@@ -291,7 +387,7 @@ static void run_settings_test(void)
                     ft_pages_test_get_language_button(0U) != RT_NULL,
                     "settings.time_language", "format, time zone and language controls");
     }
-    else if (s_control_index == 9U)
+    else if (s_control_index == 12U)
     {
         (void)test_click(ft_pages_test_get_time_format_button(1U),
                          "settings.time_format", "12-hour");
@@ -302,7 +398,7 @@ static void run_settings_test(void)
         test_record(preferences->use_24_hour,
                     "settings.time_format.restore", "24-hour restored");
     }
-    else if (s_control_index == 10U)
+    else if (s_control_index == 13U)
     {
         lv_obj_t *dropdown = ft_pages_test_get_timezone_dropdown();
         uint32_t timezone_index = 2U;
@@ -317,14 +413,14 @@ static void run_settings_test(void)
         test_record(preferences->timezone_offset_minutes == 480,
                     "settings.timezone.restore", "UTC+08:00 restored");
     }
-    else if (s_control_index == 11U)
+    else if (s_control_index == 14U)
     {
         (void)test_click(ft_pages_test_get_language_button(FT_LANGUAGE_EN_US),
                          "settings.language", "English");
         test_record(preferences->language == FT_LANGUAGE_EN_US,
                     "settings.language.state", "English selected");
     }
-    else if (s_control_index == 12U)
+    else if (s_control_index == 15U)
     {
         test_record(preferences->language == FT_LANGUAGE_EN_US &&
                     ft_router_current_page() == FT_PAGE_SETTINGS_TIME_LANGUAGE &&
@@ -336,7 +432,7 @@ static void run_settings_test(void)
         test_record(preferences->language == FT_LANGUAGE_ZH_CN,
                     "settings.language.state", "Simplified Chinese selected");
     }
-    else if (s_control_index == 13U)
+    else if (s_control_index == 16U)
     {
         test_record(preferences->language == FT_LANGUAGE_ZH_CN &&
                     ft_router_current_page() == FT_PAGE_SETTINGS_TIME_LANGUAGE &&
@@ -344,16 +440,16 @@ static void run_settings_test(void)
                     ft_ui_test_language_surface(FT_LANGUAGE_ZH_CN),
                     "settings.language.surface", "Chinese applied to pages, tiles and shell");
     }
-    else if (s_control_index == 14U)
+    else if (s_control_index == 17U)
     {
         (void)ft_router_back();
         test_record(ft_router_current_page() == FT_PAGE_SETTINGS &&
                     ft_router_depth() == 2U,
                     "settings.back", "time & language -> settings");
     }
-    else if (s_control_index == 15U)
+    else if (s_control_index == 18U)
     {
-        (void)test_click(ft_pages_test_get_settings_result(5U),
+        (void)test_click(ft_pages_test_get_settings_result(7U),
                          "settings.open", "System information");
         test_record(ft_router_current_page() == FT_PAGE_SYSTEM &&
                     ft_router_depth() == 3U &&
@@ -364,9 +460,9 @@ static void run_settings_test(void)
                     ft_router_depth() == 2U,
                     "settings.back", "system information -> settings");
     }
-    else if (s_control_index == 16U)
+    else if (s_control_index == 19U)
     {
-        (void)test_click(ft_pages_test_get_settings_result(6U),
+        (void)test_click(ft_pages_test_get_settings_result(8U),
                          "settings.open", "About FeatherTalk");
         test_record(ft_router_current_page() == FT_PAGE_ABOUT &&
                     ft_router_depth() == 3U,
@@ -376,9 +472,9 @@ static void run_settings_test(void)
                     ft_router_depth() == 2U,
                     "settings.back", "about -> settings");
     }
-    else if (s_control_index == 17U)
+    else if (s_control_index == 20U)
     {
-        (void)test_click(ft_pages_test_get_settings_result(4U),
+        (void)test_click(ft_pages_test_get_settings_result(6U),
                          "settings.open", "Personalization");
         test_record(ft_router_current_page() == FT_PAGE_SETTINGS_PERSONALIZATION &&
                     ft_router_depth() == 3U,
@@ -485,7 +581,10 @@ static void run_files_test(void)
     {
         test_record(ft_pages_test_files_browser_ready(), "files.browser",
                     "path/status/up/refresh/list/mount monitor");
-        test_record(ft_pages_test_files_at_root(), "files.root", "/sdcard");
+        test_record(ft_pages_test_files_at_root(), "files.root",
+                    "/ with flash and sdcard device directories");
+        test_record(ft_pages_test_files_entry_count() >= 2U,
+                    "files.devices", "flash + sdcard entries");
         s_files_before = ft_pages_test_files_refresh_count();
         (void)test_click(ft_pages_test_get_files_refresh_button(), "files.refresh", RT_NULL);
         test_record(ft_pages_test_files_refresh_count() == s_files_before + 1U,

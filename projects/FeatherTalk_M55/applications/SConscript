@@ -4,7 +4,8 @@ import os
 
 cwd  = GetCurrentDir()
 common_path = os.path.normpath(os.path.join(cwd, '..', '..', 'FeatherTalk_Common', 'include'))
-path = [cwd, common_path]
+board_path = os.path.normpath(os.path.join(cwd, '..', '..', '..', 'libraries', 'Common', 'board'))
+path = [cwd, common_path, board_path]
 src  = Glob('*.c')
 
 group = DefineGroup('Applications', src, depend = [''], CPPPATH = path)

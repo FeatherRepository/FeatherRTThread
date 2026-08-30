@@ -338,7 +338,7 @@
 
 ## 已知边界
 
-- 电池、电源采样、Wi-Fi/网络、蓝牙、屏幕旋转和 USB 的板级驱动尚未在产品配置中启用；SD 卡已经通过 SDHC1/Elm-FatFS 接入 `/sdcard`。UI 与 ABI 4 IPC 已具备无线能力、启用、连接和 Wi-Fi 信号强度接入点，并明确显示不可用。显示亮度已经接入 M55 `pwm18`。
+- 电池、电源采样、Wi-Fi/网络、蓝牙和屏幕旋转的板级驱动尚未在产品配置中启用；SD 卡已经通过 SDHC1/Elm-FatFS 接入 `/sdcard`，末尾固定 2 MiB 外部 Flash 作为 `/flash` FAT 用户盘，USB Device MSC 使用 Flash/SD 双 LUN。UI 与 ABI 4 IPC 已具备无线能力、启用、连接和 Wi-Fi 信号强度接入点，并明确显示不可用。显示亮度已经接入 M55 `pwm18`。
 - 当前偏好仅在本次启动期间保存，这是原计划要求的“内存桩”；持久化需要后续选定 FlashDB/EasyFlash 或产品配置服务。
 - 自动测试宏当前为板级验收而启用；发布固件应关闭 `CONFIG_FEATHERTALK_UI_TEST_MODE`。
 
@@ -376,10 +376,37 @@
 - System 信息页同步显示 SDHC1 驱动就绪或真实 `/sdcard` 容量，不再把 SDHC/filesystem 列为未启用。当前只承诺 FAT12/FAT16/FAT32，不伪造 exFAT 支持，也不会自动格式化用户介质。
 - 真机识别 30,591,488 KiB SD 卡并自动挂载设备 `sd`；实际读取 `extlinux/`、`rockchip/` 与 50,924,032 字节 `Image`。`sdcard_umount` 后再 `sdcard_mount` 成功并得到相同目录。
 - 最终构建为 text=3,233,976、data=5,048、bss=4,312,356 字节；HEX 9,110,678 字节，SHA-256 `D90DCA04A1A335098CECF14D32A263810A2F3C4A86FD727AB97054C976D39F61`。Infineon Customized OpenOCD 写入 3,244,032 字节并校验 3,239,024 字节。板端全量自动化为 `262 PASS / 0 FAIL / 120 actions`，最终日志为 `tools/freather/serial-monitor/logs/sdcard-files-final-board.log`，启动/自动挂载日志为 `sdcard-boot.log`，卸载重挂载日志为 `sdcard-unmount-remount.log`，最终目录复核为 `sdcard-files-final-list.log`。
-- USB 进入第二阶段：复用同一存储模型，以 CherryUSB Host MSC + DFS 接入 U 盘；在确认 Type-C Host VBUS/角色路径、独立挂载点和 RT-Thread 适配层断开安全前仍明确标记未启用。详细设计与验收记录见 `applications/STORAGE_INTEGRATION_zh.md`。
+- USB 进入第二阶段时先按原理图结论实现 Device MSC；Host 所需 VBUS/角色路径尚不具备，因此不开放 Host。详细设计与验收记录见 `applications/STORAGE_INTEGRATION_zh.md`。
 
 ## 2026-08-30 Files 页面间隔号占位符修复
 
 - Files 已挂载状态使用的间隔号 `·`（U+00B7）不属于原字库脚本收集的中日韩标点区，Montserrat ASCII fallback 也不含该字符，因此状态行中的两个间隔号显示成方框；SD 目录内容和 UTF-8 解码本身没有异常。
 - 字体生成器现显式收集 U+00B7，并重新生成 12/14/16/22 px 四档 Noto Sans SC 字体。产品字形总数从 6771 增至 6772，生成文件均能检索到 U+00B7；同时把“改文案后必须重建字库”的约束补入资源策略。
 - 修复固件构建为 text=3,234,072、data=5,048、bss=4,312,356 字节；HEX 9,110,948 字节，SHA-256 `A8AA9DC1E501D5C262C3A1D3E68D6CE5BB7E054752EA3672338D2E19485CAE7E`。Infineon Customized OpenOCD 写入 3,244,032 字节并校验 3,239,120 字节；真实 SD 卡仍自动挂载，Files 根目录检查通过，板端全量回归为 `262 PASS / 0 FAIL / 120 actions`、耗时 52,305 ms。日志：`tools/freather/serial-monitor/logs/files-font-board-test.log`。
+
+## 2026-08-30 USB Device MSC 与设置页
+
+- Settings 新增独立 USB 分类。角色固定为设备；主机模式因板级 VBUS/角色路径未完成而禁用。设备功能列出 USB 存储器和 USB Audio (UAC)，其中 UAC 明确禁用，留待音频链路阶段实现。
+- USB 存储器只在真实 SD 卡已挂载时可选。启动流程先从本机 FatFS 安全卸载 `/sdcard`，把 `sd` 块设备独占交给 CherryUSB Device MSC；停止后再关闭 USB、释放块设备并恢复本机挂载，避免主机与设备并发修改 FAT。
+- 真机已经启动 MSC，串口报告 `FeatherTalk USB Device MSC started: sd, 61182976 x 512 bytes`。设置页的结构、禁用态和生命周期加入全量自动测试；本轮基线为 `265 PASS / 0 FAIL / 121 actions`，耗时 57,313 ms。
+- 新 USB 页面使用了弯引号 `“ ”`（U+201C/U+201D），旧字库采集规则未覆盖 Unicode 通用标点，因而显示占位符。字体生成器现自动纳入 U+2000..U+206F，并重新生成 12/14/16/22 px 四档字体；当前集合为 6,774 个字形，四个生成字体均验证包含 U+201C/U+201D。
+- 增加 `feather_usb status/storage/stop` MSH 诊断命令，复用 UI 的同一套独占导出和恢复挂载路径。状态输出包含连接、枚举、介质、块参数以及读写次数/字节数/最大传输长度，便于性能和异常定位。
+- 首轮 512 字节 MSC 缓冲的 64 MiB WriteThrough 顺序写只有 `0.213 MiB/s`。产品配置改为 64 KiB 后，板端记录到最大 65,536 字节单次 I/O，同一测试提升到 `4.741 MiB/s`（约 22.3 倍）。通过 Windows 安全弹出、停止并重新启动 MSC 清除文件缓存后，64 MiB 顺序读为 `10.098 MiB/s`；读写 SHA-256 均为 `EEEEA29F19E99097AFF081C75A85115C7732967D5824201DDBA0D2D1F6202723`。测试文件已删除，最终 `/sdcard` 重挂载并通过目录检查。
+- 最终性能版构建为 text=3,287,448、data=72,480、bss=4,245,108 字节；64 KiB DMA 缓冲从普通 BSS 移入 USB 数据段，总 RAM 占用基本不变。HEX 为 9,450,761 字节，SHA-256 `26D50175D24C4EA8C1712054FDBAEEF2C24687BF9D2952A954E3FCF0FADEBCEA`。OpenOCD 写入/校验 M55 3,362,816 / 3,359,928 字节，M33 167,936 / 160,536 字节；板端全量回归为 `265 PASS / 0 FAIL / 121 actions`、耗时 57,215 ms。
+
+## 2026-08-30 SD 磁盘管理与安全格式化
+
+- Settings 新增独立且始终可见的“存储”分类与不复用的 SD 卡图标。未插卡时明确显示卡槽可用、介质未插入，格式化按钮禁用并继续定时检测；不会因为无卡而隐藏入口或把无介质误报为驱动故障。
+- 新增 `board_storage.h` 和产品层磁盘信息结构：从物理 `sd` 读取真实容量、扇区/擦除块、MBR/GPT 分区表，再与 DFS `/sdcard` 的文件系统、卷容量、已用/可用空间合并展示。USB 占用期间不碰原始分区表，避免与主机写入竞争。
+- USB MSC 的所有权移交固定导出完整物理 `sd`，电脑端可以直接删除/创建分区及格式化整卡；安全弹出并停止 USB 存储后，设备重新读取当前布局并恢复本机挂载。
+- 设备端提供整卡 FAT 格式化。两层模态确认分别说明“删除全部分区”和“不可撤销”，最终确认后才由后台线程卸载、格式化、重挂载；USB 占用、状态切换或文件句柄导致卸载失败时拒绝擦写。MSH 同样改为必须输入 `sdcard_mkfs ERASE-ALL`。
+- 自动测试覆盖分类路由、无卡/有卡禁用态、两层确认和取消路径，但绝不点击最终擦除按钮。当前 FatFS 支持 FAT12/16/32，不宣称 exFAT；约 31 GB 介质整盘格式化时由 FatFs 选择 FAT32。
+
+## 2026-08-30 双存储设备选择与容量视图
+
+- Storage 设置页由两段设备长文本重构为“设备卡片 + 所选设备详情”。内置 Flash 与 SD 卡各有独立且不复用的设备图标；在 480×800 竖屏中两张卡片并排显示，紧凑布局自动改为纵向排列。点击任一卡片后，强调色边框、状态、容量视图和操作按钮同步切换到该设备。
+- 主页面只保留设备名、物理容量、挂载状态、文件系统与挂载点等必要信息。所选卷使用真实 `statfs` 数据绘制已用/可用比例条，并显示大号容量值；未挂载、被 USB 占用或容量不可观测时明确显示不可用，不把未知空间误画成全部可用，也不把单卷剩余量误称为整张物理介质的剩余量。
+- “浏览文件”按稳定设备枚举进入 `/flash` 或 `/sdcard`，不从本地化显示文字推导路径。格式化操作同样按当前设备独立工作：Flash 只影响外部 Flash 末尾固定 2 MiB 用户卷，SD 才是整卡格式化；第一次确认时即锁定目标，后续切换设备也不会改变待格式化对象。两者均保留两级破坏性操作确认，自动测试只检查确认与取消路径，不执行最终擦除。
+- 新增设备数、所选设备、操作目标、容量轨道和容量比例的测试接口，并把新增对象全部纳入路由销毁检查。板端专项测试覆盖 Flash/SD 独立选择、容量图形、浏览与格式化目标、Flash/SD 两级确认取消以及 Files 根目录的两个设备入口。
+- 最终 M55 构建为 text=3,382,340、data=72,600、bss=4,245,588 字节；HEX 9,717,996 字节，SHA-256 `85F03F7B3F82EFDA7F5284712882DDA63A5F89BB45BF1CBCDCA1311430884EAA`。Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 写入 M55 3,457,024 字节并校验 3,454,940 字节，随后写入签名 M33 167,936 字节并校验 160,536 字节；M55 擦除范围止于 `0x608FFFFF`，未触碰 `0x60E00000` 起始的固定 2 MiB 用户卷。
+- 全量板端自动化为 `281 PASS / 0 FAIL / 129 actions`，耗时 58,150 ms；最终 route-depth=1、路由对象增量为 0、IPC err=0。`/flash` 与 `/sdcard` 均可从 MSH 正常列目录。完整日志：`tools/freather/logs/storage-ui-device-view-final-board.log`；最终状态与双卷目录复核：`tools/freather/logs/storage-ui-device-view-final-status.log`。

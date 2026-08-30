@@ -72,6 +72,10 @@ menu "Onboard Peripheral Drivers"
                     select RT_CHERRYUSB_DEVICE
                     select RT_CHERRYUSB_DEVICE_CDC_ACM
 
+                config BSP_USB_ROLE_DEVICE_CUSTOM
+                    bool "Device (application managed)"
+                    select RT_CHERRYUSB_DEVICE
+
                 config BSP_USB_ROLE_HOST_MSC
                     bool "Host MSC"
                     select RT_CHERRYUSB_HOST

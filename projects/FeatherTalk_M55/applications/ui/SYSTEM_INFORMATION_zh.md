@@ -65,7 +65,8 @@ M55 内部堆的 total/current/peak 来自 RT-Thread `rt_memory_info()`，不是
 | M33 Secure | 2 MiB + 256 KiB trailer | 安全镜像槽及升级 trailer |
 | M33 Non-secure | 2 MiB + 256 KiB trailer | `0x60340000` 起的 M33 产品镜像槽 |
 | M55 | 8 MiB + 256 KiB trailer | `0x60580000` 起的 M55 XIP 镜像槽 |
-| 当前未分配 | 2.25 MiB | 物理 Flash 中未被上述链接窗口占用的尾部容量 |
+| 保留间隙 | 256 KiB | M55 trailer 后的板级保留区，不作为文件系统 |
+| FeatherTalk 用户盘 | 2 MiB | 固定 `0x60E00000..0x61000000`，FAT 挂载到 `/flash` |
 
 System 页中的 M55 “used”不是 HEX 文件大小，而是链接器导出的
 `__m55_image_start__` 到 `__m55_image_end__` 实际占用跨度，包含 1 KiB

@@ -1,5 +1,6 @@
 #include <rtthread.h>
 #include <string.h>
+#include "board_storage.h"
 #include "feathertalk_storage.h"
 
 #ifdef RT_USING_DFS
@@ -41,6 +42,108 @@ int ft_storage_get_volume(const char *mount_path,
     return RT_EOK;
 }
 
+int ft_storage_get_device_info(ft_storage_device_info_t *info)
+{
+    board_sdcard_info_t board_info;
+    ft_storage_volume_info_t volume;
+    size_t copy_count;
+    size_t index;
+    int result;
+
+    if (info == RT_NULL) return -RT_EINVAL;
+    rt_memset(info, 0, sizeof(*info));
+    result = board_sdcard_get_info(&board_info);
+    if (result != RT_EOK) return result;
+
+    info->present = board_info.present;
+    info->mounted = board_info.mounted;
+    info->usb_exported = board_info.exported;
+    info->busy = board_info.transitioning;
+    info->can_format = board_info.present && !board_info.exported &&
+                       !board_info.transitioning;
+    info->partition_truncated = board_info.partition_truncated;
+    rt_strncpy(info->device, board_info.device_name,
+               sizeof(info->device) - 1U);
+    rt_strncpy(info->mounted_device, board_info.mounted_device,
+               sizeof(info->mounted_device) - 1U);
+    info->sector_count = board_info.sector_count;
+    info->bytes_per_sector = board_info.bytes_per_sector;
+    info->erase_block_size = board_info.erase_block_size;
+    info->total_bytes = board_info.sector_count *
+                        (uint64_t)board_info.bytes_per_sector;
+    info->partition_scheme =
+        (ft_storage_partition_scheme_t)board_info.partition_scheme;
+    info->partition_count = board_info.partition_count;
+    copy_count = board_info.partition_count;
+    if (copy_count > FT_STORAGE_MAX_PARTITIONS)
+        copy_count = FT_STORAGE_MAX_PARTITIONS;
+    for (index = 0U; index < copy_count; index++)
+    {
+        info->partitions[index].first_sector =
+            board_info.partitions[index].first_sector;
+        info->partitions[index].sector_count =
+            board_info.partitions[index].sector_count;
+        info->partitions[index].mbr_type =
+            board_info.partitions[index].mbr_type;
+    }
+
+    if (ft_storage_get_volume(FT_STORAGE_SD_MOUNT_PATH, &volume) == RT_EOK)
+    {
+        info->mounted = true;
+        rt_strncpy(info->filesystem, volume.filesystem,
+                   sizeof(info->filesystem) - 1U);
+        info->volume_total_bytes = volume.total_bytes;
+        info->volume_free_bytes = volume.free_bytes;
+    }
+    return RT_EOK;
+}
+
+int ft_storage_format_sd(void)
+{
+    return board_sdcard_format_fat();
+}
+
+int ft_storage_get_flash_info(ft_storage_device_info_t *info)
+{
+    board_flash_storage_info_t board_info;
+    ft_storage_volume_info_t volume;
+    int result;
+
+    if (info == RT_NULL) return -RT_EINVAL;
+    rt_memset(info, 0, sizeof(*info));
+    result = board_flash_storage_get_info(&board_info);
+    if (result != RT_EOK) return result;
+    info->present = board_info.present;
+    info->mounted = board_info.mounted;
+    info->usb_exported = board_info.exported;
+    info->busy = board_info.transitioning;
+    info->can_format = board_info.present && !board_info.exported &&
+                       !board_info.transitioning;
+    rt_strncpy(info->device, board_info.device_name,
+               sizeof(info->device) - 1U);
+    rt_strncpy(info->mounted_device, board_info.device_name,
+               sizeof(info->mounted_device) - 1U);
+    info->sector_count = board_info.sector_count;
+    info->bytes_per_sector = board_info.bytes_per_sector;
+    info->erase_block_size = board_info.erase_block_size;
+    info->total_bytes = board_info.sector_count *
+                        (uint64_t)board_info.bytes_per_sector;
+    if (ft_storage_get_volume(FT_STORAGE_FLASH_MOUNT_PATH, &volume) == RT_EOK)
+    {
+        info->mounted = true;
+        rt_strncpy(info->filesystem, volume.filesystem,
+                   sizeof(info->filesystem) - 1U);
+        info->volume_total_bytes = volume.total_bytes;
+        info->volume_free_bytes = volume.free_bytes;
+    }
+    return RT_EOK;
+}
+
+int ft_storage_format_flash(void)
+{
+    return board_flash_storage_format_fat();
+}
+
 int ft_storage_join_path(const char *parent, const char *name,
                          char *path, size_t path_size)
 {
@@ -68,6 +171,16 @@ bool ft_storage_parent_path(char *path, const char *mount_path)
     if (path == RT_NULL || mount_path == RT_NULL)
         return false;
     root_length = strlen(mount_path);
+    if (root_length == 1U && mount_path[0] == '/')
+    {
+        if (path[0] != '/' || path[1] == '\0') return false;
+        separator = strrchr(path, '/');
+        if (separator == path)
+            path[1] = '\0';
+        else if (separator != RT_NULL)
+            *separator = '\0';
+        return separator != RT_NULL;
+    }
     if (strncmp(path, mount_path, root_length) != 0 ||
         (path[root_length] != '\0' && path[root_length] != '/'))
         return false;
@@ -197,6 +310,28 @@ int ft_storage_get_volume(const char *mount_path,
 {
     RT_UNUSED(mount_path);
     if (info != RT_NULL) rt_memset(info, 0, sizeof(*info));
+    return -RT_ENOSYS;
+}
+
+int ft_storage_get_device_info(ft_storage_device_info_t *info)
+{
+    if (info != RT_NULL) rt_memset(info, 0, sizeof(*info));
+    return -RT_ENOSYS;
+}
+
+int ft_storage_format_sd(void)
+{
+    return -RT_ENOSYS;
+}
+
+int ft_storage_get_flash_info(ft_storage_device_info_t *info)
+{
+    if (info != RT_NULL) rt_memset(info, 0, sizeof(*info));
+    return -RT_ENOSYS;
+}
+
+int ft_storage_format_flash(void)
+{
     return -RT_ENOSYS;
 }
 

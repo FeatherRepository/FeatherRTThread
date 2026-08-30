@@ -27,6 +27,12 @@ extern struct fal_flash_dev nor_flash0;
 /* ====================== Partition Configuration ========================== */
 #ifdef FAL_PART_HAS_TABLE_CFG
 /* partition table */
+#ifdef FEATHERTALK_USING_FLASH_STORAGE
+#define FAL_PART_TABLE                                                                      \
+{                                                                                           \
+    {FAL_PART_MAGIC_WORD, "filesystem",     NOR_FLASH_DEV_NAME,        0, 2*1024*1024, 0}, \
+}
+#else
 #define FAL_PART_TABLE                                                                      \
 {                                                                                           \
     {FAL_PART_MAGIC_WORD, "whd_firmware",   NOR_FLASH_DEV_NAME,        0,  384*1024, 0},    \
@@ -35,6 +41,7 @@ extern struct fal_flash_dev nor_flash0;
     {FAL_PART_MAGIC_WORD, "bt_image",       NOR_FLASH_DEV_NAME,  0x80000,  512*1024, 0},    \
     {FAL_PART_MAGIC_WORD, "filesystem",     NOR_FLASH_DEV_NAME, 0x100000, 1024*1024, 0},    \
 }
+#endif
 #endif /* FAL_PART_HAS_TABLE_CFG */
 
 #endif /* _FAL_CFG_H_ */

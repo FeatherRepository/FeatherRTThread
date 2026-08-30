@@ -41,11 +41,15 @@
     {"id": "wifi_settings", "group": "settings", "reference": "board Wi-Fi configuration", "redesign": "clean symmetric three-level Wi-Fi outline without control overlays"},
     {"id": "bluetooth_settings", "group": "settings", "reference": "board Bluetooth configuration", "redesign": "outline rune in a circular settings badge without control overlays"},
     {"id": "time_language", "group": "settings", "reference": "time, time-zone and language configuration", "redesign": "combined neutral clock and globe outline"},
+    {"id": "usb", "group": "settings", "reference": "USB role and device-function configuration", "redesign": "neutral USB topology outline"},
+    {"id": "sd_storage", "group": "settings", "reference": "SD media and partition management", "redesign": "distinct SD card outline with storage bay"},
     {"id": "storage", "group": "system", "reference": "functional storage summary", "redesign": "neutral drive outline"},
     {"id": "external_memory", "group": "system", "reference": "external HyperRAM summary", "redesign": "external RAM module outline"},
     {"id": "onchip_memory", "group": "system", "reference": "on-chip RAM summary", "redesign": "memory blocks inside a chip"},
     {"id": "processor", "group": "system", "reference": "processor summary", "redesign": "processor core inside a pinned package"},
     {"id": "media_pattern", "group": "apps", "reference": "Media live Tile decoration", "redesign": "neutral audio waveform"},
-    {"id": "tile_pattern", "group": "controls", "reference": "mutable Tile pattern test", "redesign": "neutral dot grid"}
+    {"id": "tile_pattern", "group": "controls", "reference": "mutable Tile pattern test", "redesign": "neutral dot grid"},
+    {"id": "flash_device", "group": "storage", "reference": "fixed internal Flash volume", "redesign": "drive outline with Flash mark"},
+    {"id": "sd_device", "group": "storage", "reference": "removable SD media", "redesign": "SD card outline with ready mark"}
   ]
 }

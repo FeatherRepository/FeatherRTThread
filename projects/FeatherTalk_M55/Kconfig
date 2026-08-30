@@ -43,6 +43,33 @@ config FEATHERTALK_USING_UI_SHELL
         Build the product-owned 480 x 800 shell, bounded page router, and
         application registry instead of starting an upstream LVGL demo.
 
+config FEATHERTALK_USING_FLASH_STORAGE
+    bool "Enable fixed 2 MiB internal Flash storage"
+    depends on BSP_USING_FILESYSTEM
+    select BSP_USING_FLASH
+    default y
+    help
+        Reserve the final 2 MiB of the external QSPI NOR Flash
+        (0x60E00000..0x61000000) as a product-owned FAT volume.  This region
+        is outside the M55 XIP image and its signed trailer, so firmware
+        updates that retain the board linker layout do not overwrite it.
+
+config FEATHERTALK_USING_USB_MSC
+    bool "Enable FeatherTalk USB Device Flash + SD storage"
+    depends on BSP_USING_USB && BSP_USB_ROLE_DEVICE_CUSTOM
+    depends on BSP_USING_SDCARD
+    depends on FEATHERTALK_USING_FLASH_STORAGE
+    select RT_CHERRYUSB_DEVICE_SPEED_HS
+    select RT_CHERRYUSB_DEVICE_DWC2_INFINEON
+    select RT_CHERRYUSB_DEVICE_MSC
+    default y
+    help
+        Let the USB settings page transfer exclusive ownership of the internal
+        Flash and SD card between local DFS and a two-LUN CherryUSB Device MSC
+        function. USB Host is not supported by this board revision. USB Audio
+        is listed in the UI but is intentionally disabled until the audio path
+        is integrated.
+
 config FEATHERTALK_UI_TEST_MODE
     bool "Enable automatic FeatherTalk UI interaction test"
     depends on FEATHERTALK_USING_UI_SHELL

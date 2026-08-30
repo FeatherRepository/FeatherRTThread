@@ -35,6 +35,6 @@ python .\tools\freather\ui-asset-convert.py icon.png icon.c --name ft_icon --for
 python .\tools\freather\ui-asset-convert.py background.png background.c --name ft_background --format rgb565
 ```
 
-中文界面使用 Noto Sans SC 生成的 12/14/16/22 px 静态字体。修改界面文案后必须执行 `tools\freather\fonts\build-ui-fonts.cmd`，把 GB2312 基础字形以及源码实际使用的中文标点、全角字符、间隔号 `·` 和省略号 `…` 同步进四档字体；不得假设普通固件构建会自动更新字形集合。
+中文界面使用 Noto Sans SC 生成的 12/14/16/22 px 静态字体。修改界面文案后必须执行 `tools\freather\fonts\build-ui-fonts.cmd`，把 GB2312 基础字形以及源码实际使用的 CJK 标点、Unicode 通用标点、全角字符和间隔号 `·` 同步进四档字体；不得假设普通固件构建会自动更新字形集合。新增的弯引号 `“ ”` 等通用标点必须通过同一生成链路进入固件，页面代码不得依赖 Montserrat fallback 猜测非 ASCII 字符是否存在。
 
 评审时同时记录源文件许可证、转换参数、生成尺寸和固件体积增量。参考项目中的资源只有在许可证和产品用途均明确后才可迁入。新增常用图标时必须先扩展 SVG、清单和 `ft_icon_id_t`，页面代码不得重新引入散落的 `LV_SYMBOL_*` 或固定 PNG 图标。

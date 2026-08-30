@@ -1,7 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <polygon points="7,9 11,5 18,12 14,16"/>
-  <polyline points="3,9 3,5 7,5"/>
-  <polyline points="3,5 6,2.5 10,2.5"/>
-  <polyline points="21,15 21,19 17,19"/>
-  <polyline points="21,19 18,21.5 14,21.5"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <!-- The phone and the two corner arrows share the same 12,12 centre.
+       The lower-right arrow is an exact 180-degree rotation of the upper-left. -->
+  <polygon points="6.3,10.6 10.6,6.3 17.7,13.4 13.4,17.7"/>
+  <polyline points="9,3 5,3 3,5 3,9"/>
+  <polyline points="1,7 3,9 5,7"/>
+  <polyline points="15,21 19,21 21,19 21,15"/>
+  <polyline points="19,17 21,15 23,17"/>
 </svg>

@@ -8,6 +8,7 @@
 #include "lvgl.h"
 #include "feathertalk_ui_icons.h"
 #include "feathertalk_ui_layout.h"
+#include "feathertalk_usb.h"
 
 typedef enum
 {
@@ -22,6 +23,8 @@ typedef enum
     FT_PAGE_SETTINGS_DISPLAY,
     FT_PAGE_SETTINGS_WIFI,
     FT_PAGE_SETTINGS_BLUETOOTH,
+    FT_PAGE_SETTINGS_STORAGE,
+    FT_PAGE_SETTINGS_USB,
     FT_PAGE_SETTINGS_TIME_LANGUAGE,
     FT_PAGE_SETTINGS_PERSONALIZATION,
     FT_PAGE_COUNT
@@ -254,6 +257,22 @@ size_t ft_pages_test_settings_count(void);
 size_t ft_pages_test_settings_visible_count(void);
 ft_page_id_t ft_pages_test_settings_page_id(size_t index);
 lv_obj_t *ft_pages_test_get_settings_brightness(void);
+lv_obj_t *ft_pages_test_get_usb_role_button(ft_usb_role_t role);
+lv_obj_t *ft_pages_test_get_usb_function_button(ft_usb_function_t function);
+lv_obj_t *ft_pages_test_get_usb_stop_button(void);
+bool ft_pages_test_usb_state_valid(void);
+lv_obj_t *ft_pages_test_get_storage_format_button(void);
+lv_obj_t *ft_pages_test_get_storage_browse_button(void);
+lv_obj_t *ft_pages_test_get_storage_device_button(size_t index);
+size_t ft_pages_test_storage_device_count(void);
+size_t ft_pages_test_storage_selected_device(void);
+size_t ft_pages_test_storage_action_target(void);
+lv_obj_t *ft_pages_test_get_storage_capacity_track(void);
+bool ft_pages_test_storage_visual_valid(void);
+lv_obj_t *ft_pages_test_get_storage_confirm_cancel(void);
+lv_obj_t *ft_pages_test_get_storage_confirm_continue(void);
+uint8_t ft_pages_test_storage_confirm_stage(void);
+bool ft_pages_test_storage_state_valid(void);
 lv_obj_t *ft_pages_test_get_time_format_button(size_t index);
 lv_obj_t *ft_pages_test_get_timezone_dropdown(void);
 lv_obj_t *ft_pages_test_get_language_button(size_t index);

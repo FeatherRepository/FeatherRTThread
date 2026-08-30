@@ -106,10 +106,13 @@
 #define RT_USING_DFS_DEVFS
 #define RT_USING_DFS_ROMFS
 /* end of DFS: device virtual file system */
+#define RT_USING_FAL
+#define FAL_PART_HAS_TABLE_CFG
 
 /* Device Drivers */
 
 #define RT_USING_DEVICE_IPC
+#define RT_USING_MTD_NOR
 #define RT_UNAMED_PIPE_NUMBER 64
 #define RT_USING_SERIAL
 #define RT_USING_SERIAL_V1
@@ -384,6 +387,8 @@
 /* Onboard Peripheral Drivers */
 
 #define BSP_USING_USB_TO_UART
+#define BSP_USING_USB
+#define BSP_USB_ROLE_DEVICE_CUSTOM
 #define BSP_USING_LCD
 #define COMPONENT_MTB_DISPLAY_tl043wvv02
 #define M55_BSP_LCD_ROTATION_0
@@ -397,6 +402,8 @@
 #define BSP_LVGL_ENABLE_CPU_CACHE
 #define BSP_LVGL_DEMO_MUSIC
 #define FEATHERTALK_USING_UI_SHELL
+#define FEATHERTALK_USING_FLASH_STORAGE
+#define FEATHERTALK_USING_USB_MSC
 #define FEATHERTALK_UI_TEST_MODE
 #define BSP_LVGL_DRAW_BUF_LINES 800
 /* end of Onboard Peripheral Drivers */
@@ -420,11 +427,30 @@
 #define BSP_USING_SDIO1
 #define BSP_USING_FILESYSTEM
 #define BSP_USING_SDCARD
+#define BSP_USING_FLASH
+#define BSP_USING_LITTLEFS
+#define LFS_READ_SIZE 256
+#define LFS_PROG_SIZE 256
+#define LFS_BLOCK_SIZE 4096
+#define LFS_CACHE_SIZE 256
+#define LFS_BLOCK_CYCLES -1
+#define LFS_THREADSAFE
+#define LFS_LOOKAHEAD_MAX 128
+#define RT_DEF_LFS_DRIVERS 1
 /* end of On-chip Peripheral Drivers */
 
 /* Board extended module Drivers */
 
 /* end of Board extended module Drivers */
 /* end of Hardware Drivers Config */
+
+#define RT_USING_CHERRYUSB
+#define RT_CHERRYUSB_DEVICE
+#define RT_CHERRYUSB_DEVICE_SPEED_HS
+#define RT_CHERRYUSB_DEVICE_DWC2_INFINEON
+#define RT_CHERRYUSB_DEVICE_MSC
+#define CONFIG_USBDEV_REQUEST_BUFFER_LEN 512
+#define CONFIG_USBDEV_MSC_MAX_BUFSIZE 65536
+#define RT_CHERRYUSB_DEVICE_TEMPLATE_NONE
 
 #endif
