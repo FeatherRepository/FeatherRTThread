@@ -1,0 +1,121 @@
+import os
+
+from building import *
+
+cwd = GetCurrentDir()
+src = ['feathertalk_bt_host.c']
+path = [cwd, os.path.join(cwd, 'rtos')]
+defines = []
+libs = []
+libpath = []
+
+# Apache-2.0 HCI-UART integration sources are vendored and patched locally.
+# Never include or compile a C file from a directory outside this repository.
+integration_root = os.path.join(cwd, 'vendor', 'infineon', 'hci_uart')
+integration_common = os.path.join(integration_root, 'common')
+integration_include = os.path.join(integration_root, 'include')
+integration_hal = os.path.join(integration_root, 'platform_hal_wrappers')
+integration_os = os.path.join(integration_root, 'rtos')
+
+# EULA-governed BTSTACK and controller firmware remain official Infineon git
+# submodules. They live below this repository at fixed revisions instead of
+# being found through a developer-machine absolute path.
+third_party_root = os.path.join(cwd, 'third_party', 'infineon')
+btstack_root = os.path.join(third_party_root, 'btstack')
+firmware_root = os.path.join(third_party_root, 'bt-fw-ifx-cyw55500a1')
+
+btstack_include = os.path.join(btstack_root, 'wiced_include')
+btstack_lib_dir = os.path.join(
+    btstack_root, 'stack', 'COMPONENT_WICED_BLE', 'COMPONENT_CM33',
+    'COMPONENT_SOFTFP', 'TOOLCHAIN_GCC_ARM')
+btstack_lib = os.path.join(btstack_lib_dir, 'libbtstack.a')
+firmware_source = os.path.join(
+    firmware_root,
+    'COMPONENT_wlbga_iPA_sLNA_ANT0_LHL_XTAL_IN',
+    'btfw.c')
+firmware_build_dir = os.path.normpath(
+    os.path.join(cwd, '..', '..', 'build', 'bluetooth'))
+firmware_build_source = os.path.join(firmware_build_dir, 'btfw.c')
+
+required_assets = [
+    os.path.join(integration_common, 'cybt_platform_main.c'),
+    os.path.join(integration_hal, 'platform_hal_next_wrapper.c'),
+    os.path.join(integration_os, 'cybt_platform_freertos.c'),
+    btstack_lib,
+    os.path.join(btstack_include, 'wiced_bt_stack.h'),
+    firmware_source,
+]
+missing_assets = [asset for asset in required_assets if not os.path.isfile(asset)]
+if missing_assets:
+    print('FeatherTalk Bluetooth dependencies are incomplete:')
+    for asset in missing_assets:
+        print('  missing: ' + asset)
+    print('Initialize the pinned official dependencies from the SDK root:')
+    print('  git submodule update --init --recursive')
+    raise RuntimeError('FeatherTalk Bluetooth official dependencies are missing')
+
+# Keep these source paths relative to this SConscript.  RT-Thread's VariantDir
+# then places every object below projects/FeatherTalk_M33/build instead of
+# writing *.o files beside the vendored, repository-owned sources.
+src += Glob('vendor/infineon/hci_uart/common/*.c')
+src += ['vendor/infineon/hci_uart/platform_hal_wrappers/platform_hal_next_wrapper.c']
+src += ['vendor/infineon/hci_uart/rtos/cybt_platform_freertos.c']
+Command(
+    firmware_build_source,
+    firmware_source,
+    [Mkdir(firmware_build_dir), Copy('$TARGET', '$SOURCE')])
+# Give RT-Thread's DefineGroup a normal File node.  Passing the Command return
+# value through its local-flags source filtering leaves a raw target string in
+# this older SCons integration.
+src += [File(firmware_build_source)]
+src += Glob('rtos/*.c')
+
+path += [
+    btstack_include,
+    integration_common,
+    integration_include,
+    integration_hal,
+    integration_os,
+]
+
+defines += [
+    'FEATHERTALK_BT_FW_PRESENT',
+    'FEATHERTALK_BT_HOST_PRESENT',
+    'COMPONENT_WICED_BLE',
+    'COMPONENT_HCI_UART',
+    'COMPONENT_55500',
+    'COMPILER_GNU',
+    ('configUSE_TICKLESS_IDLE', 0),
+    ('CYBT_PLATFORM_TRACE_ENABLE', 1),
+    ('USE_AIROC_STACK_SMP', 0),
+    # Pairing/key persistence is a later phase. The official stack's default
+    # module initializer otherwise waits for an SMP key callback even though
+    # the SMP adapter is intentionally disabled above.
+    ('ENABLE_SMP_SERVER_MODULE', 0),
+    ('ENABLE_SMP_CLIENT_MODULE', 0),
+    ('ENABLE_CREATE_LOCAL_KEYS', 0),
+    # Use the Infineon BSP download rate for the PatchRAM image, then return
+    # to the conservative feature/runtime baud.
+    ('CYBSP_BT_PLATFORM_CFG_BAUD_DOWNLOAD', 3000000),
+    ('CYBSP_BT_PLATFORM_CFG_BAUD_FEATURE', 115200),
+    ('CYBSP_BT_PLATFORM_CFG_MEM_POOL_BYTES', 8192),
+    ('CYBSP_BT_PLATFORM_CFG_SLEEP_MODE_LP_ENABLED', 0),
+]
+
+libs += ['btstack']
+libpath += [btstack_lib_dir]
+print('FeatherTalk AIROC HCI integration: ' + integration_root)
+print('FeatherTalk AIROC BLE host stack: ' + btstack_lib)
+print('FeatherTalk Bluetooth firmware: ' + firmware_source)
+
+group = DefineGroup(
+    'FeatherTalk Bluetooth',
+    src,
+    depend=[''],
+    CPPPATH=path,
+    CPPDEFINES=defines,
+    LIBS=libs,
+    LIBPATH=libpath,
+    LOCAL_CFLAGS=' -fshort-enums')
+
+Return('group')

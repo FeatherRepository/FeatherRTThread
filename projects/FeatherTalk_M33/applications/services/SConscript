@@ -1,0 +1,10 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+common_path = os.path.normpath(os.path.join(cwd, '..', '..', '..', 'FeatherTalk_Common', 'include'))
+src = Glob('*.c')
+
+group = DefineGroup('FeatherTalk Services', src, depend=[''], CPPPATH=[cwd, common_path])
+
+Return('group')

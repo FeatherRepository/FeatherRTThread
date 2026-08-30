@@ -62,7 +62,8 @@ MEMORY
     m55_data_secondary : ORIGIN = 0x26060000, LENGTH = 0x00160000
     m33_m55_shared : ORIGIN = 0x261C0000, LENGTH = 0x00040000
     gfx_mem : ORIGIN = 0x26200000, LENGTH = 0x00300000
-    m55_allocatable_shared : ORIGIN = 0x240FF000, LENGTH = 0x00001000
+    m55_allocatable_shared : ORIGIN = 0x240FF000, LENGTH = 0x00000FC0
+    feathertalk_xip_guard : ORIGIN = 0x240FFFC0, LENGTH = 0x00000040
 }
 
 REGION_ALIAS("m55_data_sel", m55_data_INTERNAL)
@@ -74,6 +75,7 @@ REGION_ALIAS("m55_data_secondary_sel", m55_data_secondary)
 REGION_ALIAS("m33_m55_shared_sel", m33_m55_shared)
 REGION_ALIAS("gfx_mem_sel", gfx_mem)
 REGION_ALIAS("m55_allocatable_shared_sel", m55_allocatable_shared)
+REGION_ALIAS("feathertalk_xip_guard_sel", feathertalk_xip_guard)
 REGION_ALIAS("m55_hyperram_sel", m55_hyperram)
 REGION_ALIAS("m33_m55_shared_hyperram_sel", m33_m55_shared_hyperram)
 
@@ -462,6 +464,16 @@ SECTIONS
 
         . = ALIGN(4);
     } > m55_allocatable_shared
+
+    /* Fixed two-cache-line handshake used while SMIF0 program/erase makes the
+     * shared external XIP device temporarily unavailable. */
+    .feathertalk_xip_guard(NOLOAD) : ALIGN(32)
+    {
+        KEEP(*(.feathertalk_xip_guard))
+    } > feathertalk_xip_guard_sel
+
+    ASSERT(SIZEOF(.feathertalk_xip_guard) <= LENGTH(feathertalk_xip_guard),
+           "FeatherTalk SMIF XIP guard exceeds its reserved shared SRAM")
 
     /* Reserve a trail space for the signature for the bootloader - do not place any code here */
     .cy_trailer(NOLOAD) :

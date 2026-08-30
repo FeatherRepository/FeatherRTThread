@@ -448,3 +448,14 @@
 - 点击回调现在只设置目标并立即切换到带“正在加载...”状态的查看器，40 ms 后再开始预览转换，确保至少先提交一帧可见反馈。缩略图间隔放宽到 160 ms；RGB565 渲染删除了“先打开解码器探测、随后再次打开正式解码”的重复路径，文件头、尺寸和安全上限校验仍保留。
 - 自动测试在相册为空时生成一个 32×24 非黑 BMP，覆盖完整热区、查看器立即加载态、最终非黑 RGB565 缓存、Files 跳转、壁纸和删除确认，结束后删除临时文件。最终板端回归为 `328 PASS / 0 FAIL / 151 actions`，耗时 62,603 ms，路由对象增量为 0；日志为 `tools/freather/logs/gallery-click-final-board.log`。
 - 最终构建为 text=3,507,484、data=72,652、bss=4,270,180 字节；HEX 10,070,147 字节，SHA-256 `87C290E6EAB042567D7A78DFA81B5628413206B8A779A7859867B4E265FAB9F9`。Customized OpenOCD 写入/校验 M55 3,584,000 / 3,580,136 字节，M33 167,936 / 160,536 字节。
+
+## 2026-08-31 双核共享 SMIF 保护与蓝牙首阶段闭环
+
+- 根因确认：M33 Non-Secure XIP 位于同一颗 S25FS128S 的物理 `0x6034xxxx`，M55 的固定 2 MiB 用户卷位于 `0x60E00000`。M55 在 M33 继续取指时 program/erase 会让 M33 外部 `ICACHE0` 吸入无效数据，最终表现为调度位图、列表或任意 XIP 代码随机损坏；它不是 RT-Thread 调度器本身的缺陷。
+- 新增共享 SRAM 双线协议。M55 在写/擦前发请求；M33 高优先级线程进入 `.cy_sram_code`、屏蔽中断和 fault、确认停驻后才 ACK。M55 的 program/erase、状态轮询及直接调用链全部位于 ITCM/DTCM，并把写入拆成 256 字节 page、擦除拆成 64 KiB sector。器件 WIP 未明确清零时保持两核停驻，不返回 XIP。
+- M33 收到 release 后先操作 PSE84 外部 `ICACHE0` 的自清 `CMD.INV`，确认完成后才恢复异常和返回。共享页使用两核都可见的 S-bus `0x240FFFC0`；原先的 M33 C-bus `0x040FFFC0` 并不是此跨核页的有效公共别名，实机读写差异正是首轮握手 `-116` 的原因。
+- IPC Pipe 端点避开 MTB-SRF 占用的通道/IRQ，并补齐 RT-Thread ISR enter/leave。干净复位后的 M33 明确报告 `SMIF XIP guard service ready at 0x240fffc0`，M33/M55 心跳持续在线。
+- M55 真机完整回归为 `326 PASS / 0 FAIL / 150 actions`、耗时 82,162–82,255 ms。实际 Flash 删除、递归目录、复制/移动/重命名三项 `#253..#255` 全部通过；没有再出现 `M33 XIP park failed`、HardFault 或异常复位。
+- CYW55500A1 官方 PatchRAM、HCI-UART integration 和 AIROC host stack 的有效输入均已放入 `FeatherTalk_M33/applications/bluetooth` 管理，构建输出确认不读取仓库外路径。PatchRAM 以 3 Mbit/s 下载后切回 115200 bit/s，host `ready/error=0`；启动扫描得到 18 reports / 11 unique，运行期复扫得到 19 / 11，广播 on/off 均成功。
+- 启动时原 `0x28` 不是控制器故障，而是 `USE_AIROC_STACK_SMP=0` 时供应商包装函数默认返回 `WICED_ERROR` 的假告警。禁用 SMP 现按合法配置返回 success；当前明确只承诺扫描和非连接广播，配对、加密、绑定、密钥持久化与 GATT 留到下一阶段。
+- 下载脚本同步修复了另一个独立问题：PSE84 `reset_halt` 返回 Tcl 0 时 OpenOCD 本身不会退出失败。现在由仓库内 Tcl guard 检查停机域、Secure boot PC、Test Mode 和写后 Non-Secure 启动条件，再允许官方 FLM 擦写。修正版实机写入 372,736 字节、校验 365,728 字节通过。

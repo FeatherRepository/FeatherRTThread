@@ -41,6 +41,7 @@ $pyocd = Join-Path $toolsRoot 'pyocd.cmd'
 $openocd = Join-Path $toolsRoot 'openocd.cmd'
 $openocdScripts = Join-Path $toolsRoot 'openocd\scripts'
 $openocdFlm = Join-Path $toolsRoot 'openocd\flm\infineon\pse8x6'
+$openocdGuard = Join-Path $toolsRoot 'openocd\feathertalk_prepare_cm33.tcl'
 $qspiConfigDir = Join-Path $projectsRoot 'libs\TARGET_APP_KIT_PSE84_EVAL_EPC2\config\GeneratedSource'
 
 if ($Programmer -eq 'PyOCD') {
@@ -75,7 +76,7 @@ if ($Programmer -eq 'Auto') {
     Write-Warning 'PyOCD PSE84/KitProg3 acquire and external SMIF programming are not safe on this setup; selecting Infineon OpenOCD.'
 }
 
-foreach ($required in @($openocd, $openocdScripts, $openocdFlm, $qspiConfigDir)) {
+foreach ($required in @($openocd, $openocdScripts, $openocdFlm, $openocdGuard, $qspiConfigDir)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Required programming resource is missing: $required"
     }
@@ -88,6 +89,7 @@ $openocdArgs = @(
     '-s', $qspiConfigDir,
     '-f', 'interface/kitprog3.cfg',
     '-f', 'target/infineon/pse84xgxs2.cfg',
+    '-f', $openocdGuard,
     '-c', "adapter serial $ProbeUid",
     '-c', 'transport select swd',
     '-c', "adapter speed $AdapterKHz",
@@ -96,12 +98,10 @@ $openocdArgs = @(
     # the SMIF banks when the board is already in normal DEVELOPMENT mode.
     # PSE84's target-specific helper halts at the secure reset handler while
     # preserving the board-generated external flash map.
-    '-c', 'reset_halt cm33',
-    '-c', 'targets cat1d.cm33',
+    '-c', 'feathertalk_prepare_cm33',
     '-c', "flash write_image erase {$tclImage}",
     '-c', "verify_image {$tclImage}",
-    '-c', 'reset_halt cm33_ns',
-    '-c', 'resume',
+    '-c', 'feathertalk_restart_cm33_ns',
     '-c', 'shutdown'
 )
 

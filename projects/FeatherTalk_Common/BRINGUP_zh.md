@@ -10,6 +10,11 @@
 M33 使用 SDK 原生 `Cy_SysEnableCM55()` 从 `0x60580400` 启动 M55。两核使用
 SDK 的 PSoC E84 IPC Pipe 驱动交换 16 字节的 FeatherTalk ABI 消息，不需要外部连线。
 
+M33 的 Non-Secure 主程序与 M55 主程序都在同一颗 SMIF0 NOR Flash 上执行。M55
+访问末尾固定 2 MiB `/flash` 用户卷前，必须通过共享 SRAM 守卫让 M33 停在内部
+SRAM；擦写完成且器件确认 ready 后，M33 先失效外部 `ICACHE0` 再返回 XIP。任何
+握手或 ready 检查失败都按 fail-closed 处理，不允许 M33 带着旧 XIP cache 继续运行。
+
 ## 构建
 
 在 SDK 根目录执行：
@@ -36,14 +41,21 @@ SDK 的 PSoC E84 IPC Pipe 驱动交换 16 字节的 FeatherTalk ABI 消息，不
 脚本使用 Infineon OpenOCD，分别擦写和校验两个 HEX。PyOCD 暂不用于本板的
 SMIF 下载，因为当前 CMSIS Pack 没有自动启用非默认的 PSE84 SMIF FLM。
 
+`flash-demo.ps1` 会检查 PSE84 `reset_halt` 的 Tcl 布尔返回值。只有普通 helper
+明确返回 0 时才允许执行受约束的 XRES/vector-catch fallback；fallback 还必须确认
+CM33 已停机、处于 Secure 域、PC 位于 Secure boot RRAM 且未停留在 Test Mode。
+上述任一条件或写入后 Non-Secure reset-halt 失败时，脚本都会停止，不会把未知状态
+误报成“烧录成功”。
+
 ## 运行验证
 
 M33 终端预期出现：
 
 ```text
-FeatherTalk M33 0.1.0-dev
-[FeatherTalk M33] M55 online: ABI=1 status=...
-msh />
+FeatherTalk M33 0.2.0-dev
+SMIF XIP guard service ready at 0x240fffc0
+[FeatherTalk M33] M55 online: ABI=4 status=...
+msh >
 ```
 
 在 M33 MSH 执行：
@@ -55,3 +67,7 @@ feather_ping
 
 `feather_status` 同时显示 CM55 硬件状态、应用层心跳、IPC 驱动收发计数和忙重试计数。
 M55 终端可用 `feather_m55_status` 查看 LVGL 与 IPC 状态。
+
+2026-08-31 真机全量 UI/存储回归为 `326 PASS / 0 FAIL / 150 actions`；其中
+`files.delete.contract`、`files.clipboard.contract`、`files.name.contract` 均实际
+擦写 `/flash` 并通过，过程中未再出现 `M33 XIP park failed`、HardFault 或复位。

@@ -1,0 +1,6 @@
+[submodule "projects/FeatherTalk_M33/applications/bluetooth/third_party/infineon/btstack"]
+	path = projects/FeatherTalk_M33/applications/bluetooth/third_party/infineon/btstack
+	url = https://github.com/Infineon/btstack.git
+[submodule "projects/FeatherTalk_M33/applications/bluetooth/third_party/infineon/bt-fw-ifx-cyw55500a1"]
+	path = projects/FeatherTalk_M33/applications/bluetooth/third_party/infineon/bt-fw-ifx-cyw55500a1
+	url = https://github.com/Infineon/bt-fw-ifx-cyw55500a1.git

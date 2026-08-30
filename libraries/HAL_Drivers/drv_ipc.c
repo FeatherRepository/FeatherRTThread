@@ -242,12 +242,16 @@ static void edge_ipc1_tx_release_callback(void)
 
 static void edge_ipc0_pipe_isr(void)
 {
+    rt_interrupt_enter();
     Cy_IPC_Pipe_ExecuteCallback(EDGE_IPC0_LOCAL_EP_ADDR);
+    rt_interrupt_leave();
 }
 
 static void edge_ipc1_pipe_isr(void)
 {
+    rt_interrupt_enter();
     Cy_IPC_Pipe_ExecuteCallback(EDGE_IPC1_LOCAL_EP_ADDR);
+    rt_interrupt_leave();
 }
 
 static edge_rc_frame_t* edge_ipc_alloc_tx_frame(struct edge_ipc_device* dev)
