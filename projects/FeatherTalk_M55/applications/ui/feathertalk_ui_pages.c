@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <feathertalk/version.h>
+#include "feathertalk_storage.h"
 #include "ipc/feathertalk_ipc.h"
 #include "feathertalk_ui.h"
 #include "feathertalk_ui_internal.h"
@@ -15,6 +16,7 @@
 #define FT_TIMEZONE_COUNT    7U
 #define FT_SYSTEM_SUMMARY_COUNT 4U
 #define FT_SYSTEM_SECTION_COUNT 4U
+#define FT_FILES_PREVIEW_BYTES  384U
 
 typedef enum
 {
@@ -57,6 +59,11 @@ static lv_obj_t *create_settings_wifi_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_time_language_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_personalization_page(lv_obj_t *parent);
+static void files_page_enter(void);
+static bool files_page_back(void);
+static void files_page_leave(void);
+static void files_refresh_view(bool manual_refresh);
+static void files_format_bytes(uint64_t bytes, char *text, size_t text_size);
 static void settings_time_language_refresh(void);
 static void language_refresh_async_cb(void *user_data);
 static void media_tile_live_content(lv_obj_t *content_host,
@@ -163,7 +170,8 @@ static const ft_page_definition_t s_pages[] =
     {FT_PAGE_SETTINGS, "Settings", create_settings_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_MEDIA, "Media", create_media_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_MESSAGES, "Messages", create_messages_page, RT_NULL, RT_NULL, RT_NULL},
-    {FT_PAGE_FILES, "Files", create_files_page, RT_NULL, RT_NULL, RT_NULL},
+    {FT_PAGE_FILES, "Files", create_files_page, files_page_enter,
+     files_page_back, files_page_leave},
     {FT_PAGE_ABOUT, "About", create_about_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_DISPLAY, "Display & brightness", create_settings_display_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_WIFI, "Wi-Fi", create_settings_wifi_page, RT_NULL, RT_NULL, RT_NULL},
@@ -219,6 +227,14 @@ static lv_obj_t *s_messages_count_label;
 static uint32_t s_message_count;
 static lv_obj_t *s_files_refresh_button;
 static lv_obj_t *s_files_status_label;
+static lv_obj_t *s_files_path_label;
+static lv_obj_t *s_files_up_button;
+static lv_obj_t *s_files_list;
+static lv_timer_t *s_files_monitor_timer;
+static char s_files_current_path[FT_STORAGE_PATH_MAX];
+static bool s_files_last_mounted;
+static size_t s_files_directory_count;
+static size_t s_files_file_count;
 static uint32_t s_files_refresh_count;
 static bool s_language_refresh_scheduled;
 
@@ -925,8 +941,11 @@ static void create_system_summary_grid(lv_obj_t *page)
 static void refresh_system_hardware(void)
 {
     ft_platform_system_info_t info;
+    ft_storage_volume_info_t sd_volume;
     char text[384];
     char note[128];
+    char sd_total[24];
+    char sd_free[24];
     uint32_t xip_percent;
     uint32_t heap_percent;
     uint32_t hyperram_percent;
@@ -999,11 +1018,30 @@ static void refresh_system_hardware(void)
                           ft_preferences_text("ST7102/ST7123 电容触控；长按 500 ms",
                                               "ST7102/ST7123 capacitive touch; 500 ms long press"));
 
-    lv_snprintf(text, sizeof(text),
-                ft_preferences_text(
-                "S25FS128S QSPI NOR，物理容量 %lu MiB；2.25 MiB 未分配",
-                "S25FS128S QSPI NOR, %lu MiB physical; 2.25 MiB unassigned"),
-                (unsigned long)(info.external_flash_bytes / (1024U * 1024U)));
+    if (ft_storage_get_volume(FT_STORAGE_SD_MOUNT_PATH, &sd_volume) == RT_EOK &&
+        sd_volume.mounted)
+    {
+        files_format_bytes(sd_volume.total_bytes, sd_total, sizeof(sd_total));
+        files_format_bytes(sd_volume.free_bytes, sd_free, sizeof(sd_free));
+        lv_snprintf(text, sizeof(text),
+                    ft_preferences_text(
+                    "S25FS128S QSPI NOR，物理容量 %lu MiB；2.25 MiB 未分配\n"
+                    "SDHC1 4-bit：%s，已挂载 /sdcard，可用 %s",
+                    "S25FS128S QSPI NOR, %lu MiB physical; 2.25 MiB unassigned\n"
+                    "SDHC1 4-bit: %s mounted at /sdcard, %s free"),
+                    (unsigned long)(info.external_flash_bytes / (1024U * 1024U)),
+                    sd_total, sd_free);
+    }
+    else
+    {
+        lv_snprintf(text, sizeof(text),
+                    ft_preferences_text(
+                    "S25FS128S QSPI NOR，物理容量 %lu MiB；2.25 MiB 未分配\n"
+                    "SDHC1 4-bit：驱动就绪，等待 SD 卡",
+                    "S25FS128S QSPI NOR, %lu MiB physical; 2.25 MiB unassigned\n"
+                    "SDHC1 4-bit: driver ready, waiting for a card"),
+                    (unsigned long)(info.external_flash_bytes / (1024U * 1024U)));
+    }
     system_label_set_text(&s_system_fields[FT_SYSTEM_FIELD_FLASH], text);
     lv_snprintf(text, sizeof(text),
                 ft_preferences_text("%lu / %lu KiB（%lu%%），8 MiB XIP 分区",
@@ -1087,8 +1125,8 @@ static void refresh_system_hardware(void)
     system_label_set_text(&s_system_fields[FT_SYSTEM_FIELD_DEVICES], text);
     system_label_set_text(&s_system_fields[FT_SYSTEM_FIELD_UNAVAILABLE],
                           ft_preferences_text(
-                          "Wi-Fi/蓝牙、音频、SDHC、USB、CAN-FD、I3C、PDM 和 TDM 驱动",
-                          "Wi-Fi/Bluetooth, audio, SDHC, USB, CAN-FD, I3C, PDM and TDM drivers"));
+                          "Wi-Fi/蓝牙、音频、USB、CAN-FD、I3C、PDM 和 TDM 驱动",
+                          "Wi-Fi/Bluetooth, audio, USB, CAN-FD, I3C, PDM and TDM drivers"));
 }
 
 static lv_obj_t *create_system_page(lv_obj_t *parent)
@@ -1911,39 +1949,392 @@ static lv_obj_t *create_messages_page(lv_obj_t *parent)
     return page;
 }
 
+typedef struct
+{
+    size_t directories;
+    size_t files;
+} ft_files_list_context_t;
+
+static uint8_t s_files_directory_marker;
+
+static void files_format_bytes(uint64_t bytes, char *text, size_t text_size)
+{
+    static const char *units[] = {"B", "KB", "MB", "GB", "TB"};
+    uint64_t divisor = 1U;
+    uint32_t unit = 0U;
+    uint32_t whole;
+    uint32_t decimal;
+
+    while (unit < 4U && bytes >= divisor * 1024U)
+    {
+        divisor *= 1024U;
+        unit++;
+    }
+    whole = (uint32_t)(bytes / divisor);
+    decimal = divisor > 1U ? (uint32_t)(((bytes % divisor) * 10U) / divisor) : 0U;
+    if (unit == 0U)
+        lv_snprintf(text, text_size, "%lu %s", (unsigned long)whole, units[unit]);
+    else
+        lv_snprintf(text, text_size, "%lu.%lu %s", (unsigned long)whole,
+                    (unsigned long)decimal, units[unit]);
+}
+
+static void files_preview_file(const char *path, const char *name)
+{
+    uint8_t preview[FT_FILES_PREVIEW_BYTES];
+    char cleaned[FT_FILES_PREVIEW_BYTES];
+    char size_text[24];
+    char message[FT_FILES_PREVIEW_BYTES + 128U];
+    uint64_t file_size = 0U;
+    bool binary = false;
+    int read_size;
+    size_t source;
+    size_t target = 0U;
+
+    read_size = ft_storage_read_preview(path, preview, sizeof(preview),
+                                        &binary, &file_size);
+    if (read_size < 0)
+    {
+        feathertalk_ui_alert(name,
+                            ft_preferences_text("无法读取这个文件。",
+                                                "Unable to read this file."));
+        return;
+    }
+
+    files_format_bytes(file_size, size_text, sizeof(size_text));
+    if (binary)
+    {
+        lv_snprintf(message, sizeof(message),
+                    ft_preferences_text("大小：%s\n二进制文件，当前仅显示文件信息。",
+                                        "Size: %s\nBinary file; showing metadata only."),
+                    size_text);
+    }
+    else
+    {
+        for (source = 0U; source < (size_t)read_size &&
+             target + 1U < sizeof(cleaned); source++)
+        {
+            uint8_t value = preview[source];
+            if (value == '\r') continue;
+            cleaned[target++] = value == '\t' ? ' ' : (char)value;
+        }
+        cleaned[target] = '\0';
+        lv_snprintf(message, sizeof(message),
+                    ft_preferences_text("大小：%s\n\n%s%s",
+                                        "Size: %s\n\n%s%s"),
+                    size_text,
+                    target > 0U ? cleaned : ft_preferences_text("（空文件）", "(empty file)"),
+                    file_size > (uint64_t)read_size ?
+                    ft_preferences_text("\n\n（仅预览开头内容）",
+                                        "\n\n(previewing the beginning only)") : "");
+    }
+    feathertalk_ui_alert(name, message);
+}
+
+static void files_entry_clicked_cb(lv_event_t *event)
+{
+    lv_obj_t *row = lv_event_get_target(event);
+    lv_obj_t *name_label;
+    const char *name;
+    char path[FT_STORAGE_PATH_MAX];
+
+    if (row == RT_NULL || lv_obj_get_child_count(row) == 0U)
+        return;
+    name_label = lv_obj_get_child(row, 0U);
+    if (name_label == RT_NULL || !lv_obj_check_type(name_label, &lv_label_class))
+        return;
+    name = lv_label_get_text(name_label);
+    if (ft_storage_join_path(s_files_current_path, name, path,
+                             sizeof(path)) != RT_EOK)
+    {
+        feathertalk_ui_alert(ft_preferences_text("文件", "Files"),
+                            ft_preferences_text("路径过长，无法打开。",
+                                                "The path is too long to open."));
+        return;
+    }
+
+    if (lv_event_get_user_data(event) == &s_files_directory_marker)
+    {
+        rt_strncpy(s_files_current_path, path,
+                   sizeof(s_files_current_path) - 1U);
+        s_files_current_path[sizeof(s_files_current_path) - 1U] = '\0';
+        files_refresh_view(false);
+    }
+    else
+    {
+        files_preview_file(path, name);
+    }
+}
+
+static bool files_add_entry(const ft_storage_entry_t *entry, void *context)
+{
+    const ft_ui_layout_t *layout = ft_layout_get();
+    ft_files_list_context_t *counts = context;
+    lv_obj_t *row;
+    lv_obj_t *name;
+    lv_obj_t *detail;
+    char detail_text[28];
+
+    if (entry == RT_NULL || counts == RT_NULL || s_files_list == RT_NULL ||
+        !lv_obj_is_valid(s_files_list))
+        return false;
+
+    row = lv_button_create(s_files_list);
+    lv_obj_set_size(row, lv_pct(100), layout->list_row_height);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x181818), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(row, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(row, ft_layout_px(10), LV_PART_MAIN);
+    lv_obj_set_style_pad_right(row, ft_layout_px(10), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_event_cb(row, files_entry_clicked_cb, LV_EVENT_CLICKED,
+                        entry->type == FT_STORAGE_ENTRY_DIRECTORY ?
+                        &s_files_directory_marker : RT_NULL);
+
+    name = lv_label_create(row);
+    lv_label_set_text(name, entry->name);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(name, 0);
+    lv_obj_set_flex_grow(name, 1);
+    lv_obj_set_style_text_font(name, ft_layout_font(16), LV_PART_MAIN);
+
+    detail = lv_label_create(row);
+    if (entry->type == FT_STORAGE_ENTRY_DIRECTORY)
+    {
+        lv_label_set_text(detail, ft_preferences_text("文件夹", "Folder"));
+        counts->directories++;
+    }
+    else
+    {
+        files_format_bytes(entry->size_bytes, detail_text, sizeof(detail_text));
+        lv_label_set_text(detail, detail_text);
+        counts->files++;
+    }
+    lv_obj_set_style_text_color(detail, lv_color_hex(0xA0A0A0), LV_PART_MAIN);
+    lv_obj_set_style_text_font(detail, ft_layout_font(12), LV_PART_MAIN);
+    return true;
+}
+
+static void files_set_path_label(void)
+{
+    char text[FT_STORAGE_PATH_MAX + 24U];
+    const char *relative = s_files_current_path + strlen(FT_STORAGE_SD_MOUNT_PATH);
+
+    if (s_files_path_label == RT_NULL || !lv_obj_is_valid(s_files_path_label))
+        return;
+    if (relative[0] == '\0')
+        lv_label_set_text(s_files_path_label, ft_preferences_text("SD 卡", "SD card"));
+    else
+    {
+        lv_snprintf(text, sizeof(text), ft_preferences_text("SD 卡  >  %s",
+                                                            "SD card  >  %s"),
+                    relative[0] == '/' ? relative + 1 : relative);
+        lv_label_set_text(s_files_path_label, text);
+    }
+}
+
+static void files_add_empty_message(const char *message)
+{
+    lv_obj_t *label;
+    if (s_files_list == RT_NULL || !lv_obj_is_valid(s_files_list)) return;
+    label = lv_label_create(s_files_list);
+    lv_label_set_text(label, message);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xA0A0A0), LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, ft_layout_font(14), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(label, ft_layout_px(12), LV_PART_MAIN);
+}
+
+static void files_refresh_view(bool manual_refresh)
+{
+    ft_storage_volume_info_t volume;
+    ft_files_list_context_t counts = {0U, 0U};
+    char total_text[24];
+    char free_text[24];
+    char status[192];
+    int directories;
+    int files;
+
+    if (manual_refresh) s_files_refresh_count++;
+    if (s_files_list == RT_NULL || !lv_obj_is_valid(s_files_list) ||
+        s_files_status_label == RT_NULL || !lv_obj_is_valid(s_files_status_label))
+        return;
+
+    lv_obj_clean(s_files_list);
+    if (ft_storage_get_volume(FT_STORAGE_SD_MOUNT_PATH, &volume) != RT_EOK ||
+        !volume.mounted)
+    {
+        s_files_last_mounted = false;
+        rt_strncpy(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH,
+                   sizeof(s_files_current_path) - 1U);
+        s_files_current_path[sizeof(s_files_current_path) - 1U] = '\0';
+        files_set_path_label();
+        lv_label_set_text(s_files_status_label, ft_preferences_text(
+                          "未检测到已挂载的 SD 卡。插卡后系统会自动识别并挂载。",
+                          "No mounted SD card. Insert one and it will be detected and mounted automatically."));
+        files_add_empty_message(ft_preferences_text(
+                                "等待 SD 卡…\n支持 FAT12/FAT16/FAT32，挂载点 /sdcard",
+                                "Waiting for SD card…\nFAT12/FAT16/FAT32 at /sdcard"));
+        if (s_files_up_button != RT_NULL && lv_obj_is_valid(s_files_up_button))
+            lv_obj_add_state(s_files_up_button, LV_STATE_DISABLED);
+        s_files_directory_count = 0U;
+        s_files_file_count = 0U;
+        return;
+    }
+
+    s_files_last_mounted = true;
+    directories = ft_storage_list(s_files_current_path,
+                                  FT_STORAGE_ENTRY_DIRECTORY,
+                                  files_add_entry, &counts);
+    files = directories >= 0 ?
+            ft_storage_list(s_files_current_path, FT_STORAGE_ENTRY_FILE,
+                            files_add_entry, &counts) : -RT_ERROR;
+    if (directories < 0 || files < 0)
+    {
+        if (strcmp(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH) != 0)
+        {
+            rt_strncpy(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH,
+                       sizeof(s_files_current_path) - 1U);
+            s_files_current_path[sizeof(s_files_current_path) - 1U] = '\0';
+            files_refresh_view(false);
+            return;
+        }
+        lv_obj_clean(s_files_list);
+        lv_label_set_text(s_files_status_label,
+                          ft_preferences_text("SD 卡读取失败，请重新插入后重试。",
+                                              "Unable to read the SD card. Reinsert it and retry."));
+        files_add_empty_message(ft_preferences_text("目录读取失败。",
+                                                    "Directory read failed."));
+        return;
+    }
+
+    files_set_path_label();
+    files_format_bytes(volume.total_bytes, total_text, sizeof(total_text));
+    files_format_bytes(volume.free_bytes, free_text, sizeof(free_text));
+    lv_snprintf(status, sizeof(status), ft_preferences_text(
+                "已挂载 · %s · 容量 %s · 可用 %s\n%lu 个文件夹，%lu 个文件",
+                "Mounted · %s · %s total · %s free\n%lu folders, %lu files"),
+                volume.filesystem, total_text, free_text,
+                (unsigned long)counts.directories,
+                (unsigned long)counts.files);
+    lv_label_set_text(s_files_status_label, status);
+    if (counts.directories == 0U && counts.files == 0U)
+        files_add_empty_message(ft_preferences_text("这个文件夹是空的。",
+                                                    "This folder is empty."));
+    if (s_files_up_button != RT_NULL && lv_obj_is_valid(s_files_up_button))
+    {
+        if (strcmp(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH) == 0)
+            lv_obj_add_state(s_files_up_button, LV_STATE_DISABLED);
+        else
+            lv_obj_remove_state(s_files_up_button, LV_STATE_DISABLED);
+    }
+    s_files_directory_count = counts.directories;
+    s_files_file_count = counts.files;
+}
+
 static void files_refresh_cb(lv_event_t *event)
 {
-    char text[160];
     LV_UNUSED(event);
-    s_files_refresh_count++;
-    lv_snprintf(text, sizeof(text), ft_preferences_text(
-                "内部 Flash：固件/资源分区\n"
-                "外部存储：不可用（驱动未启用）\n刷新次数：%lu",
-                "Internal flash: firmware/resource partition\n"
-                "External storage: unavailable (driver not enabled)\nRefresh count: %lu"),
-                (unsigned long)s_files_refresh_count);
-    lv_label_set_text(s_files_status_label, text);
+    files_refresh_view(true);
 }
+
+static void files_up_cb(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    if (ft_storage_parent_path(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH))
+        files_refresh_view(false);
+}
+
+static void files_monitor_cb(lv_timer_t *timer)
+{
+    ft_storage_volume_info_t volume;
+    bool mounted;
+    LV_UNUSED(timer);
+    mounted = ft_storage_get_volume(FT_STORAGE_SD_MOUNT_PATH, &volume) == RT_EOK &&
+              volume.mounted;
+    if (mounted != s_files_last_mounted)
+        files_refresh_view(false);
+}
+
+static void files_page_enter(void)
+{
+    files_refresh_view(false);
+    if (s_files_monitor_timer == RT_NULL)
+        s_files_monitor_timer = lv_timer_create(files_monitor_cb, 500U, RT_NULL);
+}
+
+static bool files_page_back(void)
+{
+    if (ft_storage_parent_path(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH))
+    {
+        files_refresh_view(false);
+        return true;
+    }
+    return false;
+}
+
+static void files_page_leave(void)
+{
+    if (s_files_monitor_timer != RT_NULL)
+    {
+        lv_timer_delete(s_files_monitor_timer);
+        s_files_monitor_timer = RT_NULL;
+    }
+}
+
 static lv_obj_t *create_files_page(lv_obj_t *parent)
 {
+    const ft_ui_layout_t *layout = ft_layout_get();
     lv_obj_t *page = create_text_page(parent,
                                       ft_preferences_text("文件", "Files"), FT_ICON_FILES,
-                                      ft_preferences_text("存储可见性和资源策略",
-                                                          "Storage visibility and resource policy"));
+                                      ft_preferences_text("SD 卡与可移动存储",
+                                                          "SD card and removable storage"));
+    lv_obj_t *toolbar = lv_obj_create(page);
+
+    rt_strncpy(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH,
+               sizeof(s_files_current_path) - 1U);
+    s_files_current_path[sizeof(s_files_current_path) - 1U] = '\0';
+    s_files_last_mounted = false;
+
+    track_object(&s_files_path_label, lv_label_create(page));
+    lv_obj_set_width(s_files_path_label, lv_pct(100));
+    lv_label_set_long_mode(s_files_path_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(s_files_path_label, ft_layout_font(18), LV_PART_MAIN);
+    ft_ui_register_accent(s_files_path_label, FT_ACCENT_TEXT);
+
     track_object(&s_files_status_label, lv_label_create(page));
     lv_obj_set_width(s_files_status_label, lv_pct(100));
     lv_label_set_long_mode(s_files_status_label, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(s_files_status_label, ft_preferences_text(
-                      "内部 Flash：固件/资源分区\n"
-                      "外部存储：不可用（驱动未启用）\n刷新次数：0",
-                      "Internal flash: firmware/resource partition\n"
-                      "External storage: unavailable (driver not enabled)\nRefresh count: 0"));
+    lv_obj_set_style_text_color(s_files_status_label, lv_color_hex(0xB8B8B8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_files_status_label, ft_layout_font(12), LV_PART_MAIN);
+
+    style_layout_container(toolbar);
+    lv_obj_set_size(toolbar, lv_pct(100), layout->control_height);
+    lv_obj_set_flex_flow(toolbar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(toolbar, layout->section_gap, LV_PART_MAIN);
+    track_object(&s_files_up_button,
+                 create_flat_button(toolbar,
+                                    ft_preferences_text("上一级", "Up"),
+                                    files_up_cb, RT_NULL));
+    lv_obj_set_width(s_files_up_button, lv_pct(38));
     track_object(&s_files_refresh_button,
-                 create_icon_button(page, FT_ICON_REFRESH,
+                 create_icon_button(toolbar, FT_ICON_REFRESH,
                                     ft_preferences_text("刷新", "Refresh"),
                                     files_refresh_cb, RT_NULL,
                                     RT_NULL, RT_NULL));
-    lv_obj_set_width(s_files_refresh_button, lv_pct(100));
+    lv_obj_set_width(s_files_refresh_button, lv_pct(58));
+
+    track_object(&s_files_list, lv_obj_create(page));
+    style_layout_container(s_files_list);
+    lv_obj_set_width(s_files_list, lv_pct(100));
+    lv_obj_set_height(s_files_list, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_files_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_files_list, ft_layout_px(3), LV_PART_MAIN);
     return page;
 }
 
@@ -2130,6 +2521,24 @@ lv_obj_t *ft_pages_test_get_messages_button(void) { return s_messages_button; }
 lv_obj_t *ft_pages_test_get_files_refresh_button(void) { return s_files_refresh_button; }
 uint32_t ft_pages_test_message_count(void) { return s_message_count; }
 uint32_t ft_pages_test_files_refresh_count(void) { return s_files_refresh_count; }
+bool ft_pages_test_files_browser_ready(void)
+{
+    return s_files_path_label != RT_NULL && lv_obj_is_valid(s_files_path_label) &&
+           s_files_status_label != RT_NULL && lv_obj_is_valid(s_files_status_label) &&
+           s_files_up_button != RT_NULL && lv_obj_is_valid(s_files_up_button) &&
+           s_files_refresh_button != RT_NULL && lv_obj_is_valid(s_files_refresh_button) &&
+           s_files_list != RT_NULL && lv_obj_is_valid(s_files_list) &&
+           s_files_monitor_timer != RT_NULL;
+}
+bool ft_pages_test_files_at_root(void)
+{
+    return strcmp(s_files_current_path, FT_STORAGE_SD_MOUNT_PATH) == 0;
+}
+bool ft_pages_test_files_mounted(void) { return s_files_last_mounted; }
+size_t ft_pages_test_files_entry_count(void)
+{
+    return s_files_directory_count + s_files_file_count;
+}
 bool ft_pages_test_transient_slots_clear(void)
 {
     size_t i;
@@ -2146,7 +2555,9 @@ bool ft_pages_test_transient_slots_clear(void)
         s_media_state_icon != RT_NULL || s_media_track_label != RT_NULL ||
         s_media_volume != RT_NULL || s_messages_button != RT_NULL ||
         s_messages_count_label != RT_NULL || s_files_refresh_button != RT_NULL ||
-        s_files_status_label != RT_NULL) return false;
+        s_files_status_label != RT_NULL || s_files_path_label != RT_NULL ||
+        s_files_up_button != RT_NULL || s_files_list != RT_NULL ||
+        s_files_monitor_timer != RT_NULL) return false;
     for (i = 0U; i < FT_SYSTEM_SUMMARY_COUNT; i++)
         if (s_system_summary_values[i] != RT_NULL ||
             s_system_summary_notes[i] != RT_NULL) return false;

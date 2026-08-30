@@ -483,6 +483,9 @@ static void run_files_test(void)
 {
     if (s_control_index == 0U)
     {
+        test_record(ft_pages_test_files_browser_ready(), "files.browser",
+                    "path/status/up/refresh/list/mount monitor");
+        test_record(ft_pages_test_files_at_root(), "files.root", "/sdcard");
         s_files_before = ft_pages_test_files_refresh_count();
         (void)test_click(ft_pages_test_get_files_refresh_button(), "files.refresh", RT_NULL);
         test_record(ft_pages_test_files_refresh_count() == s_files_before + 1U,

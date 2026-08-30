@@ -36,6 +36,7 @@ foreach ($character in ($sourceText -join "`n").ToCharArray()) {
         ($codepoint -ge 0x4E00 -and $codepoint -le 0x9FFF) -or
         ($codepoint -ge 0x3000 -and $codepoint -le 0x303F) -or
         ($codepoint -ge 0xFF00 -and $codepoint -le 0xFFEF) -or
+        $codepoint -eq 0x00B7 -or
         $codepoint -eq 0x2026) {
         [void]$codepoints.Add($codepoint)
     }

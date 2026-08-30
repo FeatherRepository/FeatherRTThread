@@ -112,10 +112,12 @@ System 页运行期遍历 RT-Thread `RT_Object_Class_Device`，显示实际已�
 数和名称。当前产品路径启用 GPIO、IPC、UART2、I2C0、software I2C1、触摸、
 LCD/GFX/MIPI、PWM18、HyperRAM 与显示 AXI-DMA。
 
-开发板硬件或 SDK 中存在但当前产品配置没有启用的主要能力包括 CYW55513
-Wi-Fi/Bluetooth、ES8388 audio、SDHC/filesystem、USB、CAN-FD、I3C、PDM 和
-TDM。Wi-Fi、Bluetooth、RTC、电池与可移除存储只有在其所有者驱动真实
-上报后才显示在线/使用状态；当前必须明确显示 unavailable。
+当前产品已经启用 SDHC1 4-bit、RT-Thread MMC/SD、DFS 与 Elm-FatFS；System
+页从 `/sdcard` 的真实挂载状态和 `statfs` 结果显示容量/可用空间。开发板硬件
+或 SDK 中存在但当前产品配置没有启用的主要能力包括 CYW55513
+Wi-Fi/Bluetooth、ES8388 audio、USB、CAN-FD、I3C、PDM 和 TDM。Wi-Fi、
+Bluetooth、RTC、电池和 USB 只有在其所有者驱动真实上报后才显示在线/
+使用状态；当前必须明确显示 unavailable。
 
 ## 数据来源与维护规则
 

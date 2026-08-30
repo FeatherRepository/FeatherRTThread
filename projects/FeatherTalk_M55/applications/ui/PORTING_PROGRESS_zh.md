@@ -338,7 +338,7 @@
 
 ## 已知边界
 
-- 电池、电源采样、Wi-Fi/网络、蓝牙、屏幕旋转和外部存储的板级驱动尚未在产品配置中启用；UI 与 ABI 4 IPC 已具备能力、启用、连接和 Wi-Fi 信号强度接入点，并明确显示不可用。显示亮度已经接入 M55 `pwm18`。
+- 电池、电源采样、Wi-Fi/网络、蓝牙、屏幕旋转和 USB 的板级驱动尚未在产品配置中启用；SD 卡已经通过 SDHC1/Elm-FatFS 接入 `/sdcard`。UI 与 ABI 4 IPC 已具备无线能力、启用、连接和 Wi-Fi 信号强度接入点，并明确显示不可用。显示亮度已经接入 M55 `pwm18`。
 - 当前偏好仅在本次启动期间保存，这是原计划要求的“内存桩”；持久化需要后续选定 FlashDB/EasyFlash 或产品配置服务。
 - 自动测试宏当前为板级验收而启用；发布固件应关闭 `CONFIG_FEATHERTALK_UI_TEST_MODE`。
 
@@ -368,3 +368,18 @@
 - 语言切换只翻译界面语义，不翻译产品、平台和协议关键词；`FeatherTalk`、`Feather`、`PSoC`、`M33/M55`、`Wi-Fi` 等保持原文。媒体曲目中的“羽翼序曲”相应修正为“Feather 序曲”。
 - 单条通知不再依赖容易被父级滚动容器抢走的最终 `LV_EVENT_GESTURE`。卡片现在处理 `PRESSED/PRESSING/RELEASED`：横向拖动实时跟手，超过卡片宽度 1/4 或释放速度达到阈值时删除，否则 160 ms 回弹；纵向动作继续用于通知列表滚动和上滑关闭。
 - 最新固件重新构建、烧录并完成 `259 PASS / 0 FAIL / 120 actions` 全量板端回归，日志为 `tools/freather/serial-monitor/logs/notification-swipe-board-test.log`。测试模式命令 `feather_ui_notification_preview` 可稳定打开两条中文通知，供真机触摸和显存复核。
+
+## 2026-08-30 SD 卡自动挂载与真实文件浏览
+
+- 产品配置启用 M55 SDHC1 4-bit、RT-Thread MMC/SD、DFS/POSIX、Elm-FatFS 和 UTF-8 长文件名；继续关闭与本功能无关的 QSPI Flash 文件系统。SDK 原有热插拔线程负责卡检测、分区扫描以及 `/sdcard` 自动挂载/卸载，产品层没有复制一套 SD 驱动。
+- 新增通用 `feathertalk_storage.*`，把卷状态、目录枚举、路径安全拼接、返回上级和文件头读取隔离在 UI 之外。文件应用现在显示真实路径、容量/可用空间、文件夹/文件数，支持逐级目录、Back/上一级、手动刷新、文本头预览和二进制元数据；500 ms 监视器只响应挂载状态变化，不持续重扫目录。
+- System 信息页同步显示 SDHC1 驱动就绪或真实 `/sdcard` 容量，不再把 SDHC/filesystem 列为未启用。当前只承诺 FAT12/FAT16/FAT32，不伪造 exFAT 支持，也不会自动格式化用户介质。
+- 真机识别 30,591,488 KiB SD 卡并自动挂载设备 `sd`；实际读取 `extlinux/`、`rockchip/` 与 50,924,032 字节 `Image`。`sdcard_umount` 后再 `sdcard_mount` 成功并得到相同目录。
+- 最终构建为 text=3,233,976、data=5,048、bss=4,312,356 字节；HEX 9,110,678 字节，SHA-256 `D90DCA04A1A335098CECF14D32A263810A2F3C4A86FD727AB97054C976D39F61`。Infineon Customized OpenOCD 写入 3,244,032 字节并校验 3,239,024 字节。板端全量自动化为 `262 PASS / 0 FAIL / 120 actions`，最终日志为 `tools/freather/serial-monitor/logs/sdcard-files-final-board.log`，启动/自动挂载日志为 `sdcard-boot.log`，卸载重挂载日志为 `sdcard-unmount-remount.log`，最终目录复核为 `sdcard-files-final-list.log`。
+- USB 进入第二阶段：复用同一存储模型，以 CherryUSB Host MSC + DFS 接入 U 盘；在确认 Type-C Host VBUS/角色路径、独立挂载点和 RT-Thread 适配层断开安全前仍明确标记未启用。详细设计与验收记录见 `applications/STORAGE_INTEGRATION_zh.md`。
+
+## 2026-08-30 Files 页面间隔号占位符修复
+
+- Files 已挂载状态使用的间隔号 `·`（U+00B7）不属于原字库脚本收集的中日韩标点区，Montserrat ASCII fallback 也不含该字符，因此状态行中的两个间隔号显示成方框；SD 目录内容和 UTF-8 解码本身没有异常。
+- 字体生成器现显式收集 U+00B7，并重新生成 12/14/16/22 px 四档 Noto Sans SC 字体。产品字形总数从 6771 增至 6772，生成文件均能检索到 U+00B7；同时把“改文案后必须重建字库”的约束补入资源策略。
+- 修复固件构建为 text=3,234,072、data=5,048、bss=4,312,356 字节；HEX 9,110,948 字节，SHA-256 `A8AA9DC1E501D5C262C3A1D3E68D6CE5BB7E054752EA3672338D2E19485CAE7E`。Infineon Customized OpenOCD 写入 3,244,032 字节并校验 3,239,120 字节；真实 SD 卡仍自动挂载，Files 根目录检查通过，板端全量回归为 `262 PASS / 0 FAIL / 120 actions`、耗时 52,305 ms。日志：`tools/freather/serial-monitor/logs/files-font-board-test.log`。

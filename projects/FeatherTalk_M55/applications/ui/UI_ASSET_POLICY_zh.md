@@ -16,7 +16,7 @@
 - SVG 可编辑源放在 `assets-src/<group>/`，生成的 A8 C 描述符放在 `assets/generated/`；生成文件不得手工修改。
 - 启动必需且体积小的资源编译进 M55 XIP 镜像。当前 25 个图标生成 24/32/48 三档，共 97,600 字节 A8 像素数据。
 - 大背景、媒体封面和可替换主题不编译进固件；待外部存储驱动启用后，由资源服务按需读取。
-- 当前产品配置未启用外部存储驱动，因此 Files 页面明确显示“unavailable”，不伪造容量或文件列表。
+- Files 页面只显示 DFS 实际挂载卷。当前 SDHC1/Elm-FatFS 已启用，SD 卡挂载成功后读取 `/sdcard` 的真实容量和目录；未插卡或卸载后显示等待状态，不伪造容量或文件列表。
 
 ## 转换命令
 
@@ -34,5 +34,7 @@
 python .\tools\freather\ui-asset-convert.py icon.png icon.c --name ft_icon --format argb8888
 python .\tools\freather\ui-asset-convert.py background.png background.c --name ft_background --format rgb565
 ```
+
+中文界面使用 Noto Sans SC 生成的 12/14/16/22 px 静态字体。修改界面文案后必须执行 `tools\freather\fonts\build-ui-fonts.cmd`，把 GB2312 基础字形以及源码实际使用的中文标点、全角字符、间隔号 `·` 和省略号 `…` 同步进四档字体；不得假设普通固件构建会自动更新字形集合。
 
 评审时同时记录源文件许可证、转换参数、生成尺寸和固件体积增量。参考项目中的资源只有在许可证和产品用途均明确后才可迁入。新增常用图标时必须先扩展 SVG、清单和 `ft_icon_id_t`，页面代码不得重新引入散落的 `LV_SYMBOL_*` 或固定 PNG 图标。
