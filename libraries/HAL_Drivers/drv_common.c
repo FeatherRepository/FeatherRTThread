@@ -47,6 +47,12 @@ void rt_hw_systick_init(void)
     Cy_SysTick_Init(CY_SYSTICK_CLOCK_SOURCE_CLK_CPU, SystemCoreClock / RT_TICK_PER_SECOND);
     Cy_SysTick_SetCallback(0, SysTick_Handler_CB);
     Cy_SysTick_EnableInterrupt();
+    /* The OS tick must outrank every peripheral IRQ.  With SysTick at the
+     * PDL default (lowest), a storming device interrupt (observed on the BT
+     * HCI UART after a failed 3M auto-baud sync) can starve the tick and
+     * freeze every timed sleep in the system.  Keep it at the highest level
+     * so the kernel, timeouts and IPC stay alive during peripheral storms. */
+    NVIC_SetPriority(SysTick_IRQn, 0);
 }
 
 /**

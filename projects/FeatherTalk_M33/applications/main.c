@@ -4,10 +4,19 @@
 #include <feathertalk/version.h>
 #include <feathertalk/smif_guard.h>
 #include "ipc/feathertalk_ipc.h"
-#include "bluetooth/feathertalk_bt_host.h"
+#if defined(FEATHERTALK_BT_STACK_AIROC) || defined(FEATHERTALK_BT_STACK_BK)
+#include "bt_service_api.h"
+#endif
 
 int main(void)
 {
+    /* rt_hw_context_switch_to() forces PendSV+SysTick to the lowest priority
+       at scheduler start; raise the OS tick above every peripheral IRQ so a
+       storming device interrupt (observed on the BT HCI UART after a failed
+       3M auto-baud sync) can never freeze the kernel tick and with it every
+       timed sleep in the system. */
+    NVIC_SetPriority(SysTick_IRQn, 0);
+
     rt_kprintf("FeatherTalk M33 %s\r\n", FEATHERTALK_M33_FIRMWARE_VERSION);
     rt_kprintf("IPC ABI %u; this core boots and supervises cortex-m55\r\n",
                FEATHERTALK_IPC_ABI_VERSION);
@@ -35,7 +44,8 @@ int main(void)
         rt_kprintf("Commands: feather_status, feather_ping\r\n");
     }
 
-    if (feathertalk_bt_host_start() != RT_EOK)
+#if defined(FEATHERTALK_BT_STACK_AIROC) || defined(FEATHERTALK_BT_STACK_BK)
+    if (bt_service_start() != RT_EOK)
     {
         rt_kprintf("FeatherTalk Bluetooth host thread failed to start\r\n");
     }
@@ -43,6 +53,7 @@ int main(void)
     {
         rt_kprintf("Bluetooth: bt_status, bt_scan, bt_devices, bt_adv\r\n");
     }
+#endif
     while (1)
     {
         rt_thread_mdelay(1000);

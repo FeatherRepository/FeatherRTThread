@@ -72,17 +72,36 @@ static void feathertalk_smif_guard_park_ram(uint32_t epoch, uint32_t sequence)
 
         while (shared->release_seq != sequence)
         {
+            /* Escape hatch: if M55 rebooted or re-initialized the guard while
+             * M33 is parked, the request belongs to a dead epoch and release
+             * will never come (re-init zeroes release_seq).  Abandon the park
+             * instead of spinning forever with all interrupts disabled. */
+            if ((shared->epoch != epoch) ||
+                (shared->magic != FEATHERTALK_SMIF_GUARD_MAGIC) ||
+                (shared->version != FEATHERTALK_SMIF_GUARD_VERSION))
+            {
+                feathertalk_smif_guard_invalidate_xip_cache_ram();
+                __DMB();
+                shared->parked_seq = 0U;
+                shared->rejected_seq = sequence;
+                __DMB();
+                __SEV();
+                break;
+            }
             /* Volatile shared-SRAM load only.  WFE is deliberately avoided:
              * a missed event must not strand M33 while M55 waits. */
             __NOP();
         }
 
-        feathertalk_smif_guard_invalidate_xip_cache_ram();
-        __DMB();
-        shared->completed_seq = sequence;
-        shared->parked_seq = 0U;
-        __DMB();
-        __SEV();
+        if (shared->release_seq == sequence)
+        {
+            feathertalk_smif_guard_invalidate_xip_cache_ram();
+            __DMB();
+            shared->completed_seq = sequence;
+            shared->parked_seq = 0U;
+            __DMB();
+            __SEV();
+        }
     }
     else
     {

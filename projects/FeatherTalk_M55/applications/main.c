@@ -97,6 +97,11 @@ int main(void)
     uint32_t last_led_ms = rt_tick_get_millisecond();
     rt_bool_t led_on = RT_FALSE;
 
+    /* rt_hw_context_switch_to() forces PendSV+SysTick to the lowest priority
+       at scheduler start; raise the OS tick above every peripheral IRQ so a
+       storming device interrupt can never freeze the kernel tick. */
+    NVIC_SetPriority(SysTick_IRQn, 0);
+
     rt_kprintf("FeatherTalk M55 %s\n", FEATHERTALK_M55_FIRMWARE_VERSION);
     rt_kprintf("IPC ABI %u\n", FEATHERTALK_IPC_ABI_VERSION);
     rt_kprintf("LVGL %s demo start, lcd rotation=%d\n", BSP_LVGL_DEMO_NAME, BSP_LCD_ROTATION_DEGREES);
