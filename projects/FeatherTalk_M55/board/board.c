@@ -108,8 +108,14 @@ int en_gpio(void)
 
     rt_pin_write(WIFI_OE_CTRL, PIN_HIGH);
     rt_pin_write(WIFI_WL_REG_OE_CTRL, PIN_HIGH);
+#ifdef BSP_USING_AUDIO
     rt_pin_write(ES8388_CTRL, PIN_HIGH);
-    rt_pin_write(SPEAKER_OE_CTRL, PIN_HIGH);
+#else
+    rt_pin_write(ES8388_CTRL, PIN_LOW);
+#endif
+    /* The codec driver raises the amplifier only after ES8388 is configured.
+     * Keeping it disabled during the board power sequence avoids a boot pop. */
+    rt_pin_write(SPEAKER_OE_CTRL, PIN_LOW);
     rt_pin_write(BL_PWM_DISP_CTRL, PIN_LOW);
     rt_pin_write(LCD_BL_GPIO_NUM, PIN_LOW);
     rt_pin_write(LCD_DISP_GPIO_NUM, PIN_HIGH);

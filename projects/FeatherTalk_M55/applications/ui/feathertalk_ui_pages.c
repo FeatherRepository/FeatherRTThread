@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <feathertalk/version.h>
+#include "feathertalk_audio.h"
 #include "feathertalk_storage.h"
 #include "feathertalk_usb.h"
 #include "ipc/feathertalk_ipc.h"
@@ -11,10 +12,11 @@
 #include "feathertalk_ui_internal.h"
 #include "feathertalk_ui_platform.h"
 #include "feathertalk_ui_preferences_store.h"
+#include "feathertalk_ui_recorder.h"
 
 #define FT_ACCENT_COUNT      5U
 #define FT_OPACITY_COUNT     3U
-#define FT_SETTINGS_COUNT    9U
+#define FT_SETTINGS_COUNT    10U
 #define FT_TIME_FORMAT_COUNT 2U
 #define FT_TIMEZONE_COUNT    7U
 #define FT_SYSTEM_SUMMARY_COUNT 4U
@@ -25,6 +27,9 @@
 #define FT_STORAGE_FORMAT_SUCCESS 2U
 #define FT_STORAGE_FORMAT_FAILED  3U
 #define FT_STORAGE_DEVICE_COUNT    2U
+#define FT_AUDIO_RATE_COUNT        4U
+#define FT_AUDIO_BITS_COUNT        2U
+#define FT_AUDIO_CHANNEL_COUNT     2U
 
 typedef enum
 {
@@ -69,6 +74,7 @@ static lv_obj_t *create_media_page(lv_obj_t *parent);
 static lv_obj_t *create_files_page(lv_obj_t *parent);
 static lv_obj_t *create_about_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_display_page(lv_obj_t *parent);
+static lv_obj_t *create_settings_audio_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_wifi_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_storage_page(lv_obj_t *parent);
@@ -81,6 +87,8 @@ static void files_page_leave(void);
 static void files_refresh_view(bool manual_refresh);
 static void files_format_bytes(uint64_t bytes, char *text, size_t text_size);
 static void settings_time_language_refresh(void);
+static void settings_choice_refresh(lv_obj_t *button, bool selected);
+static void settings_audio_refresh(void);
 static void settings_usb_page_enter(void);
 static void settings_usb_page_leave(void);
 static void settings_storage_page_enter(void);
@@ -97,6 +105,9 @@ static const ft_app_descriptor_t s_apps[] =
     {FT_PAGE_MEDIA,
      {"Media", 1U, 1U, 255U, FT_ICON_MEDIA_PATTERN},
      {FT_ICON_MEDIA, true, 1600U, media_tile_live_content, RT_NULL}},
+    {FT_PAGE_RECORDER,
+     {"Recorder", 1U, 1U, 255U, FT_ICON_COUNT},
+     {FT_ICON_RECORDER_APP, false, 0U, RT_NULL, RT_NULL}},
     {FT_PAGE_GALLERY,
      {"Gallery", 1U, 1U, 255U, FT_ICON_COUNT},
      {FT_ICON_GALLERY, false, 0U, RT_NULL, RT_NULL}},
@@ -105,7 +116,7 @@ static const ft_app_descriptor_t s_apps[] =
      {FT_ICON_FILES, false, 0U, RT_NULL, RT_NULL}},
 };
 
-static const char *s_app_names_zh[] = {"设置", "媒体", "相册", "文件"};
+static const char *s_app_names_zh[] = {"设置", "媒体", "录音机", "相册", "文件"};
 
 typedef struct
 {
@@ -130,6 +141,9 @@ static const ft_settings_entry_t s_settings[FT_SETTINGS_COUNT] =
     {FT_PAGE_SETTINGS_DISPLAY, FT_ICON_DISPLAY, "Display & brightness",
      "Backlight level and panel information", "screen pwm panel brightness display",
      "显示和亮度", "背光亮度与显示面板信息", "屏幕 背光 亮度 显示"},
+    {FT_PAGE_SETTINGS_AUDIO, FT_ICON_AUDIO_SETTINGS, "Audio",
+     "Onboard speaker, microphones and levels", "audio sound speaker microphone volume gain",
+     "音频", "板载扬声器、麦克风和音量", "音频 声音 扬声器 麦克风 音量 增益"},
     {FT_PAGE_SETTINGS_WIFI, FT_ICON_WIFI_SETTINGS, "Wi-Fi",
      "Wireless network state and signal", "wifi wlan wireless network signal",
      "Wi-Fi", "无线网络状态与信号", "无线 网络 信号"},
@@ -177,6 +191,10 @@ static const ft_icon_id_t s_system_summary_icons[FT_SYSTEM_SUMMARY_COUNT] =
 static const uint32_t s_accent_rgb[FT_ACCENT_COUNT] =
     {0x0078D7UL, 0xE81123UL, 0x107C10UL, 0xFFB900UL, 0x744DA9UL};
 static const uint8_t s_opacity_values[FT_OPACITY_COUNT] = {160U, 210U, 255U};
+static const uint32_t s_audio_rates[FT_AUDIO_RATE_COUNT] =
+    {16000U, 24000U, 48000U, 96000U};
+static const uint8_t s_audio_bits[FT_AUDIO_BITS_COUNT] = {16U, 24U};
+static const uint8_t s_audio_channels[FT_AUDIO_CHANNEL_COUNT] = {1U, 2U};
 static const char *s_background_names_en[FT_BACKGROUND_COUNT] =
     {"Black", "Dark", "Accent", "Gallery photo"};
 static const char *s_background_names_zh[FT_BACKGROUND_COUNT] =
@@ -193,12 +211,15 @@ static const ft_page_definition_t s_pages[] =
     {FT_PAGE_SYSTEM, "System information", create_system_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS, "Settings", create_settings_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_MEDIA, "Media", create_media_page, RT_NULL, RT_NULL, RT_NULL},
+    {FT_PAGE_RECORDER, "Recorder", ft_recorder_page_create,
+     ft_recorder_page_enter, RT_NULL, ft_recorder_page_leave},
     {FT_PAGE_GALLERY, "Gallery", ft_gallery_create_page, ft_gallery_page_enter,
      ft_gallery_page_back, ft_gallery_page_leave},
     {FT_PAGE_FILES, "Files", create_files_page, files_page_enter,
      files_page_back, files_page_leave},
     {FT_PAGE_ABOUT, "About", create_about_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_DISPLAY, "Display & brightness", create_settings_display_page, RT_NULL, RT_NULL, RT_NULL},
+    {FT_PAGE_SETTINGS_AUDIO, "Audio", create_settings_audio_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_WIFI, "Wi-Fi", create_settings_wifi_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_BLUETOOTH, "Bluetooth", create_settings_bluetooth_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_STORAGE, "Storage", create_settings_storage_page,
@@ -231,10 +252,30 @@ static lv_obj_t *s_settings_keyboard_hide;
 static lv_obj_t *s_settings_results[FT_SETTINGS_COUNT];
 static lv_obj_t *s_settings_brightness_slider;
 static lv_obj_t *s_settings_brightness_value;
+static lv_obj_t *s_audio_output_slider;
+static lv_obj_t *s_audio_output_value;
+static lv_obj_t *s_audio_output_status;
+static lv_obj_t *s_audio_output_details;
+static lv_obj_t *s_audio_input_slider;
+static lv_obj_t *s_audio_input_value;
+static lv_obj_t *s_audio_input_status;
+static lv_obj_t *s_audio_input_details;
+static lv_obj_t *s_audio_analog_status;
+static lv_obj_t *s_audio_rate_buttons[FT_AUDIO_RATE_COUNT];
+static lv_obj_t *s_audio_bits_buttons[FT_AUDIO_BITS_COUNT];
+static lv_obj_t *s_audio_channel_buttons[FT_AUDIO_CHANNEL_COUNT];
 static lv_obj_t *s_settings_radio_status;
 static lv_obj_t *s_settings_radio_button;
 static lv_obj_t *s_usb_role_buttons[2];
 static lv_obj_t *s_usb_function_buttons[2];
+static lv_obj_t *s_usb_output_device_buttons[1];
+static lv_obj_t *s_usb_input_device_buttons[2];
+static lv_obj_t *s_usb_output_rate_buttons[FT_AUDIO_RATE_COUNT];
+static lv_obj_t *s_usb_output_bits_buttons[FT_AUDIO_BITS_COUNT];
+static lv_obj_t *s_usb_output_channel_buttons[FT_AUDIO_CHANNEL_COUNT];
+static lv_obj_t *s_usb_input_rate_buttons[FT_AUDIO_RATE_COUNT];
+static lv_obj_t *s_usb_input_bits_buttons[FT_AUDIO_BITS_COUNT];
+static lv_obj_t *s_usb_input_channel_buttons[FT_AUDIO_CHANNEL_COUNT];
 static lv_obj_t *s_usb_stop_button;
 static lv_obj_t *s_usb_status_label;
 static lv_timer_t *s_usb_monitor_timer;
@@ -1571,6 +1612,420 @@ static lv_obj_t *create_settings_display_page(lv_obj_t *parent)
     return page;
 }
 
+static void settings_audio_format_level(bool input, uint8_t value,
+                                        char *text, size_t text_size)
+{
+    if (input)
+        lv_snprintf(text, text_size, "%u.%u dB", value / 2U,
+                    (value & 1U) != 0U ? 5U : 0U);
+    else
+        lv_snprintf(text, text_size, "%u%%", value);
+}
+
+static void settings_audio_slider_changed_cb(lv_event_t *event)
+{
+    bool input = (uintptr_t)lv_event_get_user_data(event) != 0U;
+    lv_obj_t *slider = lv_event_get_target(event);
+    lv_obj_t *label = input ? s_audio_input_value : s_audio_output_value;
+    char text[24];
+
+    if (label == RT_NULL || !lv_obj_is_valid(label)) return;
+    settings_audio_format_level(input, (uint8_t)lv_slider_get_value(slider),
+                                text, sizeof(text));
+    lv_label_set_text(label, text);
+}
+
+static void settings_audio_format_clicked_cb(lv_event_t *event)
+{
+    const ft_ui_preferences_t *preferences = ft_preferences_get();
+    ft_usb_status_t usb_status;
+    uintptr_t encoded = (uintptr_t)lv_event_get_user_data(event);
+    uint8_t group = (uint8_t)(encoded >> 8);
+    uint8_t index = (uint8_t)encoded;
+    uint32_t sample_rate = preferences->audio_output_sample_rate;
+    uint8_t sample_bits = preferences->audio_output_sample_bits;
+    uint8_t channels = preferences->audio_output_channels;
+    int result;
+
+    if (group == 0U && index < FT_AUDIO_RATE_COUNT)
+        sample_rate = s_audio_rates[index];
+    else if (group == 1U && index < FT_AUDIO_BITS_COUNT)
+        sample_bits = s_audio_bits[index];
+    else if (group == 2U && index < FT_AUDIO_CHANNEL_COUNT)
+        channels = s_audio_channels[index];
+    else
+        return;
+    ft_usb_get_status(&usb_status);
+    if (usb_status.function == FT_USB_FUNCTION_AUDIO && usb_status.active)
+    {
+        result = ft_usb_set_uac_output_format(sample_rate, sample_bits,
+                                              channels);
+        if (result == RT_EOK)
+            result = ft_preferences_sync_audio_output_format(
+                sample_rate, sample_bits, channels);
+    }
+    else
+    {
+        result = ft_preferences_set_audio_output_format(sample_rate,
+                                                        sample_bits,
+                                                        channels);
+    }
+    if (result != RT_EOK)
+        feathertalk_ui_alert(
+            ft_preferences_text("无法更改音频格式", "Unable to change audio format"),
+            result == -RT_EBUSY ?
+                ft_preferences_text("音频正在播放，请停止播放后重试。",
+                                    "Audio is playing. Stop playback and try again.") :
+                ft_preferences_text("sound0 或 ES8388 没有接受该设置。",
+                                    "sound0 or ES8388 rejected this setting."));
+    settings_audio_refresh();
+}
+
+static void settings_audio_refresh(void)
+{
+    ft_audio_status_t status;
+    char text[128];
+    size_t i;
+
+    (void)ft_audio_get_status(&status);
+    if (s_audio_output_slider != RT_NULL &&
+        lv_obj_is_valid(s_audio_output_slider))
+    {
+        if (status.output_ready)
+        {
+            lv_obj_remove_state(s_audio_output_slider, LV_STATE_DISABLED);
+            lv_slider_set_value(s_audio_output_slider, status.output_volume,
+                                LV_ANIM_OFF);
+        }
+        else
+        {
+            lv_obj_add_state(s_audio_output_slider, LV_STATE_DISABLED);
+        }
+    }
+    if (s_audio_output_status != RT_NULL &&
+        lv_obj_is_valid(s_audio_output_status))
+        lv_label_set_text(s_audio_output_status, status.output_ready ?
+            ft_preferences_text("已注册 · 默认输出", "Registered · Default output") :
+            status.output_registered ?
+            ft_preferences_text("已注册 · 初始化失败", "Registered · Initialization failed") :
+            ft_preferences_text("不可用 · sound0 未注册", "Unavailable · sound0 missing"));
+    if (s_audio_output_details != RT_NULL &&
+        lv_obj_is_valid(s_audio_output_details))
+    {
+        if (status.output_ready)
+            lv_snprintf(text, sizeof(text),
+                        "sound0 · ES8388 + MD8002 · %lu Hz · %u ch · %u bit",
+                        (unsigned long)status.output_sample_rate,
+                        status.output_channels, status.output_sample_bits);
+        else
+            lv_snprintf(text, sizeof(text), "%s",
+                        ft_preferences_text("ES8388 / 功放驱动未就绪",
+                                            "ES8388 / amplifier driver not ready"));
+        lv_label_set_text(s_audio_output_details, text);
+    }
+    if (s_audio_output_value != RT_NULL &&
+        lv_obj_is_valid(s_audio_output_value))
+    {
+        settings_audio_format_level(false, status.output_volume,
+                                    text, sizeof(text));
+        lv_label_set_text(s_audio_output_value, text);
+    }
+
+    if (s_audio_input_slider != RT_NULL && lv_obj_is_valid(s_audio_input_slider))
+    {
+        if (status.input_ready)
+        {
+            lv_obj_remove_state(s_audio_input_slider, LV_STATE_DISABLED);
+            lv_slider_set_value(s_audio_input_slider, status.input_gain,
+                                LV_ANIM_OFF);
+        }
+        else
+        {
+            lv_obj_add_state(s_audio_input_slider, LV_STATE_DISABLED);
+        }
+    }
+    if (s_audio_input_status != RT_NULL && lv_obj_is_valid(s_audio_input_status))
+        lv_label_set_text(s_audio_input_status, status.input_ready ?
+            ft_preferences_text("已注册 · 默认输入", "Registered · Default input") :
+            status.input_registered ?
+            ft_preferences_text("已注册 · 初始化失败", "Registered · Initialization failed") :
+            ft_preferences_text("不可用 · mic0 未注册", "Unavailable · mic0 missing"));
+    if (s_audio_input_details != RT_NULL && lv_obj_is_valid(s_audio_input_details))
+    {
+        if (status.input_ready)
+            lv_snprintf(text, sizeof(text),
+                        "mic0 · Dual PDM · %lu Hz · %u ch · %u bit",
+                        (unsigned long)status.input_sample_rate,
+                        status.input_channels, status.input_sample_bits);
+        else
+            lv_snprintf(text, sizeof(text), "%s",
+                        ft_preferences_text("PDM/PCM 驱动未就绪",
+                                            "PDM/PCM driver not ready"));
+        lv_label_set_text(s_audio_input_details, text);
+    }
+    if (s_audio_input_value != RT_NULL && lv_obj_is_valid(s_audio_input_value))
+    {
+        settings_audio_format_level(true, status.input_gain,
+                                    text, sizeof(text));
+        lv_label_set_text(s_audio_input_value, text);
+    }
+    if (s_audio_analog_status != RT_NULL && lv_obj_is_valid(s_audio_analog_status))
+        lv_label_set_text(s_audio_analog_status,
+            ft_preferences_text("硬件前端存在 · 产品驱动尚未接入",
+                                "Hardware front end present · Product driver unavailable"));
+    for (i = 0U; i < FT_AUDIO_RATE_COUNT; i++)
+    {
+        settings_choice_refresh(s_audio_rate_buttons[i],
+                                status.output_sample_rate == s_audio_rates[i]);
+        if (s_audio_rate_buttons[i] != RT_NULL &&
+            lv_obj_is_valid(s_audio_rate_buttons[i]))
+        {
+            if (status.output_ready)
+                lv_obj_remove_state(s_audio_rate_buttons[i], LV_STATE_DISABLED);
+            else
+                lv_obj_add_state(s_audio_rate_buttons[i], LV_STATE_DISABLED);
+        }
+    }
+    for (i = 0U; i < FT_AUDIO_BITS_COUNT; i++)
+    {
+        settings_choice_refresh(s_audio_bits_buttons[i],
+                                status.output_sample_bits == s_audio_bits[i]);
+        if (s_audio_bits_buttons[i] != RT_NULL &&
+            lv_obj_is_valid(s_audio_bits_buttons[i]))
+        {
+            if (status.output_ready)
+                lv_obj_remove_state(s_audio_bits_buttons[i], LV_STATE_DISABLED);
+            else
+                lv_obj_add_state(s_audio_bits_buttons[i], LV_STATE_DISABLED);
+        }
+    }
+    for (i = 0U; i < FT_AUDIO_CHANNEL_COUNT; i++)
+    {
+        settings_choice_refresh(s_audio_channel_buttons[i],
+                                status.output_channels == s_audio_channels[i]);
+        if (s_audio_channel_buttons[i] != RT_NULL &&
+            lv_obj_is_valid(s_audio_channel_buttons[i]))
+        {
+            if (status.output_ready)
+                lv_obj_remove_state(s_audio_channel_buttons[i], LV_STATE_DISABLED);
+            else
+                lv_obj_add_state(s_audio_channel_buttons[i], LV_STATE_DISABLED);
+        }
+    }
+}
+
+static void settings_audio_slider_released_cb(lv_event_t *event)
+{
+    bool input = (uintptr_t)lv_event_get_user_data(event) != 0U;
+    uint8_t value = (uint8_t)lv_slider_get_value(lv_event_get_target(event));
+
+    if (input)
+        (void)ft_preferences_set_audio_input_gain(value);
+    else
+        (void)ft_preferences_set_audio_output_volume(value);
+    settings_audio_refresh();
+}
+
+static lv_obj_t *settings_audio_create_device_card(
+    lv_obj_t *parent, ft_icon_id_t icon_id, const char *title,
+    lv_obj_t **status_slot, lv_obj_t **details_slot,
+    const char *details_text, bool disabled)
+{
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_t *column;
+    lv_obj_t *label;
+    lv_obj_t *details;
+
+    ft_ui_style_panel(card);
+    lv_obj_set_width(card, lv_pct(100));
+    lv_obj_set_height(card, LV_SIZE_CONTENT);
+    lv_obj_set_style_radius(card, ft_layout_px(4), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, ft_layout_px(12), LV_PART_MAIN);
+    lv_obj_set_style_pad_column(card, ft_layout_px(12), LV_PART_MAIN);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    if (disabled) lv_obj_set_style_opa(card, LV_OPA_60, LV_PART_MAIN);
+
+    (void)ft_icon_create(card, icon_id, ft_layout_icon_size(32U), true);
+    column = lv_obj_create(card);
+    style_layout_container(column);
+    lv_obj_set_width(column, 0);
+    lv_obj_set_height(column, LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(column, 1);
+    lv_obj_set_style_pad_row(column, ft_layout_px(3), LV_PART_MAIN);
+    lv_obj_set_flex_flow(column, LV_FLEX_FLOW_COLUMN);
+
+    label = lv_label_create(column);
+    lv_label_set_text(label, title);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(label, ft_layout_font(16), LV_PART_MAIN);
+    track_object(status_slot, lv_label_create(column));
+    lv_obj_set_width(*status_slot, lv_pct(100));
+    lv_label_set_long_mode(*status_slot, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(*status_slot, ft_layout_font(13), LV_PART_MAIN);
+    ft_ui_register_accent(*status_slot, FT_ACCENT_TEXT);
+    details = lv_label_create(column);
+    if (details_slot != RT_NULL) track_object(details_slot, details);
+    lv_label_set_text(details, details_text != RT_NULL ? details_text : "");
+    lv_obj_set_width(details, lv_pct(100));
+    lv_label_set_long_mode(details, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(details, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(details, ft_layout_font(12), LV_PART_MAIN);
+    return card;
+}
+
+static lv_obj_t *settings_audio_create_level_control(lv_obj_t *page,
+                                                     bool input)
+{
+    lv_obj_t *row = lv_obj_create(page);
+    lv_obj_t *caption;
+    lv_obj_t *slider;
+    lv_obj_t **slider_slot = input ? &s_audio_input_slider :
+                                     &s_audio_output_slider;
+    lv_obj_t **value_slot = input ? &s_audio_input_value :
+                                    &s_audio_output_value;
+
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), ft_layout_px(28));
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    caption = lv_label_create(row);
+    lv_label_set_text(caption, input ?
+                      ft_preferences_text("输入增益", "Input gain") :
+                      ft_preferences_text("输出音量", "Output volume"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    track_object(value_slot, lv_label_create(row));
+    lv_obj_set_style_text_font(*value_slot, ft_layout_font(14), LV_PART_MAIN);
+    ft_ui_register_accent(*value_slot, FT_ACCENT_TEXT);
+
+    track_object(slider_slot, lv_slider_create(page));
+    slider = *slider_slot;
+    lv_obj_set_size(slider, lv_pct(100), ft_layout_px(20));
+    lv_slider_set_range(slider, 0, input ? 75 : 100);
+    lv_obj_add_event_cb(slider, settings_audio_slider_changed_cb,
+                        LV_EVENT_VALUE_CHANGED,
+                        (void *)(uintptr_t)(input ? 1U : 0U));
+    lv_obj_add_event_cb(slider, settings_audio_slider_released_cb,
+                        LV_EVENT_RELEASED,
+                        (void *)(uintptr_t)(input ? 1U : 0U));
+    return slider;
+}
+
+static lv_obj_t *create_settings_audio_page(lv_obj_t *parent)
+{
+    lv_obj_t *page = create_text_page(
+        parent, ft_preferences_text("音频", "Audio"), FT_ICON_AUDIO_SETTINGS,
+        ft_preferences_text("管理此开发板实际连接的音频输出、输入和电平。",
+                            "Manage the audio outputs, inputs and levels physically connected on this board."));
+    lv_obj_t *caption;
+    lv_obj_t *row;
+    size_t i;
+
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("输出", "Output"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    (void)settings_audio_create_device_card(
+        page, FT_ICON_SPEAKER_DEVICE,
+        ft_preferences_text("板载扬声器", "Onboard speaker"),
+        &s_audio_output_status, &s_audio_output_details, "", false);
+    (void)settings_audio_create_level_control(page, false);
+
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("采样率", "Sample rate"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), ft_layout_get()->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(6), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    for (i = 0U; i < FT_AUDIO_RATE_COUNT; i++)
+    {
+        char label[16];
+        lv_snprintf(label, sizeof(label), "%lu kHz",
+                    (unsigned long)(s_audio_rates[i] / 1000U));
+        track_object(&s_audio_rate_buttons[i],
+                     create_flat_button(row, label,
+                        settings_audio_format_clicked_cb,
+                        (void *)(uintptr_t)i));
+        lv_obj_set_width(s_audio_rate_buttons[i], 0);
+        lv_obj_set_flex_grow(s_audio_rate_buttons[i], 1);
+    }
+
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("采样深度", "Sample depth"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), ft_layout_get()->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    for (i = 0U; i < FT_AUDIO_BITS_COUNT; i++)
+    {
+        char label[16];
+        lv_snprintf(label, sizeof(label), "%u bit", s_audio_bits[i]);
+        track_object(&s_audio_bits_buttons[i],
+                     create_flat_button(row, label,
+                        settings_audio_format_clicked_cb,
+                        (void *)(uintptr_t)((1U << 8) | i)));
+        lv_obj_set_width(s_audio_bits_buttons[i], 0);
+        lv_obj_set_flex_grow(s_audio_bits_buttons[i], 1);
+    }
+
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("声道数", "Channels"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), ft_layout_get()->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    track_object(&s_audio_channel_buttons[0],
+                 create_flat_button(row,
+                    ft_preferences_text("单声道", "Mono"),
+                    settings_audio_format_clicked_cb,
+                    (void *)(uintptr_t)(2U << 8)));
+    track_object(&s_audio_channel_buttons[1],
+                 create_flat_button(row,
+                    ft_preferences_text("双声道", "Stereo"),
+                    settings_audio_format_clicked_cb,
+                    (void *)(uintptr_t)((2U << 8) | 1U)));
+    for (i = 0U; i < FT_AUDIO_CHANNEL_COUNT; i++)
+    {
+        lv_obj_set_width(s_audio_channel_buttons[i], 0);
+        lv_obj_set_flex_grow(s_audio_channel_buttons[i], 1);
+    }
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text(
+        "单声道数据会复制到左右 DAC；板载功放最终驱动一个扬声器。",
+        "Mono data is copied to both DAC channels; the onboard amplifier drives one speaker."));
+    lv_obj_set_width(caption, lv_pct(100));
+    lv_label_set_long_mode(caption, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(caption, ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_set_style_text_color(caption, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("输入", "Input"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    (void)settings_audio_create_device_card(
+        page, FT_ICON_PDM_MIC_DEVICE,
+        ft_preferences_text("双 PDM 麦克风阵列", "Dual PDM microphone array"),
+        &s_audio_input_status, &s_audio_input_details, "", false);
+    (void)settings_audio_create_level_control(page, true);
+    (void)settings_audio_create_device_card(
+        page, FT_ICON_ANALOG_MIC_DEVICE,
+        ft_preferences_text("模拟麦克风前端", "Analog microphone front end"),
+        &s_audio_analog_status, RT_NULL,
+        ft_preferences_text("AMIC2 · 尚未注册为 RT-Thread Audio 设备",
+                            "AMIC2 · Not registered as an RT-Thread Audio device"),
+        true);
+    settings_audio_refresh();
+    return page;
+}
+
 static void settings_radio_toggle_cb(lv_event_t *event)
 {
     feathertalk_quick_control_t control =
@@ -2483,9 +2938,47 @@ static lv_obj_t *create_settings_storage_page(lv_obj_t *parent)
 static void settings_usb_refresh(void)
 {
     ft_usb_status_t status;
+    ft_audio_status_t audio;
+    const ft_ui_preferences_t *preferences = ft_preferences_get();
+    uint32_t output_rate;
+    uint8_t output_bits;
+    uint8_t output_channels;
     char text[320];
+    size_t i;
 
     ft_usb_get_status(&status);
+    (void)ft_audio_get_status(&audio);
+
+    /* SET_CUR and SET_INTERFACE requests made by the USB host are the
+     * authoritative format while UAC is active. Mirror them into the local
+     * settings model without sending the same change back to USB. */
+    if (status.function == FT_USB_FUNCTION_AUDIO && status.active &&
+        !status.uac_format_pending &&
+        ft_usb_uac_output_supported(status.uac_output_sample_rate,
+                                    status.uac_output_sample_bits,
+                                    status.uac_output_channels) &&
+        (preferences->audio_output_sample_rate !=
+             status.uac_output_sample_rate ||
+         preferences->audio_output_sample_bits !=
+             status.uac_output_sample_bits ||
+         preferences->audio_output_channels != status.uac_output_channels))
+    {
+        (void)ft_preferences_sync_audio_output_format(
+            status.uac_output_sample_rate,
+            status.uac_output_sample_bits,
+            status.uac_output_channels);
+        preferences = ft_preferences_get();
+    }
+    output_rate = status.function == FT_USB_FUNCTION_AUDIO && status.active ?
+                  status.uac_output_sample_rate :
+                  preferences->audio_output_sample_rate;
+    output_bits = status.function == FT_USB_FUNCTION_AUDIO && status.active ?
+                  status.uac_output_sample_bits :
+                  preferences->audio_output_sample_bits;
+    output_channels = status.function == FT_USB_FUNCTION_AUDIO && status.active ?
+                      status.uac_output_channels :
+                      preferences->audio_output_channels;
+
     settings_choice_refresh(s_usb_role_buttons[FT_USB_ROLE_DEVICE], true);
     settings_choice_refresh(s_usb_role_buttons[FT_USB_ROLE_HOST], false);
     settings_choice_refresh(s_usb_function_buttons[0],
@@ -2506,7 +2999,93 @@ static void settings_usb_refresh(void)
     }
     if (s_usb_function_buttons[1] != RT_NULL &&
         lv_obj_is_valid(s_usb_function_buttons[1]))
-        lv_obj_add_state(s_usb_function_buttons[1], LV_STATE_DISABLED);
+    {
+        if (status.audio_supported)
+            lv_obj_remove_state(s_usb_function_buttons[1], LV_STATE_DISABLED);
+        else
+            lv_obj_add_state(s_usb_function_buttons[1], LV_STATE_DISABLED);
+    }
+    settings_choice_refresh(s_usb_output_device_buttons[0], true);
+    settings_choice_refresh(s_usb_input_device_buttons[0], true);
+    settings_choice_refresh(s_usb_input_device_buttons[1], false);
+    if (s_usb_output_device_buttons[0] != RT_NULL &&
+        lv_obj_is_valid(s_usb_output_device_buttons[0]))
+        lv_obj_add_state(s_usb_output_device_buttons[0], LV_STATE_DISABLED);
+    if (s_usb_input_device_buttons[0] != RT_NULL &&
+        lv_obj_is_valid(s_usb_input_device_buttons[0]))
+        lv_obj_add_state(s_usb_input_device_buttons[0], LV_STATE_DISABLED);
+    if (s_usb_input_device_buttons[1] != RT_NULL &&
+        lv_obj_is_valid(s_usb_input_device_buttons[1]))
+        lv_obj_add_state(s_usb_input_device_buttons[1], LV_STATE_DISABLED);
+
+    for (i = 0U; i < FT_AUDIO_RATE_COUNT; i++)
+    {
+        settings_choice_refresh(s_usb_output_rate_buttons[i],
+                                output_rate == s_audio_rates[i]);
+        if (s_usb_output_rate_buttons[i] != RT_NULL &&
+            lv_obj_is_valid(s_usb_output_rate_buttons[i]))
+        {
+            if (status.audio_supported && audio.output_ready &&
+                ft_usb_uac_output_supported(s_audio_rates[i], output_bits,
+                                            output_channels))
+                lv_obj_remove_state(s_usb_output_rate_buttons[i],
+                                    LV_STATE_DISABLED);
+            else
+                lv_obj_add_state(s_usb_output_rate_buttons[i],
+                                 LV_STATE_DISABLED);
+        }
+        settings_choice_refresh(s_usb_input_rate_buttons[i],
+                                status.uac_input_sample_rate == s_audio_rates[i] ||
+                                (!status.active && s_audio_rates[i] == 16000U));
+        if (s_usb_input_rate_buttons[i] != RT_NULL &&
+            lv_obj_is_valid(s_usb_input_rate_buttons[i]))
+            lv_obj_add_state(s_usb_input_rate_buttons[i], LV_STATE_DISABLED);
+    }
+    for (i = 0U; i < FT_AUDIO_BITS_COUNT; i++)
+    {
+        settings_choice_refresh(s_usb_output_bits_buttons[i],
+                                output_bits == s_audio_bits[i]);
+        if (s_usb_output_bits_buttons[i] != RT_NULL &&
+            lv_obj_is_valid(s_usb_output_bits_buttons[i]))
+        {
+            if (status.audio_supported && audio.output_ready &&
+                ft_usb_uac_output_supported(output_rate, s_audio_bits[i],
+                                            output_channels))
+                lv_obj_remove_state(s_usb_output_bits_buttons[i],
+                                    LV_STATE_DISABLED);
+            else
+                lv_obj_add_state(s_usb_output_bits_buttons[i],
+                                 LV_STATE_DISABLED);
+        }
+        settings_choice_refresh(s_usb_input_bits_buttons[i],
+                                s_audio_bits[i] == 16U);
+        if (s_usb_input_bits_buttons[i] != RT_NULL &&
+            lv_obj_is_valid(s_usb_input_bits_buttons[i]))
+            lv_obj_add_state(s_usb_input_bits_buttons[i], LV_STATE_DISABLED);
+    }
+    for (i = 0U; i < FT_AUDIO_CHANNEL_COUNT; i++)
+    {
+        settings_choice_refresh(s_usb_output_channel_buttons[i],
+                                output_channels == s_audio_channels[i]);
+        if (s_usb_output_channel_buttons[i] != RT_NULL &&
+            lv_obj_is_valid(s_usb_output_channel_buttons[i]))
+        {
+            if (status.audio_supported && audio.output_ready &&
+                ft_usb_uac_output_supported(output_rate, output_bits,
+                                            s_audio_channels[i]))
+                lv_obj_remove_state(s_usb_output_channel_buttons[i],
+                                    LV_STATE_DISABLED);
+            else
+                lv_obj_add_state(s_usb_output_channel_buttons[i],
+                                 LV_STATE_DISABLED);
+        }
+        settings_choice_refresh(s_usb_input_channel_buttons[i],
+                                s_audio_channels[i] == 2U);
+        if (s_usb_input_channel_buttons[i] != RT_NULL &&
+            lv_obj_is_valid(s_usb_input_channel_buttons[i]))
+            lv_obj_add_state(s_usb_input_channel_buttons[i],
+                             LV_STATE_DISABLED);
+    }
     if (s_usb_stop_button != RT_NULL && lv_obj_is_valid(s_usb_stop_button))
     {
         if (status.active)
@@ -2517,7 +3096,35 @@ static void settings_usb_refresh(void)
 
     if (s_usb_status_label == RT_NULL || !lv_obj_is_valid(s_usb_status_label))
         return;
-    if (status.active)
+    if (status.active && status.function == FT_USB_FUNCTION_AUDIO)
+    {
+        lv_snprintf(text, sizeof(text), ft_preferences_text(
+                    "USB Audio：运行中 · %s\n输出：sound0 · %lu Hz · %u bit · %u ch · %s\n"
+                    "输入：mic0 · %lu Hz · %u bit · %u ch · %s\n"
+                    "同步：主机 %lu 次 / 本机 %lu 次 · 错误 %d",
+                    "USB Audio: active · %s\nOutput: sound0 · %lu Hz · %u bit · %u ch · %s\n"
+                    "Input: mic0 · %lu Hz · %u bit · %u ch · %s\n"
+                    "Sync: host %lu / device %lu · error %d"),
+                    status.configured ? ft_preferences_text("已枚举", "enumerated") :
+                    status.connected ? ft_preferences_text("已连接", "connected") :
+                                       ft_preferences_text("等待电脑", "waiting for host"),
+                    (unsigned long)status.uac_output_sample_rate,
+                    status.uac_output_sample_bits,
+                    status.uac_output_channels,
+                    status.uac_output_streaming ?
+                        ft_preferences_text("传输中", "streaming") :
+                        ft_preferences_text("空闲", "idle"),
+                    (unsigned long)status.uac_input_sample_rate,
+                    status.uac_input_sample_bits,
+                    status.uac_input_channels,
+                    status.uac_input_streaming ?
+                        ft_preferences_text("传输中", "streaming") :
+                        ft_preferences_text("空闲", "idle"),
+                    (unsigned long)status.uac_host_update_count,
+                    (unsigned long)status.uac_device_update_count,
+                    status.last_error);
+    }
+    else if (status.active)
     {
         uint64_t flash_bytes = (uint64_t)status.flash_block_size *
                                status.flash_block_count;
@@ -2534,11 +3141,11 @@ static void settings_usb_refresh(void)
                     (unsigned long)(flash_bytes / (1024U * 1024U)),
                     (unsigned long)(sd_bytes / (1024U * 1024U)));
     }
-    else if (!status.storage_supported)
+    else if (!status.storage_supported && !status.audio_supported)
     {
         lv_snprintf(text, sizeof(text), "%s", ft_preferences_text(
-                    "USB Device MSC 未编入当前固件。",
-                    "USB Device MSC is not built into this firmware."));
+                    "USB 设备功能未编入当前固件。",
+                    "USB device functions are not built into this firmware."));
     }
     else if (!status.sd_present)
     {
@@ -2556,8 +3163,8 @@ static void settings_usb_refresh(void)
     else
     {
         lv_snprintf(text, sizeof(text), "%s", ft_preferences_text(
-                    "内置 Flash 和 SD 卡已就绪。选择存储器模式后，电脑将看到两个逻辑磁盘，本机文件应用会暂时停止访问两块介质。",
-                    "Internal Flash and SD card are ready. Storage mode exposes two logical disks and temporarily pauses local Files access to both volumes."));
+                    "USB Audio 已就绪；输出格式可由本机或电脑双向更新。存储器模式需要 SD 卡。",
+                    "USB Audio is ready; its output format can be updated by either the device or host. Storage mode requires an SD card."));
     }
     lv_label_set_text(s_usb_status_label, text);
 }
@@ -2566,6 +3173,54 @@ static void settings_usb_storage_clicked_cb(lv_event_t *event)
 {
     LV_UNUSED(event);
     (void)ft_usb_set_function(FT_USB_FUNCTION_STORAGE);
+    settings_usb_refresh();
+}
+
+static void settings_usb_audio_clicked_cb(lv_event_t *event)
+{
+    int result;
+    LV_UNUSED(event);
+    result = ft_usb_set_function(FT_USB_FUNCTION_AUDIO);
+    if (result != RT_EOK)
+        feathertalk_ui_alert(
+            ft_preferences_text("USB Audio 启动失败",
+                                "USB Audio failed to start"),
+            ft_preferences_text("请检查 USB 音频驱动和音频设备状态。",
+                                "Check the USB audio driver and audio device state."));
+    settings_usb_refresh();
+}
+
+static void settings_usb_output_format_clicked_cb(lv_event_t *event)
+{
+    const ft_ui_preferences_t *preferences = ft_preferences_get();
+    uintptr_t encoded = (uintptr_t)lv_event_get_user_data(event);
+    uint8_t group = (uint8_t)(encoded >> 8);
+    uint8_t index = (uint8_t)encoded;
+    uint32_t sample_rate = preferences->audio_output_sample_rate;
+    uint8_t sample_bits = preferences->audio_output_sample_bits;
+    uint8_t channels = preferences->audio_output_channels;
+    int result;
+
+    if (group == 0U && index < FT_AUDIO_RATE_COUNT)
+        sample_rate = s_audio_rates[index];
+    else if (group == 1U && index < FT_AUDIO_BITS_COUNT)
+        sample_bits = s_audio_bits[index];
+    else if (group == 2U && index < FT_AUDIO_CHANNEL_COUNT)
+        channels = s_audio_channels[index];
+    else
+        return;
+    result = ft_usb_set_uac_output_format(sample_rate, sample_bits, channels);
+    if (result == RT_EOK)
+        result = ft_preferences_sync_audio_output_format(sample_rate,
+                                                         sample_bits,
+                                                         channels);
+    if (result != RT_EOK)
+        feathertalk_ui_alert(
+            ft_preferences_text("UAC 格式更新失败",
+                                "UAC format update failed"),
+            ft_preferences_text(
+                "当前 sound0 驱动没有接受该组合，USB 主机配置保持不变。",
+                "The current sound0 driver rejected this combination; the USB host configuration was not changed."));
     settings_usb_refresh();
 }
 
@@ -2595,6 +3250,82 @@ static void settings_usb_page_leave(void)
     {
         lv_timer_delete(s_usb_monitor_timer);
         s_usb_monitor_timer = RT_NULL;
+    }
+}
+
+static void settings_usb_create_format_controls(lv_obj_t *page, bool input)
+{
+    lv_obj_t **rate_buttons = input ? s_usb_input_rate_buttons :
+                                      s_usb_output_rate_buttons;
+    lv_obj_t **bits_buttons = input ? s_usb_input_bits_buttons :
+                                      s_usb_output_bits_buttons;
+    lv_obj_t **channel_buttons = input ? s_usb_input_channel_buttons :
+                                         s_usb_output_channel_buttons;
+    lv_event_cb_t callback = input ? RT_NULL :
+                                     settings_usb_output_format_clicked_cb;
+    lv_obj_t *caption;
+    lv_obj_t *row;
+    size_t i;
+
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("采样率", "Sample rate"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(13), LV_PART_MAIN);
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), ft_layout_get()->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(6), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    for (i = 0U; i < FT_AUDIO_RATE_COUNT; i++)
+    {
+        char label[16];
+        lv_snprintf(label, sizeof(label), "%lu kHz",
+                    (unsigned long)(s_audio_rates[i] / 1000U));
+        track_object(&rate_buttons[i],
+                     create_flat_button(row, label, callback,
+                                        (void *)(uintptr_t)i));
+        lv_obj_set_width(rate_buttons[i], 0);
+        lv_obj_set_flex_grow(rate_buttons[i], 1);
+    }
+
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("采样深度", "Sample depth"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(13), LV_PART_MAIN);
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), ft_layout_get()->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    for (i = 0U; i < FT_AUDIO_BITS_COUNT; i++)
+    {
+        char label[16];
+        lv_snprintf(label, sizeof(label), "%u bit", s_audio_bits[i]);
+        track_object(&bits_buttons[i],
+                     create_flat_button(row, label, callback,
+                        (void *)(uintptr_t)((1U << 8) | i)));
+        lv_obj_set_width(bits_buttons[i], 0);
+        lv_obj_set_flex_grow(bits_buttons[i], 1);
+    }
+
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("声道数", "Channels"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(13), LV_PART_MAIN);
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), ft_layout_get()->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    track_object(&channel_buttons[0],
+                 create_flat_button(row,
+                    ft_preferences_text("单声道", "Mono"), callback,
+                    (void *)(uintptr_t)(2U << 8)));
+    track_object(&channel_buttons[1],
+                 create_flat_button(row,
+                    ft_preferences_text("双声道", "Stereo"), callback,
+                    (void *)(uintptr_t)((2U << 8) | 1U)));
+    for (i = 0U; i < FT_AUDIO_CHANNEL_COUNT; i++)
+    {
+        lv_obj_set_width(channel_buttons[i], 0);
+        lv_obj_set_flex_grow(channel_buttons[i], 1);
     }
 }
 
@@ -2653,7 +3384,8 @@ static lv_obj_t *create_settings_usb_page(lv_obj_t *parent)
                                     ft_preferences_text("存储器", "Storage"),
                                     settings_usb_storage_clicked_cb, RT_NULL));
     track_object(&s_usb_function_buttons[1],
-                 create_flat_button(row, "USB Audio (UAC)", RT_NULL, RT_NULL));
+                 create_flat_button(row, "USB Audio (UAC2)",
+                                    settings_usb_audio_clicked_cb, RT_NULL));
     lv_obj_set_width(s_usb_function_buttons[0], 0);
     lv_obj_set_width(s_usb_function_buttons[1], 0);
     lv_obj_set_flex_grow(s_usb_function_buttons[0], 1);
@@ -2663,14 +3395,58 @@ static lv_obj_t *create_settings_usb_page(lv_obj_t *parent)
     lv_obj_set_width(note, lv_pct(100));
     lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
     lv_label_set_text(note, ft_preferences_text(
-                      "存储器模式共享 SD 卡；未插卡时不可选。USB Audio 将随音频链路后续启用。",
-                      "Storage shares the SD card and is disabled without media. USB Audio will be enabled with the audio path later."));
+                      "存储器模式共享 Flash 和 SD 卡；UAC2 同时提供扬声器输出和麦克风输入。",
+                      "Storage shares Flash and SD media; UAC2 provides speaker output and microphone input simultaneously."));
+    lv_obj_set_style_text_color(note, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(note, ft_layout_font(12), LV_PART_MAIN);
+
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("UAC 输出设备", "UAC output device"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    track_object(&s_usb_output_device_buttons[0],
+                 create_flat_button(page,
+                    ft_preferences_text("板载扬声器 · sound0（默认）",
+                                        "Onboard speaker · sound0 (default)"),
+                    RT_NULL, RT_NULL));
+    lv_obj_set_width(s_usb_output_device_buttons[0], lv_pct(100));
+    settings_usb_create_format_controls(page, false);
+
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("UAC 输入设备", "UAC input device"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), ft_layout_get()->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    track_object(&s_usb_input_device_buttons[0],
+                 create_flat_button(row,
+                    ft_preferences_text("双 PDM 麦克风 · mic0",
+                                        "Dual PDM microphones · mic0"),
+                    RT_NULL, RT_NULL));
+    track_object(&s_usb_input_device_buttons[1],
+                 create_flat_button(row,
+                    ft_preferences_text("模拟麦克风（无驱动）",
+                                        "Analog microphone (no driver)"),
+                    RT_NULL, RT_NULL));
+    lv_obj_set_width(s_usb_input_device_buttons[0], 0);
+    lv_obj_set_width(s_usb_input_device_buttons[1], 0);
+    lv_obj_set_flex_grow(s_usb_input_device_buttons[0], 1);
+    lv_obj_set_flex_grow(s_usb_input_device_buttons[1], 1);
+    settings_usb_create_format_controls(page, true);
+
+    note = lv_label_create(page);
+    lv_obj_set_width(note, lv_pct(100));
+    lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(note, ft_preferences_text(
+        "UAC 输出可选 16/24/48/96 kHz、16/24 bit；USB Terminal 当前固定为双声道，单声道仅供本地 sound0 使用。mic0 驱动固定为 16 kHz、16 bit、双声道，因此输入格式会显示但不可修改。电脑更改 UAC 格式后，本页会自动同步。",
+        "UAC output supports 16/24/48/96 kHz and 16/24 bit. Its USB Terminal is currently stereo; mono remains available only to local sound0 clients. The mic0 driver is fixed at 16 kHz, 16 bit stereo, so input controls are visible but locked. Host-side UAC changes are mirrored here automatically."));
     lv_obj_set_style_text_color(note, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
     lv_obj_set_style_text_font(note, ft_layout_font(12), LV_PART_MAIN);
 
     track_object(&s_usb_stop_button,
                  create_flat_button(page,
-                                    ft_preferences_text("停止 USB 存储", "Stop USB storage"),
+                                    ft_preferences_text("停止 USB 功能", "Stop USB function"),
                                     settings_usb_stop_clicked_cb, RT_NULL));
     lv_obj_set_width(s_usb_stop_button, lv_pct(100));
 
@@ -2923,6 +3699,7 @@ void ft_pages_apply_language(void)
                                     s_apps[i].tile.name,
                                     s_app_names_zh[i],
                                     app_display_name(i));
+    ft_recorder_page_apply_language();
     ft_gallery_apply_language();
 }
 
@@ -4259,6 +5036,51 @@ ft_page_id_t ft_pages_test_settings_page_id(size_t i)
 { return i < FT_SETTINGS_COUNT ? s_settings[i].page_id : FT_PAGE_COUNT; }
 lv_obj_t *ft_pages_test_get_settings_brightness(void)
 { return s_settings_brightness_slider; }
+lv_obj_t *ft_pages_test_get_audio_output_slider(void)
+{ return s_audio_output_slider; }
+lv_obj_t *ft_pages_test_get_audio_input_slider(void)
+{ return s_audio_input_slider; }
+lv_obj_t *ft_pages_test_get_audio_rate_button(size_t index)
+{ return index < FT_AUDIO_RATE_COUNT ? s_audio_rate_buttons[index] : RT_NULL; }
+lv_obj_t *ft_pages_test_get_audio_bits_button(size_t index)
+{ return index < FT_AUDIO_BITS_COUNT ? s_audio_bits_buttons[index] : RT_NULL; }
+lv_obj_t *ft_pages_test_get_audio_channel_button(size_t index)
+{ return index < FT_AUDIO_CHANNEL_COUNT ? s_audio_channel_buttons[index] : RT_NULL; }
+bool ft_pages_test_audio_state_valid(void)
+{
+    ft_audio_status_t status;
+    size_t i;
+
+    if (!tracked_object_is_type(&s_audio_output_slider, &lv_slider_class) ||
+        !tracked_object_is_type(&s_audio_output_value, &lv_label_class) ||
+        !tracked_object_is_type(&s_audio_output_status, &lv_label_class) ||
+        !tracked_object_is_type(&s_audio_output_details, &lv_label_class) ||
+        !tracked_object_is_type(&s_audio_input_slider, &lv_slider_class) ||
+        !tracked_object_is_type(&s_audio_input_value, &lv_label_class) ||
+        !tracked_object_is_type(&s_audio_input_status, &lv_label_class) ||
+        !tracked_object_is_type(&s_audio_input_details, &lv_label_class) ||
+        !tracked_object_is_type(&s_audio_analog_status, &lv_label_class) ||
+        ft_audio_get_status(&status) != RT_EOK)
+        return false;
+    for (i = 0U; i < FT_AUDIO_RATE_COUNT; i++)
+        if (!tracked_object_is_type(&s_audio_rate_buttons[i],
+                                    &lv_button_class)) return false;
+    for (i = 0U; i < FT_AUDIO_BITS_COUNT; i++)
+        if (!tracked_object_is_type(&s_audio_bits_buttons[i],
+                                    &lv_button_class)) return false;
+    for (i = 0U; i < FT_AUDIO_CHANNEL_COUNT; i++)
+        if (!tracked_object_is_type(&s_audio_channel_buttons[i],
+                                    &lv_button_class)) return false;
+    return status.output_registered && status.input_registered &&
+           status.output_ready && status.input_ready &&
+           !status.analog_input_supported &&
+           !lv_obj_has_state(s_audio_output_slider, LV_STATE_DISABLED) &&
+           !lv_obj_has_state(s_audio_input_slider, LV_STATE_DISABLED) &&
+           lv_slider_get_min_value(s_audio_output_slider) == 0 &&
+           lv_slider_get_max_value(s_audio_output_slider) == 100 &&
+           lv_slider_get_min_value(s_audio_input_slider) == 0 &&
+           lv_slider_get_max_value(s_audio_input_slider) == 75;
+}
 lv_obj_t *ft_pages_test_get_usb_role_button(ft_usb_role_t role)
 { return role <= FT_USB_ROLE_HOST ? s_usb_role_buttons[role] : RT_NULL; }
 lv_obj_t *ft_pages_test_get_usb_function_button(ft_usb_function_t function)
@@ -4271,19 +5093,36 @@ lv_obj_t *ft_pages_test_get_usb_stop_button(void) { return s_usb_stop_button; }
 bool ft_pages_test_usb_state_valid(void)
 {
     ft_usb_status_t status;
+    size_t i;
     if (s_usb_monitor_timer == RT_NULL ||
         s_usb_role_buttons[FT_USB_ROLE_DEVICE] == RT_NULL ||
         s_usb_role_buttons[FT_USB_ROLE_HOST] == RT_NULL ||
         s_usb_function_buttons[0] == RT_NULL ||
         s_usb_function_buttons[1] == RT_NULL ||
+        s_usb_output_device_buttons[0] == RT_NULL ||
+        s_usb_input_device_buttons[0] == RT_NULL ||
+        s_usb_input_device_buttons[1] == RT_NULL ||
         s_usb_stop_button == RT_NULL || s_usb_status_label == RT_NULL)
         return false;
+    for (i = 0U; i < FT_AUDIO_RATE_COUNT; i++)
+        if (s_usb_output_rate_buttons[i] == RT_NULL ||
+            s_usb_input_rate_buttons[i] == RT_NULL) return false;
+    for (i = 0U; i < FT_AUDIO_BITS_COUNT; i++)
+        if (s_usb_output_bits_buttons[i] == RT_NULL ||
+            s_usb_input_bits_buttons[i] == RT_NULL) return false;
+    for (i = 0U; i < FT_AUDIO_CHANNEL_COUNT; i++)
+        if (s_usb_output_channel_buttons[i] == RT_NULL ||
+            s_usb_input_channel_buttons[i] == RT_NULL) return false;
     ft_usb_get_status(&status);
     return !lv_obj_has_state(s_usb_role_buttons[FT_USB_ROLE_DEVICE], LV_STATE_DISABLED) &&
            lv_obj_has_state(s_usb_role_buttons[FT_USB_ROLE_HOST], LV_STATE_DISABLED) &&
-           lv_obj_has_state(s_usb_function_buttons[1], LV_STATE_DISABLED) &&
+           lv_obj_has_state(s_usb_function_buttons[1], LV_STATE_DISABLED) ==
+               !status.audio_supported &&
            lv_obj_has_state(s_usb_function_buttons[0], LV_STATE_DISABLED) ==
                (!status.sd_present && !status.active) &&
+           lv_obj_has_state(s_usb_input_rate_buttons[0], LV_STATE_DISABLED) &&
+           lv_obj_has_state(s_usb_input_bits_buttons[0], LV_STATE_DISABLED) &&
+           lv_obj_has_state(s_usb_input_channel_buttons[1], LV_STATE_DISABLED) &&
            lv_obj_has_state(s_usb_stop_button, LV_STATE_DISABLED) == !status.active;
 }
 lv_obj_t *ft_pages_test_get_storage_format_button(void)
@@ -4701,6 +5540,11 @@ bool ft_pages_test_transient_slots_clear(void)
         s_settings_search_box != RT_NULL || s_settings_keyboard_tray != RT_NULL ||
         s_settings_keyboard != RT_NULL || s_settings_keyboard_hide != RT_NULL ||
         s_settings_brightness_slider != RT_NULL || s_settings_brightness_value != RT_NULL ||
+        s_audio_output_slider != RT_NULL || s_audio_output_value != RT_NULL ||
+        s_audio_output_status != RT_NULL || s_audio_output_details != RT_NULL ||
+        s_audio_input_slider != RT_NULL || s_audio_input_value != RT_NULL ||
+        s_audio_input_status != RT_NULL || s_audio_input_details != RT_NULL ||
+        s_audio_analog_status != RT_NULL ||
         s_settings_radio_status != RT_NULL || s_settings_radio_button != RT_NULL ||
         s_storage_detail_icon != RT_NULL ||
         s_storage_detail_title != RT_NULL ||
@@ -4719,6 +5563,9 @@ bool ft_pages_test_transient_slots_clear(void)
         s_storage_confirm_continue != RT_NULL ||
         s_storage_monitor_timer != RT_NULL ||
         s_usb_stop_button != RT_NULL || s_usb_status_label != RT_NULL ||
+        s_usb_output_device_buttons[0] != RT_NULL ||
+        s_usb_input_device_buttons[0] != RT_NULL ||
+        s_usb_input_device_buttons[1] != RT_NULL ||
         s_usb_monitor_timer != RT_NULL ||
         s_timezone_dropdown != RT_NULL || s_time_preview != RT_NULL ||
         s_media_prev_button != RT_NULL || s_media_button != RT_NULL ||
@@ -4738,7 +5585,8 @@ bool ft_pages_test_transient_slots_clear(void)
         s_files_name_box != RT_NULL || s_files_name_textarea != RT_NULL ||
         s_files_name_error != RT_NULL || s_files_name_keyboard != RT_NULL ||
         s_files_name_cancel != RT_NULL || s_files_name_confirm != RT_NULL ||
-        s_files_monitor_timer != RT_NULL) return false;
+        s_files_monitor_timer != RT_NULL ||
+        !ft_recorder_page_test_slots_clear()) return false;
     for (i = 0U; i < FT_SYSTEM_SUMMARY_COUNT; i++)
         if (s_system_summary_values[i] != RT_NULL ||
             s_system_summary_notes[i] != RT_NULL) return false;
@@ -4754,6 +5602,12 @@ bool ft_pages_test_transient_slots_clear(void)
         if (s_opacity_buttons[i] != RT_NULL) return false;
     for (i = 0U; i < FT_BACKGROUND_COUNT; i++)
         if (s_background_buttons[i] != RT_NULL) return false;
+    for (i = 0U; i < FT_AUDIO_RATE_COUNT; i++)
+        if (s_audio_rate_buttons[i] != RT_NULL) return false;
+    for (i = 0U; i < FT_AUDIO_BITS_COUNT; i++)
+        if (s_audio_bits_buttons[i] != RT_NULL) return false;
+    for (i = 0U; i < FT_AUDIO_CHANNEL_COUNT; i++)
+        if (s_audio_channel_buttons[i] != RT_NULL) return false;
     for (i = 0U; i < FT_TIME_FORMAT_COUNT; i++)
         if (s_time_format_buttons[i] != RT_NULL) return false;
     for (i = 0U; i < FT_LANGUAGE_COUNT; i++)
@@ -4761,6 +5615,15 @@ bool ft_pages_test_transient_slots_clear(void)
     for (i = 0U; i < 2U; i++)
         if (s_usb_role_buttons[i] != RT_NULL ||
             s_usb_function_buttons[i] != RT_NULL) return false;
+    for (i = 0U; i < FT_AUDIO_RATE_COUNT; i++)
+        if (s_usb_output_rate_buttons[i] != RT_NULL ||
+            s_usb_input_rate_buttons[i] != RT_NULL) return false;
+    for (i = 0U; i < FT_AUDIO_BITS_COUNT; i++)
+        if (s_usb_output_bits_buttons[i] != RT_NULL ||
+            s_usb_input_bits_buttons[i] != RT_NULL) return false;
+    for (i = 0U; i < FT_AUDIO_CHANNEL_COUNT; i++)
+        if (s_usb_output_channel_buttons[i] != RT_NULL ||
+            s_usb_input_channel_buttons[i] != RT_NULL) return false;
     for (i = 0U; i < FT_STORAGE_DEVICE_COUNT; i++)
         if (s_storage_device_buttons[i] != RT_NULL ||
             s_storage_device_icons[i] != RT_NULL ||

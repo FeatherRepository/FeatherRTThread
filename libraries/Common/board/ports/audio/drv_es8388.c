@@ -248,6 +248,40 @@ rt_err_t es8388_fmt_set(enum es8388_mode mode, enum es8388_format fmt)
     return RT_EOK;
 }
 
+rt_err_t es8388_output_format_set(rt_uint32_t sample_rate,
+                                  rt_uint8_t sample_bits)
+{
+    rt_uint8_t control1;
+    rt_uint8_t control2;
+    rt_uint8_t word_length;
+
+    if (sample_bits == 16U)
+        word_length = (rt_uint8_t)(3U << 3); /* DACWL=011: 16 bit. */
+    else if (sample_bits == 24U)
+        word_length = 0U;                   /* DACWL=000: 24 bit. */
+    else
+        return -RT_EINVAL;
+    if (sample_rate != 16000U && sample_rate != 24000U &&
+        sample_rate != 48000U && sample_rate != 96000U)
+        return -RT_EINVAL;
+
+    control1 = (rt_uint8_t)reg_read(ES8388_DACCONTROL1);
+    control2 = (rt_uint8_t)reg_read(ES8388_DACCONTROL2);
+    control1 = (rt_uint8_t)((control1 & (rt_uint8_t)~0x38U) | word_length);
+    /* DACFsMode is double-speed only at 96 kHz. Preserve the configured
+     * sample-rate ratio and every unrelated codec option. */
+    control2 = (rt_uint8_t)((control2 & (rt_uint8_t)~0x20U) |
+                            (sample_rate == 96000U ? 0x20U : 0U));
+    reg_write(ES8388_DACCONTROL1, control1);
+    reg_write(ES8388_DACCONTROL2, control2);
+    if ((((rt_uint8_t)reg_read(ES8388_DACCONTROL1)) & 0x38U) !=
+            (control1 & 0x38U) ||
+        (((rt_uint8_t)reg_read(ES8388_DACCONTROL2)) & 0x20U) !=
+            (control2 & 0x20U))
+        return -RT_EIO;
+    return RT_EOK;
+}
+
 void es8388_volume_set(rt_uint8_t volume)
 {
     if (volume > 100)

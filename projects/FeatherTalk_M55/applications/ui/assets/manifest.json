@@ -51,6 +51,15 @@
     {"id": "tile_pattern", "group": "controls", "reference": "mutable Tile pattern test", "redesign": "neutral dot grid"},
     {"id": "flash_device", "group": "storage", "reference": "fixed internal Flash volume", "redesign": "drive outline with Flash mark"},
     {"id": "sd_device", "group": "storage", "reference": "removable SD media", "redesign": "SD card outline with ready mark"},
-    {"id": "wallpaper", "group": "settings", "reference": "personal wallpaper configuration", "redesign": "neutral suspended landscape picture frame"}
+    {"id": "wallpaper", "group": "settings", "reference": "personal wallpaper configuration", "redesign": "neutral suspended landscape picture frame"},
+    {"id": "audio_settings", "group": "settings", "reference": "board audio device configuration", "redesign": "speaker outline with three distinct level controls"},
+    {"id": "speaker_device", "group": "audio", "reference": "onboard ES8388 and MD8002 output path", "redesign": "neutral speaker with two sound-wave outlines"},
+    {"id": "pdm_mic_device", "group": "audio", "reference": "onboard dual PDM microphones", "redesign": "paired digital microphone capsules"},
+    {"id": "analog_mic_device", "group": "audio", "reference": "board analog microphone front end", "redesign": "single analog microphone capsule and stand"},
+    {"id": "recorder", "group": "apps", "reference": "functional recording application", "redesign": "microphone with recording indicator"},
+    {"id": "record_action", "group": "controls", "reference": "start recording action", "redesign": "record dot inside an outline ring"},
+    {"id": "record_stop", "group": "controls", "reference": "stop and save recording action", "redesign": "stop square inside an outline ring"},
+    {"id": "recorder_pdm_source", "group": "audio", "reference": "recording source selector for onboard PDM pair", "redesign": "paired rounded digital microphone capsules"},
+    {"id": "recorder_analog_source", "group": "audio", "reference": "recording source selector for AMIC2", "redesign": "analog microphone with surrounding pickup field"}
   ]
 }

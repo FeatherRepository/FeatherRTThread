@@ -1,5 +1,6 @@
 #include <rtthread.h>
 #include <string.h>
+#include "feathertalk_audio.h"
 #include "feathertalk_storage.h"
 #include "feathertalk_ui_internal.h"
 #include "feathertalk_ui_preferences_store.h"
@@ -7,6 +8,11 @@
 #define FT_DEFAULT_ACCENT_RGB 0x0078D7UL
 #define FT_DEFAULT_TILE_OPA   255U
 #define FT_DEFAULT_TIMEZONE_MINUTES 480
+#define FT_DEFAULT_AUDIO_OUTPUT_VOLUME 70U
+#define FT_DEFAULT_AUDIO_INPUT_GAIN    40U
+#define FT_DEFAULT_AUDIO_OUTPUT_SAMPLE_RATE 16000U
+#define FT_DEFAULT_AUDIO_OUTPUT_SAMPLE_BITS 16U
+#define FT_DEFAULT_AUDIO_OUTPUT_CHANNELS    2U
 
 static ft_ui_preferences_t s_preferences;
 static ft_ui_preferences_t s_test_snapshot;
@@ -23,6 +29,11 @@ static void preferences_defaults(ft_ui_preferences_t *preferences)
     preferences->use_24_hour = true;
     preferences->timezone_offset_minutes = FT_DEFAULT_TIMEZONE_MINUTES;
     preferences->language = FT_LANGUAGE_ZH_CN;
+    preferences->audio_output_volume = FT_DEFAULT_AUDIO_OUTPUT_VOLUME;
+    preferences->audio_input_gain = FT_DEFAULT_AUDIO_INPUT_GAIN;
+    preferences->audio_output_sample_rate = FT_DEFAULT_AUDIO_OUTPUT_SAMPLE_RATE;
+    preferences->audio_output_sample_bits = FT_DEFAULT_AUDIO_OUTPUT_SAMPLE_BITS;
+    preferences->audio_output_channels = FT_DEFAULT_AUDIO_OUTPUT_CHANNELS;
     preferences->revision = 1U;
 }
 
@@ -36,6 +47,11 @@ static void preferences_to_payload(const ft_ui_preferences_t *preferences,
     payload->use_24_hour = preferences->use_24_hour;
     payload->timezone_offset_minutes = preferences->timezone_offset_minutes;
     payload->language = (uint8_t)preferences->language;
+    payload->audio_output_volume = preferences->audio_output_volume;
+    payload->audio_input_gain = preferences->audio_input_gain;
+    payload->audio_output_sample_rate = preferences->audio_output_sample_rate;
+    payload->audio_output_sample_bits = preferences->audio_output_sample_bits;
+    payload->audio_output_channels = preferences->audio_output_channels;
     rt_strncpy(payload->wallpaper_path, preferences->wallpaper_path,
                sizeof(payload->wallpaper_path) - 1U);
 }
@@ -50,6 +66,11 @@ static void preferences_from_payload(const ft_preferences_store_payload_t *paylo
     preferences->use_24_hour = payload->use_24_hour;
     preferences->timezone_offset_minutes = payload->timezone_offset_minutes;
     preferences->language = (ft_language_t)payload->language;
+    preferences->audio_output_volume = payload->audio_output_volume;
+    preferences->audio_input_gain = payload->audio_input_gain;
+    preferences->audio_output_sample_rate = payload->audio_output_sample_rate;
+    preferences->audio_output_sample_bits = payload->audio_output_sample_bits;
+    preferences->audio_output_channels = payload->audio_output_channels;
     rt_strncpy(preferences->wallpaper_path, payload->wallpaper_path,
                sizeof(preferences->wallpaper_path) - 1U);
     preferences->revision = 1U;
@@ -110,6 +131,11 @@ static void apply_preferences(void)
     s_wallpaper_media_known = true;
     ft_ui_set_page_wallpaper(s_wallpaper_media_ready ?
                              s_preferences.wallpaper_path : RT_NULL);
+    (void)ft_audio_set_output_format(s_preferences.audio_output_sample_rate,
+                                     s_preferences.audio_output_sample_bits,
+                                     s_preferences.audio_output_channels);
+    (void)ft_audio_set_output_volume(s_preferences.audio_output_volume);
+    (void)ft_audio_set_input_gain(s_preferences.audio_input_gain);
     ft_pages_apply_preferences();
 }
 
@@ -204,6 +230,76 @@ void ft_preferences_set_language(ft_language_t language)
     ft_pages_apply_preferences();
     ft_ui_preferences_changed();
     persist_preferences();
+}
+
+int ft_preferences_set_audio_output_volume(uint8_t volume)
+{
+    int result;
+
+    if (volume > FT_PREFERENCES_STORE_AUDIO_OUTPUT_VOLUME_MAX)
+        volume = FT_PREFERENCES_STORE_AUDIO_OUTPUT_VOLUME_MAX;
+    result = ft_audio_set_output_volume(volume);
+    if (result != RT_EOK) return result;
+    if (s_preferences.audio_output_volume == volume) return RT_EOK;
+    s_preferences.audio_output_volume = volume;
+    s_preferences.revision++;
+    persist_preferences();
+    return RT_EOK;
+}
+
+int ft_preferences_set_audio_input_gain(uint8_t gain)
+{
+    int result;
+
+    if (gain > FT_PREFERENCES_STORE_AUDIO_INPUT_GAIN_MAX)
+        gain = FT_PREFERENCES_STORE_AUDIO_INPUT_GAIN_MAX;
+    result = ft_audio_set_input_gain(gain);
+    if (result != RT_EOK) return result;
+    if (s_preferences.audio_input_gain == gain) return RT_EOK;
+    s_preferences.audio_input_gain = gain;
+    s_preferences.revision++;
+    persist_preferences();
+    return RT_EOK;
+}
+
+int ft_preferences_set_audio_output_format(uint32_t sample_rate,
+                                           uint8_t sample_bits,
+                                           uint8_t channels)
+{
+    int result;
+
+    if (!ft_audio_output_format_supported(sample_rate, sample_bits, channels))
+        return -RT_EINVAL;
+    result = ft_audio_set_output_format(sample_rate, sample_bits, channels);
+    if (result != RT_EOK) return result;
+    if (s_preferences.audio_output_sample_rate == sample_rate &&
+        s_preferences.audio_output_sample_bits == sample_bits &&
+        s_preferences.audio_output_channels == channels)
+        return RT_EOK;
+    s_preferences.audio_output_sample_rate = sample_rate;
+    s_preferences.audio_output_sample_bits = sample_bits;
+    s_preferences.audio_output_channels = channels;
+    s_preferences.revision++;
+    persist_preferences();
+    return RT_EOK;
+}
+
+int ft_preferences_sync_audio_output_format(uint32_t sample_rate,
+                                            uint8_t sample_bits,
+                                            uint8_t channels)
+{
+    if (!ft_audio_output_format_supported(sample_rate, sample_bits, channels))
+        return -RT_EINVAL;
+    if (s_preferences.audio_output_sample_rate == sample_rate &&
+        s_preferences.audio_output_sample_bits == sample_bits &&
+        s_preferences.audio_output_channels == channels)
+        return RT_EOK;
+    s_preferences.audio_output_sample_rate = sample_rate;
+    s_preferences.audio_output_sample_bits = sample_bits;
+    s_preferences.audio_output_channels = channels;
+    s_preferences.revision++;
+    persist_preferences();
+    return RT_EOK;
 }
 
 void ft_preferences_set_wallpaper_file(const char *path)

@@ -504,3 +504,93 @@
 
 阶段口径保持严格：P1 完成前只能说“蓝牙底层和 M33 MSH 可用”；P2 完成后才能说
 “BLE 可连接”；P3 完成后才能说“安全配对和 Bond 可用”。
+
+## 2026-08-31 M55 板载音频设备与设置页
+
+- Settings 新增独立“音频”分类，不照搬 PC 设备列表。默认输出只列板载扬声器
+  `sound0`（TDM0/I2S -> ES8388 -> MD8002），默认输入列双 PDM 麦克风 `mic0`；
+  AMIC2 模拟麦克风前端因产品驱动尚未接入而置灰显示。
+- FeatherTalk_M55 默认启用 RT-Thread Audio、播放、录音和双声道 PDM feed。
+  `sound0`、`mic0` 在设备初始化阶段注册，设置页同时区分“已注册”和“初始化成功”，
+  不把 codec/I2C 初始化失败伪装成可用设备。
+- 新增 `feathertalk_audio.*` 统一查询设备格式、音量/增益和初始化状态，并提供
+  `feather_audio_status` MSH 命令。输出音量为 0-100；PDM 增益为 0-37.5 dB、0.5 dB
+  步进。滑块松手才写 Audio 控制，避免拖动期间反复 I2C 访问影响 UI 帧率。
+- 音量和输入增益复用偏好记录 schema 1 的两个保留字节，以 value+1 编码兼容旧记录
+  和真实 0 值；双槽、CRC、防抖、USB 冻结与测试快照语义保持不变。
+- 修正 ES8388 功放控制权：板级上电只打开 codec 电源并保持 P21.6 功放关闭，codec
+  初始化使用真实 P21.6 引脚并在配置后启用，不再向 `es8388_init()` 传空引脚或在板级
+  初始化阶段无条件拉高功放。
+- 音频分类及三种设备使用四个独立 SVG/A8 图标；资源重新生成后为 45 个图标、三档
+  尺寸、175,680 字节。中文源字符重新纳入 6,775 字形的 Noto Sans SC 子集。
+- M55 clean 构建通过：text=3,551,848、data=85,384、bss=4,259,776 字节，HEX
+  10,230,740 字节。M33 安全固件与签名构建也通过；本阶段不依赖 M33 串口。
+- 当时边界：尚未实现真实播放/录音应用、AMIC2 驱动和 USB UAC；它们不能因设备注册
+  和设置页完成而标记为可用。
+
+## 2026-08-31 录音机、输入设备选择与 WAV 实板闭环
+
+- 新增与 Settings、Media、Gallery、Files 并列的 Recorder 应用。页面提供双 PDM
+  `mic0` 与 AMIC2 `amic0` 两张独立输入卡、计时、实时峰值、开始录音、结束并保存以及
+  跳转 Files；当前实板 `mic0` 可选，尚未注册驱动的 AMIC2 明确置灰，不伪造可用状态。
+- `feathertalk_recorder.*` 将阻塞采集和文件写入放在独立 8 KiB 工作线程。状态机覆盖
+  STARTING、RECORDING、STOPPING、SAVED 和 ERROR；页面离开时会结束并保存，错误路径
+  关闭设备/文件、释放缓冲并删除半成品，不把文件描述符或 Audio 设备生命周期绑在
+  LVGL 对象上。
+- 文件为设备原生参数的标准 PCM RIFF/WAVE，当前 `mic0` 是 16 kHz、双声道、16 bit。
+  目标目录固定为 `Recordings`，优先 `/sdcard`，内部 2 MiB Flash 用户卷兜底；卷未挂载、
+  被 USB 导出或可用空间不足 64 KiB 时不允许开始。
+- 新增录音机、开始、停止、PDM 输入与模拟输入五个独立 SVG/A8 图标；图标资源现在为
+  50 个 ID、三档尺寸、195,200 字节，未复用其他应用或设置项语义图标。中英文名称、
+  设备状态、按钮和错误文本均纳入全局语言/中文字体生成流程。
+- UI 回归中录音机应用的注册、路由、两个设备选择器、默认 `mic0`、AMIC2 不可用状态、
+  开始/停止控件、Home/Back 和页面对象释放全部通过。整套回归为 `345 PASS / 3 FAIL /
+  160 actions`；三项失败仍是未运行 M33 peer 时固定 Flash 文件测试无法完成 XIP park
+  握手，与录音页面、PDM 或 SD 写入无关。本阶段按用户要求不依赖或查看 M33 串口。
+- 实板执行 `feather_record 2` 会先等设备真正进入 RECORDING 再计时，得到 2,020 ms、
+  129,280 字节 PCM（一个采集块的停止粒度），整段最大峰值 473/1000，证明收到非零
+  采样；文件保存为 `/sdcard/Recordings/REC_0000003887_00.wav`，总长 129,324 字节。
+  状态命令回读并校验
+  RIFF/WAVE/fmt/data 标识、头内长度和实际长度，结果为 `wav=valid`。
+- 最终 M55 构建为 text=3,584,004、data=85,388、bss=4,260,236 字节，HEX
+  10,321,207 字节，SHA-256
+  `7AFED3187D34DD825EAE330DE28A1482691F80BCE59C12FBDB499DC6D7EE9BAC`。官方 Infineon
+  Customized OpenOCD 5.19.0.4782 通过 KitProg3 `0D141868022E2400` 写入 3,674,112
+  字节并校验 3,669,392 字节。
+- 详细架构、文件合约、命令和后续边界见
+  [录音应用设计](../audio/RECORDER_DESIGN_zh.md)。AMIC2 驱动、WAV 播放、可靠 RTC 命名和
+  USB UAC/本地录音设备仲裁仍是后续工作。
+
+## 2026-08-31 双向 USB Audio UAC2 与设置页
+
+- USB 设备功能新增 UAC2，与 MSC 互斥切换。Host 播放经 `EP 0x02`、16 KiB 整帧
+  环形缓冲和工作线程进入 `sound0`；双 PDM `mic0` 经 `EP 0x81` 送回 Host。USB
+  中断回调只投递状态，不再在 ISR 内获取 mutex 或直接访问 codec/I2S。
+- Settings > USB 新增输出设备、输入设备、采样率、采样深度和声道控制。`sound0`
+  的 UAC 双声道输出支持 16/24/48/96 kHz 与 16/24-bit；当前 `mic0` 只支持
+  16 kHz、16-bit、stereo，对应输入控件按真实驱动能力置灰。AMIC2 继续标记无驱动。
+- 主机侧 Clock `SET_CUR`、AS alternate、volume/mute 会更新设备；设备侧修改会先停止
+  endpoints、配置 RT-Thread Audio、更新偏好并用递增 `bcdDevice` 软重枚举。Windows
+  枚举时的格式探测与真实流格式分离，只有首包 OUT 数据才提交 Host 最终格式，避免
+  探测过程污染本机配置。
+- Windows 初测曾为 `CM_PROB_FAILED_START / STATUS_RANGE_NOT_FOUND`。根因是 16 kHz
+  stereo IN endpoint 只声明精确 64 B/ms，没有异步时钟漂移余量；max packet 改为
+  68 bytes 后，Windows 11 系统 `usbaudio2.sys` 的 FeatherTalk MEDIA 节点和复合父
+  设备均为 `CM_PROB_NONE`。恢复多采样率/24-bit 后仍正常。
+- 实板捕获到 UAC2 Clock/Feature Unit RANGE/CUR、采样率 SET_CUR、SET_INTERFACE 和
+  `EP 0x02` 打开。板端切换 48 kHz/24-bit 后完成软重枚举，Host 驱动保持正常；状态
+  命令可报告双向格式、stream、同步次数、KiB、overrun/underrun 和错误。
+- 最终双向同步镜像构建为 text=3,603,836、data=91,000、bss=4,271,000 字节，HEX
+  10,392,778 字节，SHA-256
+  `F1521B5E9DC6297097AE5BC7E189AEA191DA2C888885A20F23C23EDAA0368C65`。Customized
+  OpenOCD 写入/校验 M55 3,698,688 / 3,694,836 字节。执行设备侧 48 kHz、24-bit、
+  双声道切换和软重枚举后，板端仍回读同一生效格式，`connected/configured=1/1`、
+  `pending=0`、`error=0`；Windows MEDIA 节点为 `OK / CM_PROB_NONE`。
+- 本轮板端全量 UI 自动化为 `349 PASS / 3 FAIL / 163 actions`。USB/UAC、音频、录音、
+  页面切换和对象释放通过；3 个失败均来自文件系统写入合约遇到 M33 XIP park 超时
+  `-116`，不是 USB Audio 回归。测试结束后才启用 UAC，避免自动化音频格式切换干扰
+  USB 枚举结论。
+- 当前限制：UAC Terminal 固定双声道；本地 `sound0` 的 mono 不在同一 USB topology
+  中伪装。Codex 所在 Windows 会话只暴露远程音频，尚未在本机 WASAPI 会话完成长时
+  播放/录音、漂移、音质和显式 feedback endpoint 压力验证。详细记录见
+  [UAC2 设计与实板记录](../audio/USB_AUDIO_UAC2_zh.md)。

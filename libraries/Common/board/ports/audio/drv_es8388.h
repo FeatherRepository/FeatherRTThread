@@ -89,6 +89,8 @@ rt_err_t es8388_init(const char *i2c_name, rt_uint16_t pin);
 rt_err_t es8388_start(enum es8388_mode mode);
 rt_err_t es8388_stop(enum es8388_mode mode);
 rt_err_t es8388_fmt_set(enum es8388_mode mode, enum es8388_format fmt);
+rt_err_t es8388_output_format_set(rt_uint32_t sample_rate,
+                                  rt_uint8_t sample_bits);
 void es8388_volume_set(rt_uint8_t volume);
 rt_uint8_t es8388_volume_get(void);
 void es8388_pa_power(rt_bool_t enable);

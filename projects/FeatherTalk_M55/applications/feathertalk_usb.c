@@ -1,9 +1,11 @@
 #include <rtthread.h>
 #include <rtdevice.h>
+#include <stdlib.h>
 #include <string.h>
 #include "board_storage.h"
 #include "feathertalk_storage.h"
 #include "feathertalk_usb.h"
+#include "feathertalk_usb_uac.h"
 #ifdef FEATHERTALK_USING_UI_SHELL
 #include "ui/feathertalk_ui.h"
 #include "ui/feathertalk_ui_preferences_store.h"
@@ -19,7 +21,11 @@ static ft_usb_status_t s_usb_status =
 #else
     .storage_supported = false,
 #endif
+#ifdef FEATHERTALK_USING_USB_UAC
+    .audio_supported = true,
+#else
     .audio_supported = false,
+#endif
 };
 
 #if defined(FEATHERTALK_USING_USB_MSC) && \
@@ -404,17 +410,43 @@ void ft_usb_get_status(ft_usb_status_t *status)
 {
     ft_storage_volume_info_t volume;
     board_flash_storage_info_t flash_info;
+    ft_usb_uac_status_t uac;
     if (status == RT_NULL) return;
 
     ft_usb_refresh();
     s_usb_status.flash_present =
         board_flash_storage_get_info(&flash_info) == RT_EOK &&
         flash_info.present;
-    if (s_usb_status.active)
+    if (s_usb_status.function == FT_USB_FUNCTION_STORAGE &&
+        s_usb_status.active)
         s_usb_status.sd_present = board_sdcard_export_present() == RT_TRUE;
     else
         s_usb_status.sd_present =
             ft_storage_get_volume(FT_STORAGE_SD_MOUNT_PATH, &volume) == RT_EOK;
+    ft_usb_uac_get_status(&uac);
+    if (s_usb_status.function == FT_USB_FUNCTION_AUDIO)
+    {
+        s_usb_status.active = uac.active;
+        s_usb_status.connected = uac.connected;
+        s_usb_status.configured = uac.configured;
+        s_usb_status.uac_output_streaming = uac.output_streaming;
+        s_usb_status.uac_input_streaming = uac.input_streaming;
+        s_usb_status.uac_format_pending = uac.format_pending;
+        s_usb_status.uac_output_sample_rate = uac.output_sample_rate;
+        s_usb_status.uac_output_sample_bits = uac.output_sample_bits;
+        s_usb_status.uac_output_channels = uac.output_channels;
+        s_usb_status.uac_input_sample_rate = uac.input_sample_rate;
+        s_usb_status.uac_input_sample_bits = uac.input_sample_bits;
+        s_usb_status.uac_input_channels = uac.input_channels;
+        s_usb_status.uac_host_update_count = uac.host_update_count;
+        s_usb_status.uac_device_update_count = uac.device_update_count;
+        s_usb_status.uac_sync_generation = uac.sync_generation;
+        s_usb_status.uac_host_to_device_bytes = uac.host_to_device_bytes;
+        s_usb_status.uac_device_to_host_bytes = uac.device_to_host_bytes;
+        s_usb_status.uac_output_overruns = uac.output_overruns;
+        s_usb_status.uac_input_underruns = uac.input_underruns;
+        s_usb_status.last_error = uac.last_error;
+    }
     *status = s_usb_status;
 }
 
@@ -423,8 +455,9 @@ int ft_usb_set_function(ft_usb_function_t function)
     int result;
 
     if (function == s_usb_status.function) return RT_EOK;
-    if (function == FT_USB_FUNCTION_AUDIO || function > FT_USB_FUNCTION_AUDIO)
-        return -RT_ENOSYS;
+    if (function > FT_USB_FUNCTION_AUDIO) return -RT_EINVAL;
+
+    result = RT_EOK;
 
 #if defined(FEATHERTALK_USING_USB_MSC) && \
     defined(RT_USING_CHERRYUSB) && defined(RT_CHERRYUSB_DEVICE) && \
@@ -432,24 +465,79 @@ int ft_usb_set_function(ft_usb_function_t function)
     if (s_usb_status.function == FT_USB_FUNCTION_STORAGE)
     {
         result = usb_storage_stop();
-        if (function == FT_USB_FUNCTION_NONE)
-        {
-            s_usb_status.last_error = result;
-            return result;
-        }
+        if (result != RT_EOK) goto done;
     }
+#endif
+
+#ifdef FEATHERTALK_USING_USB_UAC
+    if (s_usb_status.function == FT_USB_FUNCTION_AUDIO)
+    {
+        result = ft_usb_uac_stop();
+        if (result != RT_EOK) goto done;
+        s_usb_status.function = FT_USB_FUNCTION_NONE;
+        s_usb_status.active = false;
+    }
+#endif
+
+    if (function == FT_USB_FUNCTION_NONE) goto done;
     if (function == FT_USB_FUNCTION_STORAGE)
     {
+#if defined(FEATHERTALK_USING_USB_MSC) && \
+    defined(RT_USING_CHERRYUSB) && defined(RT_CHERRYUSB_DEVICE) && \
+    defined(RT_CHERRYUSB_DEVICE_MSC)
         result = usb_storage_start();
-        s_usb_status.last_error = result;
-        return result;
-    }
-    s_usb_status.last_error = RT_EOK;
-    return RT_EOK;
 #else
-    RT_UNUSED(result);
-    return function == FT_USB_FUNCTION_NONE ? RT_EOK : -RT_ENOSYS;
+        result = -RT_ENOSYS;
 #endif
+        goto done;
+    }
+    if (function == FT_USB_FUNCTION_AUDIO)
+    {
+#ifdef FEATHERTALK_USING_USB_UAC
+        result = ft_usb_uac_start();
+        if (result == RT_EOK)
+        {
+            s_usb_status.function = FT_USB_FUNCTION_AUDIO;
+            s_usb_status.active = true;
+            s_usb_status.lun_count = 0U;
+        }
+#else
+        result = -RT_ENOSYS;
+#endif
+    }
+
+done:
+    if (function == FT_USB_FUNCTION_NONE && result == RT_EOK)
+    {
+        s_usb_status.function = FT_USB_FUNCTION_NONE;
+        s_usb_status.active = false;
+        s_usb_status.connected = false;
+        s_usb_status.configured = false;
+    }
+    s_usb_status.last_error = result;
+    return result;
+}
+
+int ft_usb_set_uac_output_format(uint32_t sample_rate, uint8_t sample_bits,
+                                 uint8_t channels)
+{
+    return ft_usb_uac_set_output_format(sample_rate, sample_bits, channels,
+                                        s_usb_status.function ==
+                                            FT_USB_FUNCTION_AUDIO);
+}
+
+bool ft_usb_uac_output_supported(uint32_t sample_rate, uint8_t sample_bits,
+                                 uint8_t channels)
+{
+    return ft_usb_uac_output_format_supported(sample_rate, sample_bits,
+                                               channels);
+}
+
+bool ft_usb_uac_input_supported(uint32_t sample_rate, uint8_t sample_bits,
+                                uint8_t channels)
+{
+    return ft_usb_uac_input_format_supported(sample_rate, sample_bits,
+                                              channels);
 }
 
 void ft_usb_refresh(void)
@@ -486,6 +574,7 @@ static void usb_shell_print_status(void)
 #if defined(FEATHERTALK_USING_USB_MSC) && \
     defined(RT_USING_CHERRYUSB) && defined(RT_CHERRYUSB_DEVICE) && \
     defined(RT_CHERRYUSB_DEVICE_MSC)
+    if (status.function == FT_USB_FUNCTION_STORAGE)
     {
         uint8_t lun;
         for (lun = 0U; lun < FT_USB_MSC_LUN_COUNT; lun++)
@@ -507,6 +596,28 @@ static void usb_shell_print_status(void)
                    (unsigned int)CONFIG_USBDEV_MSC_MAX_BUFSIZE);
     }
 #endif
+    if (status.function == FT_USB_FUNCTION_AUDIO)
+    {
+        rt_kprintf("UAC2 out: %lu Hz %u-bit %u-ch stream=%u host->device=%luKiB overruns=%lu\n",
+                   (unsigned long)status.uac_output_sample_rate,
+                   status.uac_output_sample_bits,
+                   status.uac_output_channels,
+                   status.uac_output_streaming ? 1U : 0U,
+                   (unsigned long)(status.uac_host_to_device_bytes / 1024U),
+                   (unsigned long)status.uac_output_overruns);
+        rt_kprintf("UAC2 in : %lu Hz %u-bit %u-ch stream=%u device->host=%luKiB underruns=%lu\n",
+                   (unsigned long)status.uac_input_sample_rate,
+                   status.uac_input_sample_bits,
+                   status.uac_input_channels,
+                   status.uac_input_streaming ? 1U : 0U,
+                   (unsigned long)(status.uac_device_to_host_bytes / 1024U),
+                   (unsigned long)status.uac_input_underruns);
+        rt_kprintf("UAC2 sync generation=%lu host-updates=%lu device-updates=%lu pending=%u\n",
+                   (unsigned long)status.uac_sync_generation,
+                   (unsigned long)status.uac_host_update_count,
+                   (unsigned long)status.uac_device_update_count,
+                   status.uac_format_pending ? 1U : 0U);
+    }
 }
 
 static int feather_usb(int argc, char **argv)
@@ -520,16 +631,23 @@ static int feather_usb(int argc, char **argv)
     }
     if (argc == 2 && strcmp(argv[1], "storage") == 0)
         result = ft_usb_set_function(FT_USB_FUNCTION_STORAGE);
+    else if (argc == 2 && strcmp(argv[1], "audio") == 0)
+        result = ft_usb_set_function(FT_USB_FUNCTION_AUDIO);
     else if (argc == 2 && strcmp(argv[1], "stop") == 0)
         result = ft_usb_set_function(FT_USB_FUNCTION_NONE);
+    else if (argc == 5 && strcmp(argv[1], "format") == 0)
+        result = ft_usb_set_uac_output_format(
+            (uint32_t)strtoul(argv[2], RT_NULL, 10),
+            (uint8_t)strtoul(argv[3], RT_NULL, 10),
+            (uint8_t)strtoul(argv[4], RT_NULL, 10));
     else
     {
-        rt_kprintf("Usage: feather_usb [status|storage|stop]\n");
+        rt_kprintf("Usage: feather_usb [status|storage|audio|stop|format <rate> <bits> <channels>]\n");
         return -RT_EINVAL;
     }
 
     usb_shell_print_status();
     return result;
 }
-MSH_CMD_EXPORT(feather_usb, Control FeatherTalk USB Device MSC);
+MSH_CMD_EXPORT(feather_usb, Control FeatherTalk USB Device MSC and UAC2);
 #endif

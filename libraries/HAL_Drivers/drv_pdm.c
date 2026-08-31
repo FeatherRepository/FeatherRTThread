@@ -292,14 +292,13 @@ static rt_err_t mic_configure(struct rt_audio_device *audio, struct rt_audio_cap
         switch (caps->sub_type)
         {
         case AUDIO_DSP_PARAM:
-            /* Save configuration */
-            mic_dev->record_config.samplerate = caps->udata.config.samplerate;
-            mic_dev->record_config.channels   = caps->udata.config.channels;
-            mic_dev->record_config.samplebits = caps->udata.config.samplebits;
-
-            LOG_D("Set samplerate: %d, channels: %d, samplebits: %d",
-                  mic_dev->record_config.samplerate, mic_dev->record_config.channels,
-                  mic_dev->record_config.samplebits);
+            /* Generated PDM decimation, ISR frame size and DMA buffers are
+             * currently fixed at 16 kHz / 16-bit / stereo. Do not report a
+             * format as accepted without changing the hardware path. */
+            if (caps->udata.config.samplerate != 16000U ||
+                caps->udata.config.channels != 2U ||
+                caps->udata.config.samplebits != 16U)
+                result = -RT_EINVAL;
             break;
 
         default:

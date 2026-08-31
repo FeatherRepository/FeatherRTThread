@@ -56,6 +56,15 @@ static const ft_icon_sources_t s_icon_sources[FT_ICON_COUNT] =
     FT_ICON_SOURCES(flash_device),
     FT_ICON_SOURCES(sd_device),
     FT_ICON_SOURCES(wallpaper),
+    FT_ICON_SOURCES(audio_settings),
+    FT_ICON_SOURCES(speaker_device),
+    FT_ICON_SOURCES(pdm_mic_device),
+    FT_ICON_SOURCES(analog_mic_device),
+    FT_ICON_SOURCES(recorder),
+    FT_ICON_SOURCES(record_action),
+    FT_ICON_SOURCES(record_stop),
+    FT_ICON_SOURCES(recorder_pdm_source),
+    FT_ICON_SOURCES(recorder_analog_source),
 };
 
 const lv_image_dsc_t *ft_icon_source(ft_icon_id_t icon_id, uint16_t size)

@@ -32,6 +32,11 @@
 
 #define FT_PREF_BACKGROUND_COUNT      4U
 #define FT_PREF_LANGUAGE_COUNT        2U
+#define FT_PREF_DEFAULT_AUDIO_OUTPUT_VOLUME 70U
+#define FT_PREF_DEFAULT_AUDIO_INPUT_GAIN    40U
+#define FT_PREF_DEFAULT_AUDIO_OUTPUT_SAMPLE_RATE 16000U
+#define FT_PREF_DEFAULT_AUDIO_OUTPUT_SAMPLE_BITS 16U
+#define FT_PREF_DEFAULT_AUDIO_OUTPUT_CHANNELS    2U
 
 typedef struct
 {
@@ -88,6 +93,30 @@ static uint32_t get_u32_le(const uint8_t *source)
            ((uint32_t)source[3] << 24);
 }
 
+static uint8_t sample_rate_code(uint32_t sample_rate)
+{
+    switch (sample_rate)
+    {
+    case 16000U: return 1U;
+    case 24000U: return 2U;
+    case 48000U: return 3U;
+    case 96000U: return 4U;
+    default: return 0U;
+    }
+}
+
+static uint32_t sample_rate_from_code(uint8_t code)
+{
+    switch (code)
+    {
+    case 1U: return 16000U;
+    case 2U: return 24000U;
+    case 3U: return 48000U;
+    case 4U: return 96000U;
+    default: return FT_PREF_DEFAULT_AUDIO_OUTPUT_SAMPLE_RATE;
+    }
+}
+
 static uint32_t record_crc32(const uint8_t *record, size_t size)
 {
     uint32_t crc = 0xFFFFFFFFUL;
@@ -140,7 +169,16 @@ bool ft_preferences_store_payload_valid(
             FT_PREFERENCES_STORE_TIMEZONE_MINUTES_MIN ||
         payload->timezone_offset_minutes >
             FT_PREFERENCES_STORE_TIMEZONE_MINUTES_MAX ||
-        payload->language >= FT_PREF_LANGUAGE_COUNT)
+        payload->language >= FT_PREF_LANGUAGE_COUNT ||
+        payload->audio_output_volume >
+            FT_PREFERENCES_STORE_AUDIO_OUTPUT_VOLUME_MAX ||
+        payload->audio_input_gain >
+            FT_PREFERENCES_STORE_AUDIO_INPUT_GAIN_MAX ||
+        sample_rate_code(payload->audio_output_sample_rate) == 0U ||
+        (payload->audio_output_sample_bits != 16U &&
+         payload->audio_output_sample_bits != 24U) ||
+        (payload->audio_output_channels != 1U &&
+         payload->audio_output_channels != 2U))
         return false;
 
     terminator = (const char *)memchr(payload->wallpaper_path, '\0',
@@ -173,6 +211,11 @@ static bool payload_equal(const ft_preferences_store_payload_t *left,
            left->use_24_hour == right->use_24_hour &&
            left->timezone_offset_minutes == right->timezone_offset_minutes &&
            left->language == right->language &&
+           left->audio_output_volume == right->audio_output_volume &&
+           left->audio_input_gain == right->audio_input_gain &&
+           left->audio_output_sample_rate == right->audio_output_sample_rate &&
+           left->audio_output_sample_bits == right->audio_output_sample_bits &&
+           left->audio_output_channels == right->audio_output_channels &&
            strcmp(left->wallpaper_path, right->wallpaper_path) == 0;
 }
 
@@ -189,6 +232,11 @@ static void serialize_record(const ft_preferences_store_payload_t *payload,
     put_u16_le(record + 6U, FT_PREF_STORE_HEADER_SIZE);
     put_u32_le(record + 8U, FT_PREF_STORE_PAYLOAD_SIZE);
     put_u32_le(record + 12U, generation);
+    /* Schema-1 bytes 20..23 were reserved. Zero in an older record maps to
+     * 16 kHz / 16-bit / stereo, preserving on-device compatibility. */
+    record[20] = sample_rate_code(payload->audio_output_sample_rate);
+    record[21] = payload->audio_output_sample_bits;
+    record[22] = payload->audio_output_channels;
 
     put_u32_le(data + 0U, payload->accent_rgb);
     data[4] = payload->tile_opa;
@@ -196,6 +244,11 @@ static void serialize_record(const ft_preferences_store_payload_t *payload,
     data[6] = payload->use_24_hour ? 1U : 0U;
     data[7] = payload->language;
     put_u16_le(data + 8U, (uint16_t)payload->timezone_offset_minutes);
+    /* Bytes 10 and 11 were reserved in schema 1. Store value + 1 so records
+     * written before audio settings (both bytes zero) remain distinguishable
+     * from a deliberate zero-volume setting without a schema migration. */
+    data[10] = (uint8_t)(payload->audio_output_volume + 1U);
+    data[11] = (uint8_t)(payload->audio_input_gain + 1U);
     memcpy(data + 12U, payload->wallpaper_path, path_length + 1U);
 
     put_u32_le(record + FT_PREF_STORE_CRC_OFFSET,
@@ -228,6 +281,15 @@ static int deserialize_record(const uint8_t record[FT_PREF_STORE_RECORD_SIZE],
     payload->use_24_hour = data[6] != 0U;
     payload->language = data[7];
     payload->timezone_offset_minutes = (int16_t)get_u16_le(data + 8U);
+    payload->audio_output_volume = data[10] == 0U ?
+        FT_PREF_DEFAULT_AUDIO_OUTPUT_VOLUME : (uint8_t)(data[10] - 1U);
+    payload->audio_input_gain = data[11] == 0U ?
+        FT_PREF_DEFAULT_AUDIO_INPUT_GAIN : (uint8_t)(data[11] - 1U);
+    payload->audio_output_sample_rate = sample_rate_from_code(record[20]);
+    payload->audio_output_sample_bits = record[21] == 0U ?
+        FT_PREF_DEFAULT_AUDIO_OUTPUT_SAMPLE_BITS : record[21];
+    payload->audio_output_channels = record[22] == 0U ?
+        FT_PREF_DEFAULT_AUDIO_OUTPUT_CHANNELS : record[22];
     memcpy(payload->wallpaper_path, data + 12U,
            FT_PREFERENCES_STORE_WALLPAPER_PATH_MAX);
     if (!ft_preferences_store_payload_valid(payload)) return -RT_ERROR;

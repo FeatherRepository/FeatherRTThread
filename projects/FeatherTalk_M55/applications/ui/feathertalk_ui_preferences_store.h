@@ -10,6 +10,8 @@
 #define FT_PREFERENCES_STORE_TILE_OPA_MAX        255U
 #define FT_PREFERENCES_STORE_TIMEZONE_MINUTES_MIN (-720)
 #define FT_PREFERENCES_STORE_TIMEZONE_MINUTES_MAX 840
+#define FT_PREFERENCES_STORE_AUDIO_OUTPUT_VOLUME_MAX 100U
+#define FT_PREFERENCES_STORE_AUDIO_INPUT_GAIN_MAX 75U
 
 typedef struct
 {
@@ -19,6 +21,11 @@ typedef struct
     bool use_24_hour;
     int16_t timezone_offset_minutes;
     uint8_t language;
+    uint8_t audio_output_volume;
+    uint8_t audio_input_gain;
+    uint32_t audio_output_sample_rate;
+    uint8_t audio_output_sample_bits;
+    uint8_t audio_output_channels;
     char wallpaper_path[FT_PREFERENCES_STORE_WALLPAPER_PATH_MAX];
 } ft_preferences_store_payload_t;
 

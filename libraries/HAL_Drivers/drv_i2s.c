@@ -1,6 +1,7 @@
 #include <rtthread.h>
 #include <rtdevice.h>
 #include "drv_i2s.h"
+#include "drv_gpio.h"
 #include "cy_pdl.h"
 #include "mtb_hal.h"
 #include "cybsp.h"
@@ -12,6 +13,8 @@
 #define DBG_LVL              DBG_INFO
 #include <rtdbg.h>
 
+#define ES8388_PA_PIN GET_PIN(21, 6)
+
 typedef enum
 {
     i2s_state_stop,
@@ -21,15 +24,19 @@ typedef enum
 
 typedef struct
 {
-    rt_uint32_t data_len;
-    rt_int16_t *data;
+    rt_uint32_t data_len_bytes;
+    const rt_uint8_t *data;
 } i2s_playback_q_data_t;
 
-static int16_t i2s_stereo_playback_buffer1[PLAYBACK_DATA_FRAME_SIZE] __attribute__((section(".cy_socmem_data"))) = { 0 };
-static int16_t i2s_stereo_playback_buffer2[PLAYBACK_DATA_FRAME_SIZE] __attribute__((section(".cy_socmem_data"))) = { 0 };
+/* One 2048-byte RT-Audio block expands to at most 2048 physical I2S words
+ * (16-bit mono duplicated into the mandatory left/right slots). */
+static rt_uint32_t i2s_playback_buffer1[PLAYBACK_DATA_FRAME_SIZE] __attribute__((section(".cy_socmem_data"))) = { 0 };
+static rt_uint32_t i2s_playback_buffer2[PLAYBACK_DATA_FRAME_SIZE] __attribute__((section(".cy_socmem_data"))) = { 0 };
 
-static int16_t *active_i2s_playback_buffer_ptr = NULL;
-static int16_t *inactive_i2s_playback_buffer_ptr = NULL;
+static rt_uint32_t *active_i2s_playback_buffer_ptr = RT_NULL;
+static rt_uint32_t *inactive_i2s_playback_buffer_ptr = RT_NULL;
+static volatile rt_uint32_t active_i2s_word_count;
+static volatile rt_uint32_t active_i2s_word_offset;
 
 bool first_frame = true;
 bool i2s_deinit_flag = false;
@@ -58,17 +65,6 @@ IFX_ASRC_STRUCT_t asrc_mem_up_sampling;
 #if SAMPLING_RATE_44_1kHz == SAMPLING_RATE
 static int16_t asrc_out_up_sampled_buffer_16bit[PLAYBACK_DATA_FRAME_SIZE / 2]  __attribute__((section(".cy_socmem_data"))) = { 0 };
 #endif /* SAMPLING_RATE_44_1kHz */
-static int16_t i2s_stereo_zero_buffer[PLAYBACK_DATA_FRAME_SIZE]        __attribute__((section(".cy_socmem_data"))) = { 0 };
-static int16_t aec_ref_zero_buffer[AEC_REF_FRAME_SIZE]                 __attribute__((section(".cy_socmem_data"))) = { 0 };
-int16_t *i2s_playback_ptr = i2s_stereo_zero_buffer;
-
-/* Pointer declarations for AEC Reference ASRC implementation */
-// static int16_t* frame_in_buffer;
-// static int16_t* frame_out_buffer;
-static int16_t *aec_ref_cb_ptr = NULL;
-
-uint8_t i2s_32_samples_frame_count = 0;
-
 const cy_stc_sysint_t i2s_isr_txcfg =
 {
     .intrSrc = (IRQn_Type) tdm_0_interrupts_tx_0_IRQn,
@@ -137,55 +133,94 @@ void ifx_i2s_deinit()
     }
 }
 
-void ifx_set_samplerate(struct rt_audio_configure audio_config)
+static bool sound_format_supported(const struct rt_audio_configure *config)
 {
-    Cy_SysClk_PeriPclkDisableDivider((en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM, CY_SYSCLK_DIV_16_5_BIT, 0U);
-    if (audio_config.channels == 1)
+    if (config == RT_NULL) return false;
+    if (config->samplerate != 16000U && config->samplerate != 24000U &&
+        config->samplerate != 48000U && config->samplerate != 96000U)
+        return false;
+    if (config->samplebits != 16U && config->samplebits != 24U)
+        return false;
+    return config->channels == 1U || config->channels == 2U;
+}
+
+static rt_err_t ifx_set_samplerate(struct rt_audio_configure audio_config)
+{
+    rt_uint32_t divider;
+
+    if (!sound_format_supported(&audio_config)) return -RT_EINVAL;
+    /* HF7 is 49.152 MHz. TDM clkDiv=4 and physical I2S always has two
+     * slots, so PCLK = Fs * 2 * slot_bits * 4. 24-bit samples use a
+     * 32-bit slot, while logical mono/stereo does not change BCLK. */
+    if (audio_config.samplebits == 16U)
     {
         switch (audio_config.samplerate)
         {
-            case 16000:
-                Cy_SysClk_PeriPclkSetFracDivider((en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM, CY_SYSCLK_DIV_16_5_BIT, 0U, 24U, 0U);
-                break;
-            case 24000:
-                Cy_SysClk_PeriPclkSetFracDivider((en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM, CY_SYSCLK_DIV_16_5_BIT, 0U, 16U, 0U);
-                break;
-            case 48000:
-                Cy_SysClk_PeriPclkSetFracDivider((en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM, CY_SYSCLK_DIV_16_5_BIT, 0U, 8U, 0U);
-                break;
-            case 96000:
-                Cy_SysClk_PeriPclkSetFracDivider((en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM, CY_SYSCLK_DIV_16_5_BIT, 0U, 3U, 0U);
-                break;
-            default:
-                Cy_SysClk_PeriPclkSetFracDivider((en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM, CY_SYSCLK_DIV_16_5_BIT, 0U, 24U, 0U);
-                break;
+        case 16000U: divider = 23U; break;
+        case 24000U: divider = 15U; break;
+        case 48000U: divider = 7U; break;
+        case 96000U: divider = 3U; break;
+        default: return -RT_EINVAL;
         }
     }
     else
     {
         switch (audio_config.samplerate)
         {
-            case 16000:
-                Cy_SysClk_PeriPclkSetFracDivider((en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM, CY_SYSCLK_DIV_16_5_BIT, 0U, 11U, 0U);
-                break;
-            case 24000:
-                Cy_SysClk_PeriPclkSetFracDivider((en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM, CY_SYSCLK_DIV_16_5_BIT, 0U, 7U, 0U);
-                break;
-            case 48000:
-                Cy_SysClk_PeriPclkSetFracDivider((en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM, CY_SYSCLK_DIV_16_5_BIT, 0U, 3U, 0U);
-                break;
-            case 96000:
-                Cy_SysClk_PeriPclkSetFracDivider((en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM, CY_SYSCLK_DIV_16_5_BIT, 0U, 1U, 0U);
-                break;
-            default:
-                Cy_SysClk_PeriPclkSetFracDivider((en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM, CY_SYSCLK_DIV_16_5_BIT, 0U, 11U, 0U);
-                break;
+        case 16000U: divider = 11U; break;
+        case 24000U: divider = 7U; break;
+        case 48000U: divider = 3U; break;
+        case 96000U: divider = 1U; break;
+        default: return -RT_EINVAL;
         }
     }
+    Cy_SysClk_PeriPclkDisableDivider((en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM, CY_SYSCLK_DIV_16_5_BIT, 0U);
+    Cy_SysClk_PeriPclkSetFracDivider(
+        (en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM,
+        CY_SYSCLK_DIV_16_5_BIT, 0U, divider, 0U);
     #if defined(BSP_USING_XiaoZhi)
         Cy_SysClk_PeriPclkSetFracDivider((en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM, CY_SYSCLK_DIV_16_5_BIT, 0U, 15U, 0U);
     #endif
     Cy_SysClk_PeriPclkEnableDivider((en_clk_dst_t)CYBSP_TDM_CONTROLLER_0_CLK_DIV_GRP_NUM, CY_SYSCLK_DIV_16_5_BIT, 0U);
+    return RT_EOK;
+}
+
+static rt_err_t ifx_apply_output_format(const struct rt_audio_configure *config)
+{
+    cy_en_tdm_status_t tdm_status;
+
+    if (!sound_format_supported(config)) return -RT_EINVAL;
+    if (i2s_data_ready_flag) return -RT_EBUSY;
+
+    NVIC_DisableIRQ(i2s_isr_txcfg.intrSrc);
+    Cy_AudioTDM_DeActivateTx(TDM_STRUCT0_TX);
+    Cy_AudioI2S_DisableTx(TDM_STRUCT0_TX);
+    Cy_AudioTDM_DeInit(TDM_STRUCT0);
+    CYBSP_TDM_CONTROLLER_0_tx_config.wordSize =
+        config->samplebits == 24U ? CY_TDM_SIZE_24 : CY_TDM_SIZE_16;
+    CYBSP_TDM_CONTROLLER_0_tx_config.channelSize =
+        config->samplebits == 24U ? 32U : 16U;
+    tdm_status = Cy_AudioTDM_Init(TDM_STRUCT0,
+                                  &CYBSP_TDM_CONTROLLER_0_config);
+    if (tdm_status != CY_TDM_SUCCESS)
+    {
+        NVIC_EnableIRQ(i2s_isr_txcfg.intrSrc);
+        return -RT_ERROR;
+    }
+    Cy_AudioTDM_ClearTxInterrupt(TDM_STRUCT0_TX, CY_TDM_INTR_TX_MASK);
+    Cy_AudioTDM_SetTxInterruptMask(TDM_STRUCT0_TX, CY_TDM_INTR_TX_MASK);
+    first_frame = true;
+    active_i2s_word_count = 0U;
+    active_i2s_word_offset = 0U;
+    if (ifx_set_samplerate(*config) != RT_EOK ||
+        es8388_output_format_set(config->samplerate,
+                                 (rt_uint8_t)config->samplebits) != RT_EOK)
+    {
+        NVIC_EnableIRQ(i2s_isr_txcfg.intrSrc);
+        return -RT_EIO;
+    }
+    NVIC_EnableIRQ(i2s_isr_txcfg.intrSrc);
+    return RT_EOK;
 }
 
 void app_i2s_clear_tx_fifo(void)
@@ -339,45 +374,48 @@ static rt_err_t sound_configure(struct rt_audio_device *audio, struct rt_audio_c
 
     case AUDIO_TYPE_OUTPUT:
     {
+        struct rt_audio_configure candidate = snd_dev->audio_config;
         switch (caps->sub_type)
         {
         case AUDIO_DSP_PARAM:
         {
-            /* save configs */
-            snd_dev->audio_config.samplerate = caps->udata.config.samplerate;
-            snd_dev->audio_config.channels   = caps->udata.config.channels;
-            snd_dev->audio_config.samplebits = caps->udata.config.samplebits;
-            ifx_set_samplerate(snd_dev->audio_config);
-            LOG_D("set samplerate %d", snd_dev->audio_config.samplerate);
+            candidate = caps->udata.config;
             break;
         }
 
         case AUDIO_DSP_SAMPLERATE:
         {
-            snd_dev->audio_config.samplerate = caps->udata.config.samplerate;
-            ifx_set_samplerate(snd_dev->audio_config);
-            LOG_D("set samplerate %d", snd_dev->audio_config.samplerate);
+            candidate.samplerate = caps->udata.config.samplerate;
             break;
         }
 
         case AUDIO_DSP_CHANNELS:
         {
-            // SAIA_Channels_Set(caps->udata.config.channels);
-            // snd_dev->audio_config.channels   = caps->udata.config.channels;
-            // LOG_D("set channels %d", snd_dev->audio_config.channels);
+            candidate.channels = caps->udata.config.channels;
             break;
         }
 
         case AUDIO_DSP_SAMPLEBITS:
         {
-            /* not support */
-            // snd_dev->audio_config.samplebits = caps->udata.config.samplebits;
+            candidate.samplebits = caps->udata.config.samplebits;
             break;
         }
 
         default:
             result = -RT_ERROR;
             break;
+        }
+
+        if (result == RT_EOK)
+        {
+            result = ifx_apply_output_format(&candidate);
+            if (result == RT_EOK)
+            {
+                snd_dev->audio_config = candidate;
+                LOG_I("output format %lu Hz, %u ch, %u bit",
+                      (unsigned long)candidate.samplerate,
+                      candidate.channels, candidate.samplebits);
+            }
         }
 
         break;
@@ -402,16 +440,19 @@ static rt_err_t sound_init(struct rt_audio_device *audio)
 
     ifx_i2s_init();
 
-    if (es8388_init("i2c0", RT_NULL) != RT_EOK)
+    if (es8388_init("i2c0", ES8388_PA_PIN) != RT_EOK)
     {
         LOG_E("ES8388 init failed.");
-        RT_ASSERT(0);
+        return -RT_ERROR;
     }
 
     es8388_start(ES_MODE_DAC);
 
-    es8388_volume_set(80);
-    ifx_set_samplerate(snd_dev->audio_config);
+    es8388_volume_set(snd_dev->volume);
+    if (ifx_set_samplerate(snd_dev->audio_config) != RT_EOK ||
+        es8388_output_format_set(snd_dev->audio_config.samplerate,
+                                 snd_dev->audio_config.samplebits) != RT_EOK)
+        return -RT_ERROR;
 
     rt_thread_startup(snd_dev->playback_thread);
 
@@ -425,6 +466,7 @@ static rt_err_t sound_start(struct rt_audio_device *audio, int stream)
 
     if (stream == AUDIO_STREAM_REPLAY)
     {
+        (void)rt_sem_control(snd_dev.tx_sem, RT_IPC_CMD_RESET, RT_NULL);
         music_player_active = true;
         LOG_I("Ready for I2S output \r\n");
         rt_audio_tx_complete(audio);
@@ -441,9 +483,11 @@ static rt_ssize_t sound_transmit(struct rt_audio_device *audio, const void *writ
     if (size > 0)
     {
         i2s_playback_q_data_t i2s_playback_q_data;
-        i2s_playback_q_data.data_len = size >> 1;
-        i2s_playback_q_data.data = (rt_int16_t *) writeBuf;
-        rt_mq_send(snd_dev->tx_mq, &i2s_playback_q_data, sizeof(i2s_playback_q_data_t));
+        i2s_playback_q_data.data_len_bytes = (rt_uint32_t)size;
+        i2s_playback_q_data.data = (const rt_uint8_t *)writeBuf;
+        if (rt_mq_send(snd_dev->tx_mq, &i2s_playback_q_data,
+                       sizeof(i2s_playback_q_data_t)) != RT_EOK)
+            return 0;
     }
     return size;
 }
@@ -453,18 +497,23 @@ static rt_err_t sound_stop(struct rt_audio_device *audio, int stream)
     RT_ASSERT(audio != RT_NULL);
     if (stream == AUDIO_STREAM_REPLAY)
     {
-//        music_player_active = false;
-//        first_frame=true;
-//        app_i2s_deactivate();
+        music_player_active = false;
+        NVIC_DisableIRQ(i2s_isr_txcfg.intrSrc);
+        Cy_AudioTDM_DeActivateTx(TDM_STRUCT0_TX);
+        Cy_AudioI2S_DisableTx(TDM_STRUCT0_TX);
+        first_frame = true;
+        i2s_data_ready_flag = false;
+        active_i2s_word_count = 0U;
+        active_i2s_word_offset = 0U;
+        NVIC_EnableIRQ(i2s_isr_txcfg.intrSrc);
+        (void)rt_mq_control(snd_dev.tx_mq, RT_IPC_CMD_RESET, RT_NULL);
+        (void)rt_sem_release(snd_dev.tx_sem);
 //        rt_thread_detach(snd_dev->playback_thread);
 //        while(audio->replay->queue.is_empty==0)
 //        rt_data_queue_reset(&audio->replay->queue);
 //        audio->replay->write_index = 0;
 //        audio->replay->read_index = 0;
 //        audio->replay->pos = 0;
-//        i2s_data_ready_flag = false;
-
-//            rt_audio_tx_complete(audio);
         LOG_D("Sound Stop.");
     }
 
@@ -555,6 +604,7 @@ int rt_hw_sound_init(void)
 }
 INIT_DEVICE_EXPORT(rt_hw_sound_init);
 
+#if 0 /* Replaced by the variable-format frame path below. */
 void i2s_write_32_samples(void)
 {
     i2s_32_samples_frame_count = 1;
@@ -879,6 +929,160 @@ void i2s_tx_interrupt_handler(void)
     /* Clear all Tx I2S Interrupt */
     Cy_AudioTDM_ClearTxInterrupt(TDM_STRUCT0_TX, CY_TDM_INTR_TX_MASK);
 
+    rt_interrupt_leave();
+}
+#endif
+
+static rt_uint32_t i2s_unpack_sample(const rt_uint8_t *data,
+                                     rt_uint8_t sample_bits)
+{
+    if (sample_bits == 16U)
+        return (rt_uint32_t)((rt_uint16_t)data[0] |
+                             ((rt_uint16_t)data[1] << 8));
+    return (rt_uint32_t)data[0] |
+           ((rt_uint32_t)data[1] << 8) |
+           ((rt_uint32_t)data[2] << 16);
+}
+
+static rt_uint32_t i2s_prepare_physical_frame(
+    const i2s_playback_q_data_t *message, rt_uint32_t *output,
+    const struct rt_audio_configure *config)
+{
+    rt_uint32_t bytes_per_sample = config->samplebits / 8U;
+    rt_uint32_t bytes_per_frame = bytes_per_sample * config->channels;
+    rt_uint32_t frame_count;
+    rt_uint32_t frame;
+
+    if (bytes_per_frame == 0U) return 0U;
+    frame_count = message->data_len_bytes / bytes_per_frame;
+    if (frame_count > PLAYBACK_DATA_FRAME_SIZE / 2U)
+        frame_count = PLAYBACK_DATA_FRAME_SIZE / 2U;
+    for (frame = 0U; frame < frame_count; frame++)
+    {
+        const rt_uint8_t *input = message->data + frame * bytes_per_frame;
+        rt_uint32_t left = i2s_unpack_sample(input,
+                                             config->samplebits);
+        rt_uint32_t right = config->channels == 2U ?
+            i2s_unpack_sample(input + bytes_per_sample,
+                              config->samplebits) : left;
+        output[frame * 2U] = left;
+        output[frame * 2U + 1U] = right;
+    }
+    return frame_count * 2U;
+}
+
+void i2s_playback_task(void *arg)
+{
+    struct rt_audio_device *audio = (struct rt_audio_device *)arg;
+    struct sound_device *device;
+    i2s_playback_q_data_t message;
+
+    RT_ASSERT(audio != RT_NULL);
+    device = (struct sound_device *)audio->parent.user_data;
+    active_i2s_playback_buffer_ptr = i2s_playback_buffer1;
+    inactive_i2s_playback_buffer_ptr = i2s_playback_buffer2;
+
+    while (1)
+    {
+        rt_uint32_t word_count;
+        rt_uint32_t *temporary;
+        rt_base_t level;
+        bool start_hardware;
+
+        if (rt_mq_recv(device->tx_mq, &message, sizeof(message),
+                       RT_WAITING_FOREVER) != RT_EOK)
+            continue;
+        if (i2s_deinit_flag)
+        {
+            i2s_deinit_flag = false;
+            first_frame = true;
+            rt_audio_tx_complete(audio);
+            continue;
+        }
+        if (!first_frame &&
+            rt_sem_take(device->tx_sem, RT_WAITING_FOREVER) != RT_EOK)
+        {
+            rt_audio_tx_complete(audio);
+            continue;
+        }
+
+        word_count = i2s_prepare_physical_frame(
+            &message, inactive_i2s_playback_buffer_ptr,
+            &device->audio_config);
+        if (word_count == 0U)
+        {
+            rt_audio_tx_complete(audio);
+            continue;
+        }
+
+        level = rt_hw_interrupt_disable();
+        temporary = active_i2s_playback_buffer_ptr;
+        active_i2s_playback_buffer_ptr = inactive_i2s_playback_buffer_ptr;
+        inactive_i2s_playback_buffer_ptr = temporary;
+        active_i2s_word_count = word_count;
+        active_i2s_word_offset = 0U;
+        i2s_data_ready_flag = true;
+        start_hardware = first_frame;
+        first_frame = false;
+        rt_hw_interrupt_enable(level);
+
+        if (start_hardware && !i2s_deinit_flag)
+        {
+            rt_uint32_t index;
+            app_i2s_enable();
+            for (index = 0U; index < HW_FIFO_SIZE; index++)
+                Cy_AudioTDM_WriteTxData(TDM_STRUCT0_TX, 0U);
+            app_i2s_activate();
+            es8388_volume_set(device->volume);
+        }
+        rt_audio_tx_complete(audio);
+    }
+}
+
+bool is_music_player_active(void)
+{
+    return music_player_active;
+}
+
+bool is_music_player_paused(void)
+{
+    return music_player_pause;
+}
+
+void i2s_tx_interrupt_handler(void)
+{
+    rt_uint32_t intr_status;
+
+    rt_interrupt_enter();
+    intr_status = Cy_AudioTDM_GetTxInterruptStatusMasked(TDM_STRUCT0_TX);
+    if ((intr_status & CY_TDM_INTR_TX_FIFO_TRIGGER) != 0U)
+    {
+        rt_uint32_t index;
+        bool completed = false;
+        for (index = 0U; index < HW_FIFO_SIZE; index++)
+        {
+            rt_uint32_t value = 0U;
+            if (!music_player_pause && i2s_data_ready_flag &&
+                active_i2s_word_offset < active_i2s_word_count)
+            {
+                value = active_i2s_playback_buffer_ptr[
+                    active_i2s_word_offset++];
+                if (active_i2s_word_offset >= active_i2s_word_count)
+                    completed = true;
+            }
+            Cy_AudioTDM_WriteTxData(TDM_STRUCT0_TX, value);
+        }
+        if (completed)
+        {
+            i2s_data_ready_flag = false;
+            active_i2s_word_offset = 0U;
+            active_i2s_word_count = 0U;
+            (void)rt_sem_release(snd_dev.tx_sem);
+        }
+    }
+    if ((intr_status & CY_TDM_INTR_TX_FIFO_UNDERFLOW) != 0U)
+        LOG_W("I2S transmit underflow");
+    Cy_AudioTDM_ClearTxInterrupt(TDM_STRUCT0_TX, CY_TDM_INTR_TX_MASK);
     rt_interrupt_leave();
 }
 

@@ -17,10 +17,12 @@ typedef enum
     FT_PAGE_SYSTEM,
     FT_PAGE_SETTINGS,
     FT_PAGE_MEDIA,
+    FT_PAGE_RECORDER,
     FT_PAGE_GALLERY,
     FT_PAGE_FILES,
     FT_PAGE_ABOUT,
     FT_PAGE_SETTINGS_DISPLAY,
+    FT_PAGE_SETTINGS_AUDIO,
     FT_PAGE_SETTINGS_WIFI,
     FT_PAGE_SETTINGS_BLUETOOTH,
     FT_PAGE_SETTINGS_STORAGE,
@@ -108,6 +110,11 @@ typedef struct
     bool use_24_hour;
     int16_t timezone_offset_minutes;
     ft_language_t language;
+    uint8_t audio_output_volume;
+    uint8_t audio_input_gain;
+    uint32_t audio_output_sample_rate;
+    uint8_t audio_output_sample_bits;
+    uint8_t audio_output_channels;
     char wallpaper_path[256];
     uint32_t revision;
 } ft_ui_preferences_t;
@@ -174,6 +181,14 @@ int ft_preferences_flush(void);
 void ft_preferences_set_24_hour(bool enabled);
 void ft_preferences_set_timezone(int16_t offset_minutes);
 void ft_preferences_set_language(ft_language_t language);
+int ft_preferences_set_audio_output_volume(uint8_t volume);
+int ft_preferences_set_audio_input_gain(uint8_t gain);
+int ft_preferences_set_audio_output_format(uint32_t sample_rate,
+                                           uint8_t sample_bits,
+                                           uint8_t channels);
+int ft_preferences_sync_audio_output_format(uint32_t sample_rate,
+                                            uint8_t sample_bits,
+                                            uint8_t channels);
 const char *ft_preferences_text(const char *zh_cn, const char *en_us);
 void ft_preferences_format_clock(uint32_t seconds, bool utc_time,
                                  char *buffer, size_t buffer_size);
@@ -269,6 +284,12 @@ size_t ft_pages_test_settings_count(void);
 size_t ft_pages_test_settings_visible_count(void);
 ft_page_id_t ft_pages_test_settings_page_id(size_t index);
 lv_obj_t *ft_pages_test_get_settings_brightness(void);
+lv_obj_t *ft_pages_test_get_audio_output_slider(void);
+lv_obj_t *ft_pages_test_get_audio_input_slider(void);
+lv_obj_t *ft_pages_test_get_audio_rate_button(size_t index);
+lv_obj_t *ft_pages_test_get_audio_bits_button(size_t index);
+lv_obj_t *ft_pages_test_get_audio_channel_button(size_t index);
+bool ft_pages_test_audio_state_valid(void);
 lv_obj_t *ft_pages_test_get_usb_role_button(ft_usb_role_t role);
 lv_obj_t *ft_pages_test_get_usb_function_button(ft_usb_function_t function);
 lv_obj_t *ft_pages_test_get_usb_stop_button(void);

@@ -66,9 +66,20 @@ config FEATHERTALK_USING_USB_MSC
     help
         Let the USB settings page transfer exclusive ownership of the internal
         Flash and SD card between local DFS and a two-LUN CherryUSB Device MSC
-        function. USB Host is not supported by this board revision. USB Audio
-        is listed in the UI but is intentionally disabled until the audio path
-        is integrated.
+        function. USB Host is not supported by this board revision.
+
+config FEATHERTALK_USING_USB_UAC
+    bool "Enable FeatherTalk bidirectional USB Audio Class 2"
+    depends on BSP_USING_USB && BSP_USB_ROLE_DEVICE_CUSTOM
+    depends on RT_USING_AUDIO
+    select RT_CHERRYUSB_DEVICE_SPEED_HS
+    select RT_CHERRYUSB_DEVICE_DWC2_INFINEON
+    select RT_CHERRYUSB_DEVICE_AUDIO
+    default y
+    help
+        Expose sound0 as a host-to-device speaker and mic0 as a
+        device-to-host microphone. The UAC2 clock and alternate-setting
+        controls are synchronized with the product audio service and UI.
 
 config FEATHERTALK_UI_TEST_MODE
     bool "Enable automatic FeatherTalk UI interaction test"

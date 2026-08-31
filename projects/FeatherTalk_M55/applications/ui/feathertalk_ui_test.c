@@ -4,12 +4,14 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/unistd.h>
+#include "feathertalk_audio.h"
 #include "feathertalk_storage.h"
 #include "feathertalk_ui.h"
 #include "feathertalk_ui_gallery.h"
 #include "feathertalk_ui_internal.h"
 #include "feathertalk_ui_notifications.h"
 #include "feathertalk_ui_preferences_store.h"
+#include "feathertalk_ui_recorder.h"
 
 #ifdef FEATHERTALK_UI_TEST_MODE
 
@@ -116,6 +118,8 @@ static bool s_step_period_active;
 static uint32_t s_files_before;
 static uint32_t s_shade_render_before;
 static uint8_t s_settings_brightness_before;
+static uint8_t s_settings_audio_output_before;
+static uint8_t s_settings_audio_input_before;
 static uint8_t s_lifecycle_wait_steps;
 static uint8_t s_gallery_wait_steps;
 static ft_ui_preferences_t s_preferences_before;
@@ -202,24 +206,25 @@ static void run_settings_test(void)
     size_t accent_count = ft_pages_test_accent_count();
     size_t opacity_count = ft_pages_test_opacity_count();
     size_t background_count = ft_pages_test_background_count();
-    const size_t preference_base = 21U;
+    const size_t preference_base = 23U;
     char detail[24];
     if (!ft_preferences_wallpaper_available() && background_count > 0U)
         background_count--;
     if (s_control_index == 0U)
     {
-        test_record(ft_pages_test_settings_count() == 9U &&
-                    ft_pages_test_settings_visible_count() == 9U,
-                    "settings.categories", "7 controls + system information + about");
+        test_record(ft_pages_test_settings_count() == 10U &&
+                    ft_pages_test_settings_visible_count() == 10U,
+                    "settings.categories", "8 controls + system information + about");
         test_record(ft_pages_test_settings_page_id(0U) == FT_PAGE_SETTINGS_DISPLAY &&
-                    ft_pages_test_settings_page_id(1U) == FT_PAGE_SETTINGS_WIFI &&
-                    ft_pages_test_settings_page_id(2U) == FT_PAGE_SETTINGS_BLUETOOTH &&
-                    ft_pages_test_settings_page_id(3U) == FT_PAGE_SETTINGS_STORAGE &&
-                    ft_pages_test_settings_page_id(4U) == FT_PAGE_SETTINGS_USB &&
-                    ft_pages_test_settings_page_id(5U) == FT_PAGE_SETTINGS_TIME_LANGUAGE &&
-                    ft_pages_test_settings_page_id(6U) == FT_PAGE_SETTINGS_PERSONALIZATION &&
-                    ft_pages_test_settings_page_id(7U) == FT_PAGE_SYSTEM &&
-                    ft_pages_test_settings_page_id(8U) == FT_PAGE_ABOUT,
+                    ft_pages_test_settings_page_id(1U) == FT_PAGE_SETTINGS_AUDIO &&
+                    ft_pages_test_settings_page_id(2U) == FT_PAGE_SETTINGS_WIFI &&
+                    ft_pages_test_settings_page_id(3U) == FT_PAGE_SETTINGS_BLUETOOTH &&
+                    ft_pages_test_settings_page_id(4U) == FT_PAGE_SETTINGS_STORAGE &&
+                    ft_pages_test_settings_page_id(5U) == FT_PAGE_SETTINGS_USB &&
+                    ft_pages_test_settings_page_id(6U) == FT_PAGE_SETTINGS_TIME_LANGUAGE &&
+                    ft_pages_test_settings_page_id(7U) == FT_PAGE_SETTINGS_PERSONALIZATION &&
+                    ft_pages_test_settings_page_id(8U) == FT_PAGE_SYSTEM &&
+                    ft_pages_test_settings_page_id(9U) == FT_PAGE_ABOUT,
                     "settings.scope", "board controls plus device information");
     }
     else if (s_control_index == 1U)
@@ -247,7 +252,7 @@ static void run_settings_test(void)
         lv_textarea_set_text(ft_pages_test_get_settings_search_box(), "");
         (void)lv_obj_send_event(ft_pages_test_get_settings_search_box(),
                                 LV_EVENT_VALUE_CHANGED, RT_NULL);
-        test_record(ft_pages_test_settings_visible_count() == 9U,
+        test_record(ft_pages_test_settings_visible_count() == 10U,
                     "settings.search.clear", "all categories restored");
     }
     else if (s_control_index == 4U)
@@ -278,9 +283,66 @@ static void run_settings_test(void)
                     ft_router_depth() == 2U,
                     "settings.back", "detail -> settings");
     }
-    else if (s_control_index >= 6U && s_control_index <= 7U)
+    else if (s_control_index == 6U)
     {
-        size_t category_index = s_control_index - 5U;
+        s_settings_audio_output_before = preferences->audio_output_volume;
+        s_settings_audio_input_before = preferences->audio_input_gain;
+        (void)test_click(ft_pages_test_get_settings_result(1U),
+                         "settings.open", "Audio");
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS_AUDIO &&
+                    ft_router_depth() == 3U &&
+                    ft_pages_test_audio_state_valid(),
+                    "settings.audio", "sound0 and mic0 registered and ready");
+    }
+    else if (s_control_index == 7U)
+    {
+        lv_obj_t *output = ft_pages_test_get_audio_output_slider();
+        lv_obj_t *input = ft_pages_test_get_audio_input_slider();
+        ft_audio_status_t audio_status;
+        lv_slider_set_value(output, 36, LV_ANIM_OFF);
+        (void)test_event(output, LV_EVENT_VALUE_CHANGED,
+                         "settings.audio.output", "36%");
+        (void)test_event(output, LV_EVENT_RELEASED,
+                         "settings.audio.output.apply", "sound0");
+        lv_slider_set_value(input, 30, LV_ANIM_OFF);
+        (void)test_event(input, LV_EVENT_VALUE_CHANGED,
+                         "settings.audio.input", "15.0 dB");
+        (void)test_event(input, LV_EVENT_RELEASED,
+                         "settings.audio.input.apply", "mic0");
+        test_record(preferences->audio_output_volume == 36U &&
+                    preferences->audio_input_gain == 30U &&
+                    ft_pages_test_audio_state_valid(),
+                    "settings.audio.state", "levels applied through RT-Thread Audio");
+        (void)test_click(ft_pages_test_get_audio_rate_button(2U),
+                         "settings.audio.rate", "48 kHz");
+        (void)test_click(ft_pages_test_get_audio_bits_button(1U),
+                         "settings.audio.depth", "24 bit");
+        (void)test_click(ft_pages_test_get_audio_channel_button(0U),
+                         "settings.audio.channels", "mono");
+        (void)ft_audio_get_status(&audio_status);
+        test_record(preferences->audio_output_sample_rate == 48000U &&
+                    preferences->audio_output_sample_bits == 24U &&
+                    preferences->audio_output_channels == 1U &&
+                    audio_status.output_sample_rate == 48000U &&
+                    audio_status.output_sample_bits == 24U &&
+                    audio_status.output_channels == 1U,
+                    "settings.audio.format", "UI selection and sound0 readback agree");
+        lv_slider_set_value(output, s_settings_audio_output_before, LV_ANIM_OFF);
+        (void)lv_obj_send_event(output, LV_EVENT_RELEASED, RT_NULL);
+        lv_slider_set_value(input, s_settings_audio_input_before, LV_ANIM_OFF);
+        (void)lv_obj_send_event(input, LV_EVENT_RELEASED, RT_NULL);
+        (void)ft_preferences_set_audio_output_format(
+            s_preferences_before.audio_output_sample_rate,
+            s_preferences_before.audio_output_sample_bits,
+            s_preferences_before.audio_output_channels);
+        (void)ft_router_back();
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS &&
+                    ft_router_depth() == 2U,
+                    "settings.back", "audio -> settings");
+    }
+    else if (s_control_index >= 8U && s_control_index <= 9U)
+    {
+        size_t category_index = s_control_index - 6U;
         ft_page_id_t expected = ft_pages_test_settings_page_id(category_index);
         lv_snprintf(detail, sizeof(detail), "category[%lu]",
                     (unsigned long)category_index);
@@ -293,11 +355,11 @@ static void run_settings_test(void)
                     ft_router_depth() == 2U,
                     "settings.back", detail);
     }
-    else if (s_control_index == 8U)
+    else if (s_control_index == 10U)
     {
         lv_obj_t *flash_button;
         lv_obj_t *sd_button;
-        (void)test_click(ft_pages_test_get_settings_result(3U),
+        (void)test_click(ft_pages_test_get_settings_result(4U),
                          "settings.open", "Storage");
         test_record(ft_router_current_page() == FT_PAGE_SETTINGS_STORAGE &&
                     ft_router_depth() == 3U &&
@@ -337,7 +399,7 @@ static void run_settings_test(void)
                     ft_pages_test_storage_state_valid(),
                     "settings.storage.sd", "independent SD view and actions");
     }
-    else if (s_control_index == 9U)
+    else if (s_control_index == 11U)
     {
         lv_obj_t *format = ft_pages_test_get_storage_format_button();
         if (format != RT_NULL && lv_obj_is_valid(format) &&
@@ -374,9 +436,9 @@ static void run_settings_test(void)
                     ft_router_depth() == 2U,
                     "settings.back", "storage -> settings");
     }
-    else if (s_control_index == 10U)
+    else if (s_control_index == 12U)
     {
-        (void)test_click(ft_pages_test_get_settings_result(4U),
+        (void)test_click(ft_pages_test_get_settings_result(5U),
                          "settings.open", "USB");
         test_record(ft_router_current_page() == FT_PAGE_SETTINGS_USB &&
                     ft_router_depth() == 3U &&
@@ -387,9 +449,9 @@ static void run_settings_test(void)
                     ft_router_depth() == 2U,
                     "settings.back", "USB -> settings");
     }
-    else if (s_control_index == 11U)
+    else if (s_control_index == 13U)
     {
-        (void)test_click(ft_pages_test_get_settings_result(5U),
+        (void)test_click(ft_pages_test_get_settings_result(6U),
                          "settings.open", "Time & language");
         test_record(ft_router_current_page() == FT_PAGE_SETTINGS_TIME_LANGUAGE &&
                     ft_router_depth() == 3U &&
@@ -398,7 +460,7 @@ static void run_settings_test(void)
                     ft_pages_test_get_language_button(0U) != RT_NULL,
                     "settings.time_language", "format, time zone and language controls");
     }
-    else if (s_control_index == 12U)
+    else if (s_control_index == 14U)
     {
         (void)test_click(ft_pages_test_get_time_format_button(1U),
                          "settings.time_format", "12-hour");
@@ -409,7 +471,7 @@ static void run_settings_test(void)
         test_record(preferences->use_24_hour,
                     "settings.time_format.restore", "24-hour restored");
     }
-    else if (s_control_index == 13U)
+    else if (s_control_index == 15U)
     {
         lv_obj_t *dropdown = ft_pages_test_get_timezone_dropdown();
         uint32_t timezone_index = 2U;
@@ -424,14 +486,14 @@ static void run_settings_test(void)
         test_record(preferences->timezone_offset_minutes == 480,
                     "settings.timezone.restore", "UTC+08:00 restored");
     }
-    else if (s_control_index == 14U)
+    else if (s_control_index == 16U)
     {
         (void)test_click(ft_pages_test_get_language_button(FT_LANGUAGE_EN_US),
                          "settings.language", "English");
         test_record(preferences->language == FT_LANGUAGE_EN_US,
                     "settings.language.state", "English selected");
     }
-    else if (s_control_index == 15U)
+    else if (s_control_index == 17U)
     {
         test_record(preferences->language == FT_LANGUAGE_EN_US &&
                     ft_router_current_page() == FT_PAGE_SETTINGS_TIME_LANGUAGE &&
@@ -443,7 +505,7 @@ static void run_settings_test(void)
         test_record(preferences->language == FT_LANGUAGE_ZH_CN,
                     "settings.language.state", "Simplified Chinese selected");
     }
-    else if (s_control_index == 16U)
+    else if (s_control_index == 18U)
     {
         test_record(preferences->language == FT_LANGUAGE_ZH_CN &&
                     ft_router_current_page() == FT_PAGE_SETTINGS_TIME_LANGUAGE &&
@@ -451,16 +513,16 @@ static void run_settings_test(void)
                     ft_ui_test_language_surface(FT_LANGUAGE_ZH_CN),
                     "settings.language.surface", "Chinese applied to pages, tiles and shell");
     }
-    else if (s_control_index == 17U)
+    else if (s_control_index == 19U)
     {
         (void)ft_router_back();
         test_record(ft_router_current_page() == FT_PAGE_SETTINGS &&
                     ft_router_depth() == 2U,
                     "settings.back", "time & language -> settings");
     }
-    else if (s_control_index == 18U)
+    else if (s_control_index == 20U)
     {
-        (void)test_click(ft_pages_test_get_settings_result(7U),
+        (void)test_click(ft_pages_test_get_settings_result(8U),
                          "settings.open", "System information");
         test_record(ft_router_current_page() == FT_PAGE_SYSTEM &&
                     ft_router_depth() == 3U &&
@@ -471,9 +533,9 @@ static void run_settings_test(void)
                     ft_router_depth() == 2U,
                     "settings.back", "system information -> settings");
     }
-    else if (s_control_index == 19U)
+    else if (s_control_index == 21U)
     {
-        (void)test_click(ft_pages_test_get_settings_result(8U),
+        (void)test_click(ft_pages_test_get_settings_result(9U),
                          "settings.open", "About FeatherTalk");
         test_record(ft_router_current_page() == FT_PAGE_ABOUT &&
                     ft_router_depth() == 3U,
@@ -483,9 +545,9 @@ static void run_settings_test(void)
                     ft_router_depth() == 2U,
                     "settings.back", "about -> settings");
     }
-    else if (s_control_index == 20U)
+    else if (s_control_index == 22U)
     {
-        (void)test_click(ft_pages_test_get_settings_result(6U),
+        (void)test_click(ft_pages_test_get_settings_result(7U),
                          "settings.open", "Personalization");
         test_record(ft_router_current_page() == FT_PAGE_SETTINGS_PERSONALIZATION &&
                     ft_router_depth() == 3U,
@@ -559,6 +621,32 @@ static void run_media_test(void)
         test_record(ft_pages_test_media_volume() == 35, "media.volume.state", "35");
         break;
     default:
+        finish_page_controls();
+        return;
+    }
+    s_control_index++;
+}
+
+static void run_recorder_test(void)
+{
+    if (s_control_index == 0U)
+    {
+        test_record(ft_recorder_page_test_ready(), "recorder.page",
+                    "mic0 ready and AMIC2 explicitly unavailable");
+        test_record(ft_recorder_page_test_selected_device() == 0U,
+                    "recorder.device", "mic0 selected by default");
+        test_record(ft_recorder_page_test_get_device(0U) != RT_NULL &&
+                    ft_recorder_page_test_get_device(1U) != RT_NULL,
+                    "recorder.devices", "two independent device selectors");
+    }
+    else if (s_control_index == 1U)
+    {
+        test_record(ft_recorder_page_test_get_record_button() != RT_NULL &&
+                    lv_obj_is_valid(ft_recorder_page_test_get_record_button()),
+                    "recorder.action", "start / stop-and-save control ready");
+    }
+    else
+    {
         finish_page_controls();
         return;
     }
@@ -991,6 +1079,7 @@ static void run_page_control_test(const ft_app_descriptor_t *app)
     }
     else if (app->page_id == FT_PAGE_SETTINGS) run_settings_test();
     else if (app->page_id == FT_PAGE_MEDIA) run_media_test();
+    else if (app->page_id == FT_PAGE_RECORDER) run_recorder_test();
     else if (app->page_id == FT_PAGE_GALLERY) run_gallery_test();
     else if (app->page_id == FT_PAGE_FILES) run_files_test();
     else
@@ -1023,7 +1112,7 @@ static void ui_test_timer_cb(lv_timer_t *timer)
                     (long)layout->screen_width, (long)layout->screen_height,
                     layout->tile_columns, (long)layout->scale_percent);
         test_record(home_start_is_ready(), "shell.start", "home/start");
-        test_record(app_count == 4U, "registry.count", "4 standalone applications");
+        test_record(app_count == 5U, "registry.count", "5 standalone applications");
         test_record(ft_preferences_store_get_status(&store_status) == RT_EOK &&
                     store_status.initialized && store_status.worker_started &&
                     store_status.test_suspended,
@@ -1670,7 +1759,10 @@ static void ui_test_timer_cb(lv_timer_t *timer)
                                 LV_EVENT_VALUE_CHANGED, RT_NULL);
         preferences = ft_preferences_get();
         test_record(preferences->accent_rgb == 0x0078D7UL && preferences->tile_opa == 255U &&
-                    preferences->background == FT_BACKGROUND_BLACK,
+                    preferences->background == FT_BACKGROUND_BLACK &&
+                    preferences->audio_output_sample_rate == 16000U &&
+                    preferences->audio_output_sample_bits == 16U &&
+                    preferences->audio_output_channels == 2U,
                     "preferences.defaults", "reset path exercised under test suspension");
         ft_preferences_test_end();
         preferences = ft_preferences_get();
@@ -1681,6 +1773,16 @@ static void ui_test_timer_cb(lv_timer_t *timer)
                     preferences->timezone_offset_minutes ==
                         s_preferences_before.timezone_offset_minutes &&
                     preferences->language == s_preferences_before.language &&
+                    preferences->audio_output_volume ==
+                        s_preferences_before.audio_output_volume &&
+                    preferences->audio_input_gain ==
+                        s_preferences_before.audio_input_gain &&
+                    preferences->audio_output_sample_rate ==
+                        s_preferences_before.audio_output_sample_rate &&
+                    preferences->audio_output_sample_bits ==
+                        s_preferences_before.audio_output_sample_bits &&
+                    preferences->audio_output_channels ==
+                        s_preferences_before.audio_output_channels &&
                     strcmp(preferences->wallpaper_path,
                            s_preferences_before.wallpaper_path) == 0,
                     "preferences.restore", "per-device configuration restored");
