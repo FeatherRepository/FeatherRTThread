@@ -191,6 +191,13 @@ static const char *ft_bt_state_name(ft_bt_host_state_t state)
     }
 }
 
+int feathertalk_bt_host_enabled(void)
+{
+    /* Count as enabled only once the AIROC host stack has reached READY
+       (PatchRAM downloaded, controller up). */
+    return (g_bt.state == FT_BT_HOST_READY) ? 1 : 0;
+}
+
 static void ft_bt_lock(void)
 {
     if (g_bt_status_lock_ready)

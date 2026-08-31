@@ -31,3 +31,26 @@ config PLATFORM_DIR
 source "$RTT_DIR/Kconfig"
 source "$PKGS_DIR/Kconfig"
 source "$RTT_DIR/../libraries/M33_Config/Kconfig"
+
+menu "FeatherTalk Bluetooth"
+
+choice
+    prompt "Bluetooth host stack"
+    default FEATHERTALK_BT_STACK_BK
+    help
+        Exactly one host stack drives the CYW55512 HCI UART (SCB4).
+        BK is the open-source product line; AIROC is the precompiled
+        Infineon reference kept for comparison and fallback.
+
+config FEATHERTALK_BT_STACK_NONE
+    bool "None"
+
+config FEATHERTALK_BT_STACK_BK
+    bool "btstack (BlueKitchen, open source)"
+
+config FEATHERTALK_BT_STACK_AIROC
+    bool "AIROC (Infineon precompiled, reference)"
+
+endchoice
+
+endmenu

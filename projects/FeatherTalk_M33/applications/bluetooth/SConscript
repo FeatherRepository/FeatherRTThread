@@ -3,11 +3,18 @@ import os
 from building import *
 
 cwd = GetCurrentDir()
-src = ['feathertalk_bt_host.c']
-path = [cwd, os.path.join(cwd, 'rtos')]
+src = ['feathertalk_bt_host.c', 'bt_service_airoc.c']
+path = [cwd, os.path.join(cwd, 'rtos'), os.path.normpath(os.path.join(cwd, '..'))]
 defines = []
 libs = []
 libpath = []
+
+# Stack selection: the AIROC reference stack builds only when explicitly
+# selected.  The submodule availability check below then also only runs
+# when this stack is actually used.
+if not GetDepend('FEATHERTALK_BT_STACK_AIROC'):
+    group = []
+    Return('group')
 
 # Apache-2.0 HCI-UART integration sources are vendored and patched locally.
 # Never include or compile a C file from a directory outside this repository.

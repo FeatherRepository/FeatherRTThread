@@ -1,8 +1,9 @@
+import os
 from building import *
 
 cwd = GetCurrentDir()
 src = Glob('*.c')
 
-group = DefineGroup('FeatherTalk IPC', src, depend=['BSP_USING_IPC'], CPPPATH=[cwd])
+group = DefineGroup('FeatherTalk IPC', src, depend=['BSP_USING_IPC'], CPPPATH=[cwd, os.path.normpath(os.path.join(cwd, '..'))])
 
 Return('group')

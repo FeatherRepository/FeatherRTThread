@@ -170,6 +170,17 @@ static void feathertalk_ipc_thread_entry(void *parameter)
                 continue;
             }
 
+            if (message.message_id == FEATHERTALK_IPC_MSG_EVENT)
+            {
+                /* M33 process tracing (e.g. Bluetooth bring-up stages):
+                   the numeric code travels in sequence/status. */
+                g_rx_count++;
+                rt_kprintf("[M33 evt %lu @%lums]\n",
+                           (unsigned long)message.status,
+                           (unsigned long)message.uptime_ms);
+                continue;
+            }
+
             if (message.message_id == FEATHERTALK_IPC_MSG_HELLO)
             {
                 response_id = FEATHERTALK_IPC_MSG_HELLO_ACK;
@@ -262,6 +273,76 @@ static int feather_m55_status(int argc, char **argv)
     return 0;
 }
 MSH_CMD_EXPORT(feather_m55_status, Show FeatherTalk M55 IPC status);
+
+static const char *feathertalk_quick_result_name(uint8_t result)
+{
+    switch (result)
+    {
+    case FEATHERTALK_QUICK_RESULT_NONE:        return "none";
+    case FEATHERTALK_QUICK_RESULT_OK:          return "ok";
+    case FEATHERTALK_QUICK_RESULT_UNAVAILABLE: return "unavailable";
+    case FEATHERTALK_QUICK_RESULT_INVALID:     return "invalid";
+    case FEATHERTALK_QUICK_RESULT_FAILED:      return "failed";
+    default:                                   return "unknown";
+    }
+}
+
+static int bt_status(int argc, char **argv)
+{
+    feathertalk_quick_status_t status;
+
+    (void)argc;
+    (void)argv;
+    if (feathertalk_ipc_get_quick_status(&status) != RT_EOK)
+    {
+        rt_kprintf("bt_status: no M33 quick status received yet\n");
+        return 0;
+    }
+
+    rt_kprintf("Bluetooth (M33 AIROC host, IPC quick seq=%lu age=%lums):\n",
+               (unsigned long)status.sequence,
+               (unsigned long)(rt_tick_get_millisecond() - status.received_ms));
+    rt_kprintf("  available : %s\n",
+               (status.capabilities & FEATHERTALK_QUICK_CAP_BLUETOOTH) != 0U ?
+               "yes" : "no");
+    rt_kprintf("  enabled   : %s\n",
+               (status.enabled & FEATHERTALK_QUICK_CAP_BLUETOOTH) != 0U ?
+               "yes (host READY)" : "no");
+    rt_kprintf("  connected : %s\n",
+               (status.connected & FEATHERTALK_QUICK_CAP_BLUETOOTH) != 0U ?
+               "yes" : "no (connections not supported yet)");
+    rt_kprintf("  last cmd  : control=%u result=%s\n",
+               status.last_control,
+               feathertalk_quick_result_name(status.result));
+    return 0;
+}
+MSH_CMD_EXPORT(bt_status, Show Bluetooth state reported by M33 over IPC);
+
+static int bt_on(int argc, char **argv)
+{
+    int rc;
+
+    (void)argc;
+    (void)argv;
+    rc = feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BLUETOOTH, 1U);
+    rt_kprintf("bt_on: quick command %s (check bt_status in a few seconds)\n",
+               (rc == RT_EOK) ? "queued" : "rejected (busy)");
+    return 0;
+}
+MSH_CMD_EXPORT(bt_on, Ask M33 to start the Bluetooth host);
+
+static int bt_off(int argc, char **argv)
+{
+    int rc;
+
+    (void)argc;
+    (void)argv;
+    rc = feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BLUETOOTH, 0U);
+    rt_kprintf("bt_off: quick command %s (stop not implemented on M33 yet)\n",
+               (rc == RT_EOK) ? "queued" : "rejected (busy)");
+    return 0;
+}
+MSH_CMD_EXPORT(bt_off, Ask M33 to stop the Bluetooth host);
 
 int feathertalk_ipc_start(void)
 {

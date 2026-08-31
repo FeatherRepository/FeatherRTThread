@@ -1,0 +1,82 @@
+import os
+from building import *
+
+# BT Host 放 M33 核: SCB4 时钟分频器/无线模组引脚属 M33 安全域
+# (M55 侧访问 PERI 时钟寄存器触发 bus fault, 实测)
+#
+# 开源自研栈 (BlueKitchen btstack) 仅在 FEATHERTALK_BT_STACK_BK 选中时编译;
+# 与 AIROC 参考栈 (applications/bluetooth) 构建期排他, 两栈都独占 SCB4。
+cwd = GetCurrentDir()
+repo_root = os.path.normpath(os.path.join(cwd, '..', '..', '..', '..'))
+bt_root = os.path.join(repo_root, 'bluetooth', 'port_rtthread')
+btstack_root = os.path.join(repo_root, 'bluetooth', 'reference', 'btstack')
+bsp_gen = os.path.join(repo_root, 'projects', 'libs', 'TARGET_APP_KIT_PSE84_EVAL_EPC2',
+                       'config', 'GeneratedSource')
+firmware_source = os.path.join(
+    repo_root, 'projects', 'FeatherTalk_M33', 'applications', 'bluetooth',
+    'third_party', 'infineon', 'bt-fw-ifx-cyw55500a1',
+    'COMPONENT_wlbga_iPA_sLNA_ANT0_LHL_XTAL_IN', 'btfw.c')
+firmware_build_dir = os.path.normpath(os.path.join(cwd, '..', '..', 'build', 'bt_bk'))
+firmware_build_source = os.path.join(firmware_build_dir, 'btfw.c')
+
+group = []
+if not GetDepend('FEATHERTALK_BT_STACK_BK'):
+    Return('group')
+
+if not os.path.isdir(bt_root) or not os.path.isdir(btstack_root):
+    print('BK stack: bluetooth/port_rtthread or bluetooth/reference/btstack missing')
+    Return('group')
+if not os.path.isfile(firmware_source):
+    print('BK stack: CYW55500A1 firmware submodule missing:')
+    print('  git submodule update --init --recursive')
+    raise RuntimeError('BK stack: official controller firmware is missing')
+
+# 显式源清单: btfw_data.c (旧 BTANT 变体) 不再参与构建,
+# 统一使用子模块里板选的 wlbga 固件 (与 AIROC 参考同一份)
+src = [os.path.join(bt_root, f) for f in
+       ('bt_main.c', 'bt_hcd_download.c',
+        'hal_uart_dma_rtthread.c', 'hal_cpu_rtthread.c', 'hal_time_ms_rtthread.c')]
+src += [os.path.join(btstack_root, 'src', f) for f in
+        ('hci.c', 'hci_transport_h4.c', 'hci_cmd.c', 'hci_dump.c',
+         'btstack_linked_list.c', 'btstack_memory.c', 'btstack_memory_pool.c',
+         'btstack_util.c', 'btstack_run_loop.c', 'btstack_run_loop_base.c',
+         'l2cap.c', 'l2cap_signaling.c', 'ad_parser.c',
+         'ble/le_device_db_memory.c')]
+src += [os.path.join(btstack_root, 'platform', 'embedded',
+         'btstack_run_loop_embedded.c'),
+        os.path.join(btstack_root, 'platform', 'embedded',
+         'btstack_uart_block_embedded.c')]
+
+# 固件数组拷到构建目录编译, 避免在子模块 (仓库外内容) 旁边写 .o
+Command(
+    firmware_build_source,
+    firmware_source,
+    [Mkdir(firmware_build_dir), Copy('$TARGET', '$SOURCE')])
+src += [File(firmware_build_source)]
+
+path = [btstack_root + '/src',
+        btstack_root + '/platform/embedded',
+        bt_root,
+        bsp_gen,
+        os.path.normpath(os.path.join(cwd, '..')),                       # applications/ (bt_service_api.h, ipc/)
+        os.path.join(repo_root, 'libraries', 'components',
+                     'Infineon_core-lib-latest', 'include'),
+        os.path.join(repo_root, 'libraries', 'components',
+                     'Infineon_core-lib-latest', 'include', 'pdl'),
+        os.path.join(repo_root, 'libraries', 'components',
+                     'mtb-device-support-pse8xxgp', 'hal', 'include'),
+        os.path.join(repo_root, 'libraries', 'components',
+                     'mtb-device-support-pse8xxgp', 'pdl', 'include'),
+        os.path.join(repo_root, 'libraries', 'components',
+                     'mtb-device-support-pse8xxgp', 'pdl', 'drivers', 'include'),
+        os.path.join(repo_root, 'libraries', 'components',
+                     'mtb-device-support-pse8xxgp', 'config', 'GeneratedSource'),
+        os.path.join(repo_root, 'rt-thread', 'components', 'drivers', 'include', 'drivers'),
+        ]
+
+print('FeatherTalk BK btstack: ' + btstack_root)
+print('FeatherTalk BK firmware: ' + firmware_source)
+
+group = DefineGroup('Bluetooth BK', src, depend = [''], CPPPATH = path)
+
+Return('group')

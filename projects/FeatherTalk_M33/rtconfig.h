@@ -356,6 +356,8 @@
 #define BSP_USING_UART2
 #define BSP_USING_UART5
 #define BSP_USING_RTC
+/* FeatherTalk Bluetooth host stack selection (see Kconfig choice) */
+#define FEATHERTALK_BT_STACK_BK
 /* end of On-chip Peripheral Drivers */
 /* end of Hardware Drivers Config */
 

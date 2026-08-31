@@ -8,6 +8,10 @@
 #include <feathertalk/ipc_protocol.h>
 
 #include "feathertalk_ipc.h"
+#if defined(FEATHERTALK_BT_STACK_AIROC) || defined(FEATHERTALK_BT_STACK_BK)
+#define FEATHERTALK_IPC_HAS_BT 1
+#include "bt_service_api.h"
+#endif
 
 #define FEATHERTALK_HEARTBEAT_INTERVAL_MS 1000U
 #define FEATHERTALK_PEER_TIMEOUT_MS       3000U
@@ -57,6 +61,74 @@ static rt_bool_t feathertalk_ipc_send(feathertalk_ipc_message_id_t message_id,
     return RT_TRUE;
 }
 
+/* M33 process tracing: delivers a numeric event code to the M55 console
+   (MSG_EVENT frame, code carried in sequence and status).  Used by the
+   Bluetooth bring-up path where no local console is available.
+   Cross-thread safe: callers only post to the queue below; the IPC thread
+   is the sole rt_device_write issuer (concurrent writes race and fail). */
+#define FEATHERTALK_EVENT_QUEUE_MASK 0x0FU
+static volatile rt_uint32_t g_event_queue[FEATHERTALK_EVENT_QUEUE_MASK + 1U];
+static volatile rt_uint8_t  g_event_head = 0U;
+static volatile rt_uint8_t  g_event_tail = 0U;
+
+void feathertalk_ipc_send_event(rt_uint32_t code)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    rt_uint8_t next = (rt_uint8_t)((g_event_head + 1U) & FEATHERTALK_EVENT_QUEUE_MASK);
+
+    if (next != g_event_tail)
+    {
+        g_event_queue[g_event_head] = code;
+        g_event_head = next;
+    }
+    rt_hw_interrupt_enable(level);
+}
+
+static rt_bool_t feathertalk_ipc_send_event_frame(rt_uint32_t code)
+{
+    edge_rc_frame_t frame;
+    feathertalk_ipc_message_t message;
+
+    if (g_ipc_tx == RT_NULL)
+    {
+        return RT_FALSE;
+    }
+
+    rt_memset(&frame, 0, sizeof(frame));
+    rt_memset(&message, 0, sizeof(message));
+    message.abi_version = FEATHERTALK_IPC_ABI_VERSION;
+    message.message_id = FEATHERTALK_IPC_MSG_EVENT;
+    message.sequence = code;
+    message.uptime_ms = rt_tick_get_millisecond();
+    message.status = code;
+    rt_memcpy(frame.channel, &message, sizeof(message));
+    frame.seq = code;
+    if (rt_device_write(g_ipc_tx, 0, &frame, 1) != 1)
+    {
+        g_error_count++;
+        return RT_FALSE;
+    }
+    g_tx_count++;
+    return RT_TRUE;
+}
+
+static void feathertalk_ipc_flush_events(void)
+{
+    /* The IPC pipe only holds a few in-flight frames; a heartbeat burst can
+       momentarily fill it.  Keep the tail put and retry next iteration
+       instead of dropping events on a transient busy. */
+    while (g_event_tail != g_event_head)
+    {
+        rt_uint32_t code = g_event_queue[g_event_tail];
+
+        if (feathertalk_ipc_send_event_frame(code) != RT_TRUE)
+        {
+            return;
+        }
+        g_event_tail = (rt_uint8_t)((g_event_tail + 1U) & FEATHERTALK_EVENT_QUEUE_MASK);
+    }
+}
+
 static rt_bool_t feathertalk_ipc_send_system_status(rt_uint32_t sequence)
 {
     edge_rc_frame_t frame;
@@ -104,9 +176,17 @@ static rt_bool_t feathertalk_ipc_send_quick_status(rt_uint32_t sequence)
     message.abi_version = FEATHERTALK_IPC_ABI_VERSION;
     message.message_id = FEATHERTALK_IPC_MSG_QUICK_STATUS;
     message.sequence = sequence;
-    /* Product drivers are not enabled yet. Capability bits deliberately stay
-       clear so the M55 UI exposes the controls as unavailable, never as fake
-       off states. */
+    /* Bluetooth is the only product driver wired into quick status so far.
+       enabled/connected are per-control bitmasks (same layout as the
+       capability bits); connections are not supported yet, so the connected
+       byte honestly stays zero. */
+#ifdef FEATHERTALK_IPC_HAS_BT
+    message.capabilities |= (uint8_t)FEATHERTALK_QUICK_CAP_BLUETOOTH;
+    if (bt_service_enabled() != 0)
+    {
+        message.enabled |= (uint8_t)FEATHERTALK_QUICK_CAP_BLUETOOTH;
+    }
+#endif
     message.wifi_signal_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
     message.brightness_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
     message.rotation = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
@@ -144,9 +224,23 @@ static void feathertalk_ipc_receive(void)
             rt_memcpy(&command, frame.channel, sizeof(command));
             g_rx_count++;
             g_quick_last_control = command.control;
-            g_quick_last_result = command.control < FEATHERTALK_QUICK_COUNT ?
-                                  FEATHERTALK_QUICK_RESULT_UNAVAILABLE :
-                                  FEATHERTALK_QUICK_RESULT_INVALID;
+#ifdef FEATHERTALK_IPC_HAS_BT
+            if (command.control == FEATHERTALK_QUICK_BLUETOOTH)
+            {
+                g_quick_last_result =
+                    (command.value != 0U)
+                    ? ((bt_service_start() == RT_EOK)
+                       ? FEATHERTALK_QUICK_RESULT_OK
+                       : FEATHERTALK_QUICK_RESULT_FAILED)
+                    : FEATHERTALK_QUICK_RESULT_UNAVAILABLE;  /* no stop yet */
+            }
+            else
+#endif
+            {
+                g_quick_last_result = command.control < FEATHERTALK_QUICK_COUNT ?
+                                      FEATHERTALK_QUICK_RESULT_UNAVAILABLE :
+                                      FEATHERTALK_QUICK_RESULT_INVALID;
+            }
             (void)feathertalk_ipc_send_quick_status(command.sequence);
             continue;
         }
@@ -184,6 +278,7 @@ static void feathertalk_ipc_thread_entry(void *parameter)
         rt_uint32_t now = rt_tick_get_millisecond();
 
         feathertalk_ipc_receive();
+        feathertalk_ipc_flush_events();
 
         if (g_peer_online && (now - g_last_rx_ms) > FEATHERTALK_PEER_TIMEOUT_MS)
         {
@@ -267,6 +362,11 @@ static int feather_ping(int argc, char **argv)
     return 0;
 }
 MSH_CMD_EXPORT(feather_ping, Force a FeatherTalk M55 HELLO probe);
+
+int feathertalk_ipc_peer_online(void)
+{
+    return (g_peer_online != RT_FALSE) ? 1 : 0;
+}
 
 int feathertalk_ipc_start(void)
 {

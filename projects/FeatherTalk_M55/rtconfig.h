@@ -413,7 +413,7 @@
 #define FEATHERTALK_USING_FLASH_STORAGE
 #define FEATHERTALK_USING_USB_MSC
 #define FEATHERTALK_USING_USB_UAC
-#define FEATHERTALK_UI_TEST_MODE
+/* #define FEATHERTALK_UI_TEST_MODE */  /* keep off: storage storm parks M33 */
 #define BSP_LVGL_DRAW_BUF_LINES 800
 /* end of Onboard Peripheral Drivers */
 

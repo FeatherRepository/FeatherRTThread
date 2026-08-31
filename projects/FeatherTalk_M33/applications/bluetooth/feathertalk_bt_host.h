@@ -11,4 +11,7 @@
 
 rt_err_t feathertalk_bt_host_start(void);
 
+/* IPC quick-status view: 1 once the AIROC host stack is READY. */
+int feathertalk_bt_host_enabled(void);
+
 #endif
