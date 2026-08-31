@@ -870,6 +870,15 @@ static void dc_irq_handler(void)
 static void gpu_irq_handler(void)
 {
     rt_interrupt_enter();
+    /*
+     * VG-Lite is built in bare-metal mode on this board, so its IRQ handler
+     * does not run the FreeRTOS completion path.  Sample the real hardware
+     * completion edge before the GFXSS interrupt is acknowledged.  The weak
+     * default lives in vg_lite_hal.c and the LVGL runtime profiler overrides
+     * it when profiling is enabled.
+     */
+    extern void vg_lite_hardware_complete_perf_hook(void);
+    vg_lite_hardware_complete_perf_hook();
     Cy_GFXSS_Clear_GPU_Interrupt(gfxbase, &lcd_gfx_context);
     vg_lite_IRQHandler();
     rt_interrupt_leave();

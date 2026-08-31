@@ -20,12 +20,18 @@ struct es8388_device
 };
 
 static struct es8388_device es_dev = {0};
-static rt_uint16_t reg_read(rt_uint8_t addr)
+static rt_uint32_t es8388_output_sample_rate;
+static rt_uint16_t es8388_output_mclk_ratio;
+static rt_uint8_t es8388_output_sample_bits;
+static rt_bool_t es8388_output_format_valid;
+
+static rt_err_t reg_read_checked(rt_uint8_t addr, rt_uint8_t *value)
 {
     struct rt_i2c_msg msg[2] = {0};
     rt_uint8_t val = 0xff;
 
     RT_ASSERT(es_dev.i2c != RT_NULL);
+    if (value == RT_NULL) return -RT_EINVAL;
 
     msg[0].addr  = ES8388_ADDR;
     msg[0].flags = RT_I2C_WR;
@@ -40,13 +46,22 @@ static rt_uint16_t reg_read(rt_uint8_t addr)
     if (rt_i2c_transfer(es_dev.i2c, msg, 2) != 2)
     {
         rt_kprintf("I2C read data failed, reg = 0x%02x. \n", addr);
-        return 0xff;
+        return -RT_EIO;
     }
 
-    return val;
+    *value = val;
+    return RT_EOK;
 }
 
-static void reg_write(rt_uint8_t addr, rt_uint8_t val)
+static rt_uint16_t reg_read(rt_uint8_t addr)
+{
+    rt_uint8_t value = 0xffU;
+
+    (void)reg_read_checked(addr, &value);
+    return value;
+}
+
+static rt_err_t reg_write_checked(rt_uint8_t addr, rt_uint8_t val)
 {
     struct rt_i2c_msg msgs[1] = {0};
     rt_uint8_t buff[2] = {0};
@@ -64,8 +79,14 @@ static void reg_write(rt_uint8_t addr, rt_uint8_t val)
     if (rt_i2c_transfer(es_dev.i2c, msgs, 1) != 1)
     {
         rt_kprintf("I2C write data failed, reg = 0x%2x. \n", addr);
-        return;
+        return -RT_EIO;
     }
+    return RT_EOK;
+}
+
+static void reg_write(rt_uint8_t addr, rt_uint8_t val)
+{
+    (void)reg_write_checked(addr, val);
 }
 
 static int es8388_set_adc_dac_volume(int mode, int volume, int dot)
@@ -104,6 +125,7 @@ void es8388_set_voice_mute(rt_bool_t enable)
 
 rt_err_t es8388_init(const char *i2c_name, rt_uint16_t pin)
 {
+    es8388_output_format_valid = RT_FALSE;
     es_dev.i2c = rt_i2c_bus_device_find(i2c_name);
     if (es_dev.i2c == RT_NULL)
     {
@@ -253,7 +275,15 @@ rt_err_t es8388_output_format_set(rt_uint32_t sample_rate,
 {
     rt_uint8_t control1;
     rt_uint8_t control2;
+    rt_uint8_t control3;
+    rt_uint8_t readback1;
+    rt_uint8_t readback2;
+    rt_uint8_t target1;
+    rt_uint8_t target2;
+    rt_uint8_t ratio_code;
     rt_uint8_t word_length;
+    rt_uint16_t mclk_ratio;
+    rt_err_t result = RT_EOK;
 
     if (sample_bits == 16U)
         word_length = (rt_uint8_t)(3U << 3); /* DACWL=011: 16 bit. */
@@ -265,20 +295,81 @@ rt_err_t es8388_output_format_set(rt_uint32_t sample_rate,
         sample_rate != 48000U && sample_rate != 96000U)
         return -RT_EINVAL;
 
-    control1 = (rt_uint8_t)reg_read(ES8388_DACCONTROL1);
-    control2 = (rt_uint8_t)reg_read(ES8388_DACCONTROL2);
-    control1 = (rt_uint8_t)((control1 & (rt_uint8_t)~0x38U) | word_length);
-    /* DACFsMode is double-speed only at 96 kHz. Preserve the configured
-     * sample-rate ratio and every unrelated codec option. */
-    control2 = (rt_uint8_t)((control2 & (rt_uint8_t)~0x20U) |
-                            (sample_rate == 96000U ? 0x20U : 0U));
-    reg_write(ES8388_DACCONTROL1, control1);
-    reg_write(ES8388_DACCONTROL2, control2);
-    if ((((rt_uint8_t)reg_read(ES8388_DACCONTROL1)) & 0x38U) !=
-            (control1 & 0x38U) ||
-        (((rt_uint8_t)reg_read(ES8388_DACCONTROL2)) & 0x20U) !=
-            (control2 & 0x20U))
+    /* TDM0 exposes its interface clock on MCK.  The current clock plan uses
+     * a 128*Fs MCK with 16-bit slots and a 256*Fs MCK with 32-bit slots for
+     * 24-bit samples.  Program the matching DAC ratio instead of retaining
+     * the boot-time 256*Fs value. */
+    mclk_ratio = sample_bits == 24U ? 256U : 128U;
+    ratio_code = sample_bits == 24U ? 0x02U : 0x00U;
+
+    if (reg_read_checked(ES8388_DACCONTROL1, &control1) != RT_EOK ||
+        reg_read_checked(ES8388_DACCONTROL2, &control2) != RT_EOK ||
+        reg_read_checked(ES8388_DACCONTROL3, &control3) != RT_EOK)
         return -RT_EIO;
+
+    target1 = (rt_uint8_t)((control1 & (rt_uint8_t)~0x38U) | word_length);
+    target2 = (rt_uint8_t)((control2 & (rt_uint8_t)~0x3fU) |
+                           (sample_rate == 96000U ? 0x20U : 0U) |
+                           ratio_code);
+
+    /* Keep the analog output quiet while MCK/LRCK and the serial word length
+     * move to the new format.  Preserve the caller's previous mute state. */
+    if (reg_write_checked(ES8388_DACCONTROL3,
+                          (rt_uint8_t)(control3 | 0x04U)) != RT_EOK ||
+        reg_write_checked(ES8388_DACCONTROL1, target1) != RT_EOK ||
+        reg_write_checked(ES8388_DACCONTROL2, target2) != RT_EOK ||
+        reg_read_checked(ES8388_DACCONTROL1, &readback1) != RT_EOK ||
+        reg_read_checked(ES8388_DACCONTROL2, &readback2) != RT_EOK ||
+        (readback1 & 0x38U) != (target1 & 0x38U) ||
+        (readback2 & 0x3fU) != (target2 & 0x3fU))
+        result = -RT_EIO;
+
+    if (result == RT_EOK &&
+        reg_write_checked(ES8388_DACCONTROL3, control3) != RT_EOK)
+        result = -RT_EIO;
+
+    if (result != RT_EOK)
+    {
+        /* Roll the codec back before exposing the failure to sound0. */
+        (void)reg_write_checked(ES8388_DACCONTROL1, control1);
+        (void)reg_write_checked(ES8388_DACCONTROL2, control2);
+        (void)reg_write_checked(ES8388_DACCONTROL3, control3);
+    }
+    if (result != RT_EOK) return result;
+
+    es8388_output_sample_rate = sample_rate;
+    es8388_output_sample_bits = sample_bits;
+    es8388_output_mclk_ratio = mclk_ratio;
+    es8388_output_format_valid = RT_TRUE;
+    return RT_EOK;
+}
+
+rt_err_t es8388_output_format_get(rt_uint32_t *sample_rate,
+                                  rt_uint8_t *sample_bits,
+                                  rt_uint16_t *mclk_ratio)
+{
+    rt_uint8_t control1;
+    rt_uint8_t control2;
+    rt_uint8_t expected_word_length;
+    rt_uint8_t expected_control2;
+
+    if (!es8388_output_format_valid) return -RT_EEMPTY;
+    if (reg_read_checked(ES8388_DACCONTROL1, &control1) != RT_EOK ||
+        reg_read_checked(ES8388_DACCONTROL2, &control2) != RT_EOK)
+        return -RT_EIO;
+
+    expected_word_length = es8388_output_sample_bits == 24U ?
+        0U : (rt_uint8_t)(3U << 3);
+    expected_control2 = (rt_uint8_t)(
+        (es8388_output_sample_rate == 96000U ? 0x20U : 0U) |
+        (es8388_output_mclk_ratio == 256U ? 0x02U : 0x00U));
+    if ((control1 & 0x38U) != expected_word_length ||
+        (control2 & 0x3fU) != expected_control2)
+        return -RT_EIO;
+
+    if (sample_rate != RT_NULL) *sample_rate = es8388_output_sample_rate;
+    if (sample_bits != RT_NULL) *sample_bits = es8388_output_sample_bits;
+    if (mclk_ratio != RT_NULL) *mclk_ratio = es8388_output_mclk_ratio;
     return RT_EOK;
 }
 

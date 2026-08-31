@@ -29,7 +29,10 @@
 #define FT_UAC_MAX_PACKET             576U
 #define FT_UAC_INPUT_PACKET           64U
 #define FT_UAC_RING_SIZE              16384U
-#define FT_UAC_AUDIO_BLOCK            2048U
+/* RT-Audio owns two 4096-byte replay-pool blocks.  Do not start sound0 from
+ * a single 192/288/384/576-byte USB packet: its replay queue would still be
+ * empty when sound_start() requests the first frame. */
+#define FT_UAC_AUDIO_BLOCK            4096U
 #define FT_UAC_THREAD_STACK           4096U
 #define FT_UAC_THREAD_PRIORITY        12U
 #define FT_UAC_EVENT_FORMAT           0x01U
@@ -172,11 +175,14 @@ USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX
 static uint8_t s_in_buffer[FT_UAC_MAX_PACKET];
 
 static uint8_t s_out_ring[FT_UAC_RING_SIZE];
+static uint8_t s_output_worker_block[FT_UAC_AUDIO_BLOCK];
+static uint8_t s_input_worker_block[FT_UAC_AUDIO_BLOCK];
 static volatile uint32_t s_out_ring_read;
 static volatile uint32_t s_out_ring_write;
 static volatile uint32_t s_out_ring_used;
 static volatile uint8_t s_out_buffer_index;
 static volatile bool s_in_endpoint_busy;
+static volatile bool s_output_device_open;
 static struct rt_event s_uac_event;
 static bool s_primitives_ready;
 static rt_thread_t s_output_thread;
@@ -276,6 +282,7 @@ static void output_ring_reset(void)
     s_out_ring_read = 0U;
     s_out_ring_write = 0U;
     s_out_ring_used = 0U;
+    s_status.output_ring_used = 0U;
     rt_hw_interrupt_enable(level);
 }
 
@@ -296,6 +303,7 @@ static void output_ring_write(const uint8_t *data, uint32_t length)
         if (s_out_ring_write == FT_UAC_RING_SIZE) s_out_ring_write = 0U;
     }
     s_out_ring_used += length;
+    s_status.output_ring_used = s_out_ring_used;
     s_status.host_to_device_bytes += length;
     rt_hw_interrupt_enable(level);
 }
@@ -315,6 +323,8 @@ static uint32_t output_ring_read(uint8_t *data, uint32_t capacity,
         if (s_out_ring_read == FT_UAC_RING_SIZE) s_out_ring_read = 0U;
     }
     s_out_ring_used -= length;
+    s_status.output_ring_used = s_out_ring_used;
+    s_status.output_ring_read_bytes += length;
     rt_hw_interrupt_enable(level);
     return length;
 }
@@ -344,6 +354,7 @@ static void output_endpoint_callback(uint8_t busid, uint8_t ep,
     uint8_t completed = s_out_buffer_index;
     RT_UNUSED(ep);
     if (!s_status.active || !s_status.output_streaming) return;
+    s_status.output_callback_count++;
     if (s_status.output_sample_rate != s_negotiated_output_rate ||
         s_status.output_sample_bits != s_negotiated_output_bits ||
         s_status.output_channels != s_negotiated_output_channels)
@@ -382,6 +393,7 @@ static void audio_interface_notify(uint8_t busid, uint8_t event, void *arg)
         {
             s_status.output_streaming = false;
             output_ring_reset();
+            rt_event_send(&s_uac_event, FT_UAC_EVENT_STOP);
             return;
         }
         if (alternate == 1U)
@@ -534,7 +546,6 @@ void usbd_audio_close(uint8_t busid, uint8_t interface_number)
 
 static void output_worker(void *parameter)
 {
-    uint8_t block[FT_UAC_AUDIO_BLOCK];
     rt_device_t device = RT_NULL;
     uint32_t applied_generation = 0U;
     uint32_t applied_control_generation = 0U;
@@ -543,10 +554,13 @@ static void output_worker(void *parameter)
     while (1)
     {
         rt_uint32_t received = 0U;
+        s_status.output_worker_state = 1U;
         (void)rt_event_recv(&s_uac_event,
             FT_UAC_EVENT_FORMAT | FT_UAC_EVENT_OUTPUT_DATA |
             FT_UAC_EVENT_STOP,
             RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR, 20U, &received);
+        s_status.output_worker_wakeups++;
+        s_status.output_worker_state = 2U;
         if (applied_control_generation != s_output_control_generation)
         {
             (void)ft_audio_set_output_volume(s_output_mute ?
@@ -557,18 +571,22 @@ static void output_worker(void *parameter)
         {
             if (device != RT_NULL)
             {
+                s_status.output_worker_state = 7U;
                 (void)rt_device_close(device);
                 device = RT_NULL;
+                s_output_device_open = false;
             }
             continue;
         }
         if (applied_generation != s_requested_generation)
         {
             int result;
+            s_status.output_worker_state = 3U;
             if (device != RT_NULL)
             {
                 (void)rt_device_close(device);
                 device = RT_NULL;
+                s_output_device_open = false;
             }
             result = ft_audio_set_output_format(
                 s_status.output_sample_rate, s_status.output_sample_bits,
@@ -580,6 +598,7 @@ static void output_worker(void *parameter)
         }
         if (device == RT_NULL)
         {
+            s_status.output_worker_state = 4U;
             device = rt_device_find("sound0");
             if (device == RT_NULL ||
                 rt_device_open(device, RT_DEVICE_OFLAG_WRONLY) != RT_EOK)
@@ -588,26 +607,34 @@ static void output_worker(void *parameter)
                 s_status.last_error = -RT_EIO;
                 continue;
             }
+            s_status.output_sound_open_count++;
+            s_output_device_open = true;
         }
-        while (s_out_ring_used > 0U && s_status.output_streaming)
+        while (s_out_ring_used >= FT_UAC_AUDIO_BLOCK &&
+               s_status.output_streaming)
         {
             uint32_t frame_bytes = s_status.output_channels *
                 (s_status.output_sample_bits / 8U);
-            uint32_t count = output_ring_read(block, sizeof(block),
+            uint32_t count = output_ring_read(s_output_worker_block,
+                                              sizeof(s_output_worker_block),
                                               frame_bytes);
             if (count == 0U) break;
-            if (rt_device_write(device, 0, block, count) != (rt_ssize_t)count)
+            s_status.output_worker_state = 5U;
+            s_status.output_sound_write_calls++;
+            if (rt_device_write(device, 0, s_output_worker_block, count) !=
+                (rt_ssize_t)count)
             {
                 s_status.last_error = -RT_EIO;
                 break;
             }
+            s_status.output_sound_write_bytes += count;
+            s_status.output_worker_state = 6U;
         }
     }
 }
 
 static void input_worker(void *parameter)
 {
-    uint8_t capture[FT_UAC_AUDIO_BLOCK];
     rt_device_t device = RT_NULL;
     uint32_t applied_control_generation = 0U;
     RT_UNUSED(parameter);
@@ -642,8 +669,9 @@ static void input_worker(void *parameter)
             }
         }
         {
-            rt_ssize_t count = rt_device_read(device, 0, capture,
-                                              sizeof(capture));
+            rt_ssize_t count = rt_device_read(device, 0,
+                                              s_input_worker_block,
+                                              sizeof(s_input_worker_block));
             rt_ssize_t offset = 0;
             if (count <= 0) continue;
             while (offset < count && s_status.input_streaming)
@@ -652,7 +680,8 @@ static void input_worker(void *parameter)
                 rt_uint32_t received;
                 if (packet > FT_UAC_INPUT_PACKET) packet = FT_UAC_INPUT_PACKET;
                 rt_memset(s_in_buffer, 0, FT_UAC_INPUT_PACKET);
-                rt_memcpy(s_in_buffer, capture + offset, packet);
+                rt_memcpy(s_in_buffer, s_input_worker_block + offset,
+                          packet);
                 s_in_endpoint_busy = true;
                 if (usbd_ep_start_write(FT_UAC_BUS_ID, FT_UAC_IN_EP,
                                         s_in_buffer,
@@ -765,10 +794,11 @@ int ft_usb_uac_start(void)
     s_negotiated_output_rate = s_status.output_sample_rate;
     s_negotiated_output_bits = s_status.output_sample_bits;
     s_negotiated_output_channels = s_status.output_channels;
+    s_output_device_open = false;
     s_status.active = true;
     s_status.sync_generation = 1U;
     s_requested_generation = 1U;
-    s_device_descriptor[12] = 0x01U;
+    s_device_descriptor[12] = 0x02U;
     s_device_descriptor[13] = 0x01U;
     output_ring_reset();
     result = initialize_usb();
@@ -839,7 +869,21 @@ int ft_usb_uac_set_output_format(uint32_t sample_rate, uint8_t sample_bits,
         s_status.input_streaming = false;
         output_ring_reset();
         rt_event_send(&s_uac_event, FT_UAC_EVENT_STOP);
-        rt_thread_mdelay(25U);
+        {
+            uint32_t wait_ms;
+            for (wait_ms = 0U; wait_ms < 200U && s_output_device_open;
+                 wait_ms += 5U)
+                rt_thread_mdelay(5U);
+            if (s_output_device_open)
+            {
+                s_status.last_error = -RT_EBUSY;
+                (void)initialize_usb();
+                return -RT_EBUSY;
+            }
+            /* Keep the pull-up absent long enough for Windows to retire the
+             * old WaveRT pins before the same VID/PID/serial reappears. */
+            rt_thread_mdelay(250U);
+        }
     }
 
     result = ft_audio_set_output_format(sample_rate, sample_bits, channels);

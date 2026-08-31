@@ -34,6 +34,7 @@ USB_NOCACHE_RAM_SECTION struct dwc2_udc {
     struct dwc2_user_params user_params;
     struct dwc2_ep_state in_ep[16];  /*!< IN endpoint parameters*/
     struct dwc2_ep_state out_ep[16]; /*!< OUT endpoint parameters */
+    uint32_t iso_out_rearm_count;
 } g_dwc2_udc[CONFIG_USBDEV_MAX_BUS];
 
 static inline int dwc2_reset(uint8_t busid)
@@ -708,6 +709,15 @@ int usbd_ep_open(uint8_t busid, const struct usb_endpoint_descriptor *ep)
 
         USB_OTG_DEV->DAINTMSK |= USB_OTG_DAINTMSK_OEPM & (uint32_t)(1UL << (16 + ep_idx));
 
+        if (g_dwc2_udc[busid].out_ep[ep_idx].ep_type ==
+            USB_ENDPOINT_TYPE_ISOCHRONOUS) {
+            /* A one-packet isochronous OUT request is tied to one frame. If
+             * that frame is missed, DWC2 raises IncompleteIsoOut and the
+             * request must be targeted at a later frame instead of remaining
+             * permanently NAKed. */
+            USB_OTG_GLB->GINTMSK |= USB_OTG_GINTMSK_PXFRM_IISOOXFRM;
+        }
+
         USB_OTG_OUTEP(ep_idx)->DOEPCTL |= (ep_mps & USB_OTG_DOEPCTL_MPSIZ) |
                                           ((uint32_t)USB_GET_ENDPOINT_TYPE(ep->bmAttributes) << 18) |
                                           USB_OTG_DIEPCTL_SD0PID_SEVNFRM |
@@ -989,6 +999,17 @@ int usbd_ep_start_read(uint8_t busid, const uint8_t ep, uint8_t *data, uint32_t 
     } else {
         pktcnt = (uint16_t)((data_len + g_dwc2_udc[busid].out_ep[ep_idx].ep_mps - 1U) / g_dwc2_udc[busid].out_ep[ep_idx].ep_mps);
 
+        if (pktcnt > 0x3FF) {
+            pktcnt = 0x3FF; // pktcnt 10bits
+        }
+
+        /* DWC2 requires an OUT transfer size covering complete max-size
+         * packets. An isochronous source can still terminate the transfer
+         * with a shorter packet; programming the nominal audio payload here
+         * makes the controller reject that first short packet. */
+        data_len = pktcnt * g_dwc2_udc[busid].out_ep[ep_idx].ep_mps;
+        g_dwc2_udc[busid].out_ep[ep_idx].xfer_len = data_len;
+
         USB_OTG_OUTEP(ep_idx)->DOEPTSIZ |= (USB_OTG_DOEPTSIZ_PKTCNT & (pktcnt << 19));
         USB_OTG_OUTEP(ep_idx)->DOEPTSIZ |= (USB_OTG_DOEPTSIZ_XFRSIZ & data_len);
     }
@@ -1008,6 +1029,14 @@ int usbd_ep_start_read(uint8_t busid, const uint8_t ep, uint8_t *data, uint32_t 
     }
     USB_OTG_OUTEP(ep_idx)->DOEPCTL |= (USB_OTG_DOEPCTL_CNAK | USB_OTG_DOEPCTL_EPENA);
     return 0;
+}
+
+uint32_t usbd_dwc2_get_iso_out_rearm_count(uint8_t busid)
+{
+    if (busid >= CONFIG_USBDEV_MAX_BUS) {
+        return 0U;
+    }
+    return g_dwc2_udc[busid].iso_out_rearm_count;
 }
 
 void USBD_IRQHandler(uint8_t busid)
@@ -1185,6 +1214,28 @@ process_setup:
         }
         if (gint_status & USB_OTG_GINTSTS_PXFR_INCOMPISOOUT) {
             USB_OTG_GLB->GINTSTS = USB_OTG_GINTSTS_PXFR_INCOMPISOOUT;
+            g_dwc2_udc[busid].iso_out_rearm_count++;
+            for (uint8_t i = 1U;
+                 i < (g_dwc2_udc[busid].hw_params.num_dev_ep + 1U); i++) {
+                if (g_dwc2_udc[busid].out_ep[i].ep_type !=
+                        USB_ENDPOINT_TYPE_ISOCHRONOUS ||
+                    g_dwc2_udc[busid].out_ep[i].xfer_len == 0U ||
+                    (USB_OTG_OUTEP(i)->DOEPCTL & USB_OTG_DOEPCTL_EPENA) == 0U) {
+                    continue;
+                }
+
+                USB_OTG_OUTEP(i)->DOEPINT = USB_OTG_DOEPINT_NAK;
+                USB_OTG_OUTEP(i)->DOEPCTL &=
+                    ~(USB_OTG_DOEPCTL_SD0PID_SEVNFRM |
+                      USB_OTG_DOEPCTL_SODDFRM);
+                if ((USB_OTG_DEV->DSTS & (1U << 8)) == 0U) {
+                    USB_OTG_OUTEP(i)->DOEPCTL |= USB_OTG_DOEPCTL_SODDFRM;
+                } else {
+                    USB_OTG_OUTEP(i)->DOEPCTL |= USB_OTG_DOEPCTL_SD0PID_SEVNFRM;
+                }
+                USB_OTG_OUTEP(i)->DOEPCTL |=
+                    USB_OTG_DOEPCTL_CNAK | USB_OTG_DOEPCTL_EPENA;
+            }
         }
 
         if (gint_status & USB_OTG_GINTSTS_IISOIXFR) {

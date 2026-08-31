@@ -66,6 +66,10 @@
 #include <linux/suspend.h>
 #endif
 
+void __attribute__((weak)) vg_lite_hardware_begin_perf_hook(void)
+{
+}
+
 #if gcdVG_RECORD_HARDWARE_RUNNING_TIME
 
 #ifdef __linux__
@@ -824,6 +828,7 @@ static vg_lite_error_t do_submit(vg_lite_kernel_submit_t * data)
 
     /* set gpu to busy state  */
     vg_lite_set_gpu_execute_state(VG_LITE_GPU_RUN);
+    vg_lite_hardware_begin_perf_hook();
 
     /* Write the registers to kick off the command execution (CMDBUF_SIZE). */
     vg_lite_hal_poke(VG_LITE_HW_CMDBUF_ADDRESS, physical + offset);

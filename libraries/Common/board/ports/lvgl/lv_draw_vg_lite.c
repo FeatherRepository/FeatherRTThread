@@ -47,6 +47,7 @@
 #include "lv_vg_lite_grad.h"
 #include "lv_vg_lite_pending.h"
 #include "lv_vg_lite_stroke.h"
+#include "lv_draw_runtime_stats.h"
 
 /*********************
 * Macros
@@ -123,6 +124,8 @@ static void LV_ATTRIBUTE_FAST_MEM draw_execute(lv_draw_vg_lite_unit_t * u)
 {
     lv_draw_task_t * t = u->task_act;
     lv_draw_unit_t * draw_unit = (lv_draw_unit_t *)u;
+
+    lv_draw_runtime_stats_note_gpu_task(t->type);
 
     lv_layer_t * layer = u->base_unit.target_layer;
 

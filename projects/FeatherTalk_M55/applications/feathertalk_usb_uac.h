@@ -25,6 +25,14 @@ typedef struct
     uint64_t device_to_host_bytes;
     uint32_t output_overruns;
     uint32_t input_underruns;
+    uint32_t output_callback_count;
+    uint32_t output_ring_used;
+    uint64_t output_ring_read_bytes;
+    uint32_t output_worker_wakeups;
+    uint32_t output_sound_open_count;
+    uint32_t output_sound_write_calls;
+    uint64_t output_sound_write_bytes;
+    uint8_t output_worker_state;
     int last_error;
 } ft_usb_uac_status_t;
 

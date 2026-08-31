@@ -540,6 +540,10 @@ void __attribute__((weak)) vg_lite_bus_error_handler()
      return;
 }
 
+void __attribute__((weak)) vg_lite_hardware_complete_perf_hook(void)
+{
+}
+
 void vg_lite_IRQHandler(void)
 {
 #if VG_LITE_USE_FREERTOS
@@ -547,6 +551,7 @@ void vg_lite_IRQHandler(void)
     portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
 
     if (flags) {
+        vg_lite_hardware_complete_perf_hook();
         /* Combine with current interrupt flags. */
         device->int_flags |= flags;
 

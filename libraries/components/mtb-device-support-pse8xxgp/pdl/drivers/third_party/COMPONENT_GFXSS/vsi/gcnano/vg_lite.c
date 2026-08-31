@@ -2265,6 +2265,11 @@ uint32_t convert_yuv2rgb(vg_lite_yuv2rgb_t yuv)
 static vg_lite_error_t submit(vg_lite_context_t * context);
 static vg_lite_error_t stall(vg_lite_context_t * context, uint32_t time_ms, uint32_t mask);
 
+void __attribute__((weak)) vg_lite_submit_perf_hook(uint32_t command_bytes)
+{
+    (void)command_bytes;
+}
+
 /* Push a state array into current command buffer. */
 vg_lite_error_t push_clut(vg_lite_context_t * context, uint32_t address, uint32_t count, uint32_t *data)
 {
@@ -2874,6 +2879,7 @@ static vg_lite_error_t submit(vg_lite_context_t *context)
         VG_LITE_RETURN_ERROR(stall(&s_context, 0, (uint32_t)~0));
     }
     VG_LITE_RETURN_ERROR(vg_lite_kernel(VG_LITE_SUBMIT, &submit));
+    vg_lite_submit_perf_hook(submit.command_size);
 
     submit_flag = 1;
 

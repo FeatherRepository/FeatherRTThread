@@ -136,6 +136,9 @@ int usbd_ep_start_write(uint8_t busid, const uint8_t ep, const uint8_t *data, ui
  */
 int usbd_ep_start_read(uint8_t busid, const uint8_t ep, uint8_t *data, uint32_t data_len);
 
+/** Return the number of missed isochronous OUT frames re-armed by DWC2. */
+uint32_t usbd_dwc2_get_iso_out_rearm_count(uint8_t busid);
+
 /* usb dcd irq callback, called by user */
 
 /**

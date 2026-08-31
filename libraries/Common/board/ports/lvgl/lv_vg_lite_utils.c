@@ -45,6 +45,7 @@
 #include "lv_vg_lite_pending.h"
 #include "lv_vg_lite_grad.h"
 #include "lv_draw_vg_lite_type.h"
+#include "lv_draw_runtime_stats.h"
 #include <string.h>
 #include <math.h>
 
@@ -1209,16 +1210,21 @@ void lv_vg_lite_flush(struct lv_draw_vg_lite_unit_t * u)
 #endif
 
     LV_VG_LITE_CHECK_ERROR(vg_lite_flush());
+    lv_draw_runtime_stats_note_gpu_flush();
     u->flush_count = 0;
     LV_PROFILER_END;
 }
 
 void lv_vg_lite_finish(struct lv_draw_vg_lite_unit_t * u)
 {
+    uint32_t start_ms;
+
     LV_ASSERT_NULL(u);
     LV_PROFILER_BEGIN;
 
+    start_ms = lv_tick_get();
     LV_VG_LITE_CHECK_ERROR(vg_lite_finish());
+    lv_draw_runtime_stats_note_gpu_finish(lv_tick_get() - start_ms);
 
     /* Clear all gradient caches reference */
     if(u->grad_pending) {

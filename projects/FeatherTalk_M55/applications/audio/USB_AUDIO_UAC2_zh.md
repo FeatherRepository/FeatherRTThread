@@ -43,7 +43,9 @@ Windows 枚举时会遍历所有合法格式。候选协商值单独保存，只
 从“设置 > USB”或“设置 > 音频”改变 UAC 输出格式时：
 
 1. 停止 UAC endpoints，让工作线程关闭 `sound0`；
-2. 由 RT-Thread Audio 驱动验证并配置 sample rate/depth/channels；
+2. 由 RT-Thread Audio 驱动以一次事务配置 sample rate/depth/channels：同时更新
+   TDM0 的 LRCK/BCLK/MCLK 和字长、ES8388 的 DAC 字长/单双速/MCLK 比率；ES8388
+   寄存器必须读回一致，任一步失败都恢复上一组物理格式；
 3. 成功后更新设备偏好和 UAC 当前 Clock 值；
 4. 增加 `bcdDevice` 并软重新枚举，要求 USB Host 重新读取能力和当前 Clock；
 5. Windows 下一次真正打开播放流时，以其最终选择回写设备。
@@ -77,6 +79,10 @@ feather_usb stop
 `status` 显示连接/枚举、两个 streaming 状态、格式、主机/设备更新次数、传输 KiB、
 overrun/underrun 和最后错误。
 
+`feather_i2s_diag` 额外显示 `sound0` 已提交格式、格式提交/失败/回滚计数，以及从
+ES8388 I2C 寄存器实时读回的采样率、字长和 MCLK/Fs 比率，用于排除“USB/UI 已变、
+外部 DAC 仍是旧配置”的假同步。
+
 ## 5. 2026-08-31 实板验证
 
 - M55 clean/incremental 构建通过，最终链接只有仓库既有 RWX LOAD segment 警告；
@@ -104,6 +110,9 @@ overrun/underrun 和最后错误。
   生命周期和 UAC 控件均通过；3 个失败是文件管理器在固定 Flash 上执行写入合约时
   M33 XIP park 握手超时（`M33 XIP park failed before erase: -116`），与 UAC 描述符、
   Audio 驱动或 USB 枚举无关。
+- 追加外部 DAC 同步验证：`48 kHz / 16-bit / stereo` 时 `sound0` 与 ES8388 读回
+  一致，MCLK 为 `128*Fs`；`96 kHz / 24-bit / stereo` 时两者仍一致，MCLK 为
+  `256*Fs` 且 ES8388 已进入 double-speed。连续 17 次格式提交为 0 失败、0 回滚失败。
 
 ## 6. 尚未完成的边界
 

@@ -45,6 +45,19 @@ bool i2s_skip_frame = false;
 #define TX_FIFO_SIZE         (4096)
 
 static volatile bool i2s_data_ready_flag = false;
+static volatile rt_uint32_t i2s_sound_start_count;
+static volatile rt_uint32_t i2s_task_message_count;
+static volatile rt_uint32_t i2s_hardware_start_count;
+static volatile rt_uint32_t i2s_irq_count;
+static volatile rt_uint32_t i2s_irq_trigger_count;
+static volatile rt_uint32_t i2s_frame_complete_count;
+static volatile rt_uint32_t i2s_irq_underflow_count;
+static volatile rt_uint32_t i2s_transmit_count;
+static volatile rt_uint32_t i2s_transmit_fail_count;
+static volatile rt_uint32_t i2s_last_transmit_size;
+static volatile rt_uint32_t i2s_format_apply_count;
+static volatile rt_uint32_t i2s_format_apply_fail_count;
+static volatile rt_uint32_t i2s_format_rollback_fail_count;
 
 uint8_t i2s_playback_volume = DEFAULT_VOLUME;
 /* ASRC variables for down-sampling audio to 16000Hz */
@@ -101,6 +114,9 @@ typedef struct
 } music_player_q_data_t;
 
 void i2s_playback_task(void *arg);
+static rt_uint32_t i2s_prepare_physical_frame(
+    const i2s_playback_q_data_t *message, rt_uint32_t *output,
+    const struct rt_audio_configure *config);
 
 void ifx_i2s_init(void)
 {
@@ -185,12 +201,13 @@ static rt_err_t ifx_set_samplerate(struct rt_audio_configure audio_config)
     return RT_EOK;
 }
 
-static rt_err_t ifx_apply_output_format(const struct rt_audio_configure *config)
+static rt_err_t ifx_program_output_format(
+    const struct rt_audio_configure *config)
 {
     cy_en_tdm_status_t tdm_status;
+    rt_err_t result;
 
     if (!sound_format_supported(config)) return -RT_EINVAL;
-    if (i2s_data_ready_flag) return -RT_EBUSY;
 
     NVIC_DisableIRQ(i2s_isr_txcfg.intrSrc);
     Cy_AudioTDM_DeActivateTx(TDM_STRUCT0_TX);
@@ -212,15 +229,39 @@ static rt_err_t ifx_apply_output_format(const struct rt_audio_configure *config)
     first_frame = true;
     active_i2s_word_count = 0U;
     active_i2s_word_offset = 0U;
-    if (ifx_set_samplerate(*config) != RT_EOK ||
-        es8388_output_format_set(config->samplerate,
-                                 (rt_uint8_t)config->samplebits) != RT_EOK)
-    {
-        NVIC_EnableIRQ(i2s_isr_txcfg.intrSrc);
-        return -RT_EIO;
-    }
+    result = ifx_set_samplerate(*config);
+    if (result == RT_EOK)
+        result = es8388_output_format_set(
+            config->samplerate, (rt_uint8_t)config->samplebits);
     NVIC_EnableIRQ(i2s_isr_txcfg.intrSrc);
-    return RT_EOK;
+    return result;
+}
+
+static rt_err_t ifx_apply_output_format(
+    const struct rt_audio_configure *config,
+    const struct rt_audio_configure *previous)
+{
+    rt_err_t result;
+
+    if (!sound_format_supported(config) ||
+        !sound_format_supported(previous))
+        return -RT_EINVAL;
+    if (i2s_data_ready_flag) return -RT_EBUSY;
+
+    i2s_format_apply_count++;
+    result = ifx_program_output_format(config);
+    if (result == RT_EOK) return RT_EOK;
+
+    i2s_format_apply_fail_count++;
+    /* The sound0 format is committed only after TDM clocks and ES8388 both
+     * accept it.  Restore the complete previous path when either layer
+     * rejects the candidate. */
+    if (ifx_program_output_format(previous) != RT_EOK)
+    {
+        i2s_format_rollback_fail_count++;
+        LOG_E("output format rollback failed");
+    }
+    return result;
 }
 
 void app_i2s_clear_tx_fifo(void)
@@ -408,7 +449,8 @@ static rt_err_t sound_configure(struct rt_audio_device *audio, struct rt_audio_c
 
         if (result == RT_EOK)
         {
-            result = ifx_apply_output_format(&candidate);
+            result = ifx_apply_output_format(&candidate,
+                                             &snd_dev->audio_config);
             if (result == RT_EOK)
             {
                 snd_dev->audio_config = candidate;
@@ -466,6 +508,7 @@ static rt_err_t sound_start(struct rt_audio_device *audio, int stream)
 
     if (stream == AUDIO_STREAM_REPLAY)
     {
+        i2s_sound_start_count++;
         (void)rt_sem_control(snd_dev.tx_sem, RT_IPC_CMD_RESET, RT_NULL);
         music_player_active = true;
         LOG_I("Ready for I2S output \r\n");
@@ -477,17 +520,52 @@ static rt_err_t sound_start(struct rt_audio_device *audio, int stream)
 
 static rt_ssize_t sound_transmit(struct rt_audio_device *audio, const void *writeBuf, void *readBuf, rt_size_t size)
 {
-    struct sound_device *snd_dev;
+    struct sound_device *device;
+    i2s_playback_q_data_t message;
+    rt_uint32_t word_count;
+    rt_uint32_t *temporary;
+    rt_base_t level;
+    bool start_hardware;
+
     RT_ASSERT(audio != RT_NULL);
-    snd_dev = (struct sound_device *)audio->parent.user_data;
-    if (size > 0)
+    RT_UNUSED(readBuf);
+    device = (struct sound_device *)audio->parent.user_data;
+    i2s_transmit_count++;
+    i2s_last_transmit_size = (rt_uint32_t)size;
+    if (size == 0U || writeBuf == RT_NULL)
+        return 0;
+
+    message.data_len_bytes = (rt_uint32_t)size;
+    message.data = (const rt_uint8_t *)writeBuf;
+    word_count = i2s_prepare_physical_frame(
+        &message, inactive_i2s_playback_buffer_ptr,
+        &device->audio_config);
+    if (word_count == 0U)
     {
-        i2s_playback_q_data_t i2s_playback_q_data;
-        i2s_playback_q_data.data_len_bytes = (rt_uint32_t)size;
-        i2s_playback_q_data.data = (const rt_uint8_t *)writeBuf;
-        if (rt_mq_send(snd_dev->tx_mq, &i2s_playback_q_data,
-                       sizeof(i2s_playback_q_data_t)) != RT_EOK)
-            return 0;
+        i2s_transmit_fail_count++;
+        return 0;
+    }
+
+    level = rt_hw_interrupt_disable();
+    temporary = active_i2s_playback_buffer_ptr;
+    active_i2s_playback_buffer_ptr = inactive_i2s_playback_buffer_ptr;
+    inactive_i2s_playback_buffer_ptr = temporary;
+    active_i2s_word_count = word_count;
+    active_i2s_word_offset = 0U;
+    i2s_data_ready_flag = true;
+    start_hardware = first_frame;
+    first_frame = false;
+    rt_hw_interrupt_enable(level);
+
+    if (start_hardware && !i2s_deinit_flag)
+    {
+        rt_uint32_t index;
+        i2s_hardware_start_count++;
+        app_i2s_enable();
+        for (index = 0U; index < HW_FIFO_SIZE; index++)
+            Cy_AudioTDM_WriteTxData(TDM_STRUCT0_TX, 0U);
+        app_i2s_activate();
+        es8388_volume_set(device->volume);
     }
     return size;
 }
@@ -975,7 +1053,6 @@ void i2s_playback_task(void *arg)
 {
     struct rt_audio_device *audio = (struct rt_audio_device *)arg;
     struct sound_device *device;
-    i2s_playback_q_data_t message;
 
     RT_ASSERT(audio != RT_NULL);
     device = (struct sound_device *)audio->parent.user_data;
@@ -984,58 +1061,17 @@ void i2s_playback_task(void *arg)
 
     while (1)
     {
-        rt_uint32_t word_count;
-        rt_uint32_t *temporary;
-        rt_base_t level;
-        bool start_hardware;
-
-        if (rt_mq_recv(device->tx_mq, &message, sizeof(message),
-                       RT_WAITING_FOREVER) != RT_EOK)
+        if (rt_sem_take(device->tx_sem, RT_WAITING_FOREVER) != RT_EOK)
             continue;
+        i2s_task_message_count++;
         if (i2s_deinit_flag)
         {
             i2s_deinit_flag = false;
             first_frame = true;
-            rt_audio_tx_complete(audio);
             continue;
         }
-        if (!first_frame &&
-            rt_sem_take(device->tx_sem, RT_WAITING_FOREVER) != RT_EOK)
-        {
+        if (music_player_active)
             rt_audio_tx_complete(audio);
-            continue;
-        }
-
-        word_count = i2s_prepare_physical_frame(
-            &message, inactive_i2s_playback_buffer_ptr,
-            &device->audio_config);
-        if (word_count == 0U)
-        {
-            rt_audio_tx_complete(audio);
-            continue;
-        }
-
-        level = rt_hw_interrupt_disable();
-        temporary = active_i2s_playback_buffer_ptr;
-        active_i2s_playback_buffer_ptr = inactive_i2s_playback_buffer_ptr;
-        inactive_i2s_playback_buffer_ptr = temporary;
-        active_i2s_word_count = word_count;
-        active_i2s_word_offset = 0U;
-        i2s_data_ready_flag = true;
-        start_hardware = first_frame;
-        first_frame = false;
-        rt_hw_interrupt_enable(level);
-
-        if (start_hardware && !i2s_deinit_flag)
-        {
-            rt_uint32_t index;
-            app_i2s_enable();
-            for (index = 0U; index < HW_FIFO_SIZE; index++)
-                Cy_AudioTDM_WriteTxData(TDM_STRUCT0_TX, 0U);
-            app_i2s_activate();
-            es8388_volume_set(device->volume);
-        }
-        rt_audio_tx_complete(audio);
     }
 }
 
@@ -1054,9 +1090,11 @@ void i2s_tx_interrupt_handler(void)
     rt_uint32_t intr_status;
 
     rt_interrupt_enter();
+    i2s_irq_count++;
     intr_status = Cy_AudioTDM_GetTxInterruptStatusMasked(TDM_STRUCT0_TX);
     if ((intr_status & CY_TDM_INTR_TX_FIFO_TRIGGER) != 0U)
     {
+        i2s_irq_trigger_count++;
         rt_uint32_t index;
         bool completed = false;
         for (index = 0U; index < HW_FIFO_SIZE; index++)
@@ -1074,6 +1112,7 @@ void i2s_tx_interrupt_handler(void)
         }
         if (completed)
         {
+            i2s_frame_complete_count++;
             i2s_data_ready_flag = false;
             active_i2s_word_offset = 0U;
             active_i2s_word_count = 0U;
@@ -1081,8 +1120,74 @@ void i2s_tx_interrupt_handler(void)
         }
     }
     if ((intr_status & CY_TDM_INTR_TX_FIFO_UNDERFLOW) != 0U)
+    {
+        i2s_irq_underflow_count++;
         LOG_W("I2S transmit underflow");
+    }
     Cy_AudioTDM_ClearTxInterrupt(TDM_STRUCT0_TX, CY_TDM_INTR_TX_MASK);
     rt_interrupt_leave();
 }
+
+#ifdef RT_USING_FINSH
+static int feather_i2s_diag(int argc, char **argv)
+{
+    rt_uint32_t codec_rate = 0U;
+    rt_uint16_t codec_ratio = 0U;
+    rt_uint8_t codec_bits = 0U;
+    rt_err_t codec_result;
+
+    RT_UNUSED(argc);
+    RT_UNUSED(argv);
+    codec_result = es8388_output_format_get(&codec_rate, &codec_bits,
+                                            &codec_ratio);
+    rt_kprintf("I2S format=%lu Hz/%u ch/%u bit apply=%lu fail=%lu "
+               "rollback-fail=%lu\n",
+               (unsigned long)snd_dev.audio_config.samplerate,
+               snd_dev.audio_config.channels,
+               snd_dev.audio_config.samplebits,
+               (unsigned long)i2s_format_apply_count,
+               (unsigned long)i2s_format_apply_fail_count,
+               (unsigned long)i2s_format_rollback_fail_count);
+    if (codec_result == RT_EOK)
+        rt_kprintf("ES8388 format=%lu Hz/%u bit MCLK=%u*Fs readback=ok\n",
+                   (unsigned long)codec_rate, codec_bits, codec_ratio);
+    else
+        rt_kprintf("ES8388 format readback failed: %d\n", codec_result);
+    rt_kprintf("I2S first=%u deinit=%u ready=%u active=%u pause=%u "
+               "words=%lu/%lu fifo=%u rp=%u wp=%u irqstat=%08lx\n",
+               first_frame ? 1U : 0U,
+               i2s_deinit_flag ? 1U : 0U,
+               i2s_data_ready_flag ? 1U : 0U,
+               music_player_active ? 1U : 0U,
+               music_player_pause ? 1U : 0U,
+               (unsigned long)active_i2s_word_offset,
+               (unsigned long)active_i2s_word_count,
+               Cy_AudioTDM_GetNumInTxFifo(TDM_STRUCT0_TX),
+               Cy_AudioTDM_GetTxReadPointer(TDM_STRUCT0_TX),
+               Cy_AudioTDM_GetTxWritePointer(TDM_STRUCT0_TX),
+               (unsigned long)Cy_AudioTDM_GetTxInterruptStatusMasked(
+                   TDM_STRUCT0_TX));
+    rt_kprintf("I2S start=%lu task=%lu hw=%lu irq=%lu trigger=%lu "
+               "complete=%lu underflow=%lu sem=%u mq=%u\n",
+               (unsigned long)i2s_sound_start_count,
+               (unsigned long)i2s_task_message_count,
+               (unsigned long)i2s_hardware_start_count,
+               (unsigned long)i2s_irq_count,
+               (unsigned long)i2s_irq_trigger_count,
+               (unsigned long)i2s_frame_complete_count,
+               (unsigned long)i2s_irq_underflow_count,
+               snd_dev.tx_sem != RT_NULL ? snd_dev.tx_sem->value : 0U,
+               snd_dev.tx_mq != RT_NULL ? snd_dev.tx_mq->entry : 0U);
+    rt_kprintf("I2S transmit=%lu fail=%lu last=%lu replay-buffer=%u/%u\n",
+               (unsigned long)i2s_transmit_count,
+               (unsigned long)i2s_transmit_fail_count,
+               (unsigned long)i2s_last_transmit_size,
+               snd_dev.audio.replay != RT_NULL ?
+                   snd_dev.audio.replay->buf_info.block_size : 0U,
+               snd_dev.audio.replay != RT_NULL ?
+                   snd_dev.audio.replay->buf_info.total_size : 0U);
+    return RT_EOK;
+}
+MSH_CMD_EXPORT(feather_i2s_diag, Show FeatherTalk I2S playback diagnostics.);
+#endif
 

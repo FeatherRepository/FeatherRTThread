@@ -1,5 +1,6 @@
 #include <rtthread.h>
 #include "feathertalk_ui_internal.h"
+#include "lv_draw_runtime_stats.h"
 
 static ft_ui_metrics_t s_metrics;
 static lv_obj_t *s_metrics_root;
@@ -11,6 +12,18 @@ static uint32_t s_last_sample_ms;
 static uint32_t s_render_start_ms;
 static uint32_t s_route_objects;
 static uint32_t s_route_heap;
+static lv_draw_runtime_stats_t s_last_draw_stats;
+static uint32_t s_metrics_start_ms;
+static lv_draw_runtime_stats_t s_metrics_start_draw_stats;
+
+static uint32_t counter_rate(uint32_t delta, uint32_t elapsed_ms)
+{
+    if (elapsed_ms == 0U)
+    {
+        return 0U;
+    }
+    return (uint32_t)(((uint64_t)delta * 1000ULL) / elapsed_ms);
+}
 
 static uint32_t count_objects(lv_obj_t *obj)
 {
@@ -75,6 +88,15 @@ static void metrics_timer_cb(lv_timer_t *timer)
     uint32_t flushes;
     uint32_t pixels;
     uint32_t objects;
+    uint32_t gpu_tasks;
+    uint32_t sw_tasks;
+    uint32_t draw_tasks;
+    uint32_t gpu_busy_us;
+    uint32_t gpu_jobs;
+    uint32_t total_elapsed;
+    uint32_t gpu_busy_us_total;
+    uint32_t gpu_jobs_total;
+    lv_draw_runtime_stats_t draw_stats;
 
     LV_UNUSED(timer);
     now = rt_tick_get_millisecond();
@@ -83,19 +105,81 @@ static void metrics_timer_cb(lv_timer_t *timer)
     renders = s_metrics.render_count - s_last_render_count;
     flushes = s_metrics.flush_count - s_last_flush_count;
     pixels = s_metrics.flushed_pixels - s_last_flushed_pixels;
+    lv_draw_runtime_stats_get(&draw_stats);
+    gpu_tasks = draw_stats.executed_gpu_tasks - s_last_draw_stats.executed_gpu_tasks;
+    sw_tasks = draw_stats.executed_sw_tasks - s_last_draw_stats.executed_sw_tasks;
+    draw_tasks = gpu_tasks + sw_tasks;
+    gpu_busy_us = draw_stats.gpu_busy_us_total - s_last_draw_stats.gpu_busy_us_total;
+    gpu_jobs = draw_stats.gpu_completed_jobs - s_last_draw_stats.gpu_completed_jobs;
+    total_elapsed = now - s_metrics_start_ms;
+    gpu_busy_us_total = draw_stats.gpu_busy_us_total -
+                        s_metrics_start_draw_stats.gpu_busy_us_total;
+    gpu_jobs_total = draw_stats.gpu_completed_jobs -
+                     s_metrics_start_draw_stats.gpu_completed_jobs;
     if (elapsed > 0U)
     {
-        s_metrics.fps = (renders * 1000U) / elapsed;
-        s_metrics.refresh_fps = (refreshes * 1000U) / elapsed;
-        s_metrics.flushes_per_second = (flushes * 1000U) / elapsed;
-        s_metrics.flushed_pixels_per_second =
-            (uint32_t)(((uint64_t)pixels * 1000ULL) / elapsed);
+        s_metrics.fps = counter_rate(renders, elapsed);
+        s_metrics.refresh_fps = counter_rate(refreshes, elapsed);
+        s_metrics.flushes_per_second = counter_rate(flushes, elapsed);
+        s_metrics.flushed_pixels_per_second = counter_rate(pixels, elapsed);
+        s_metrics.gpu_tasks_per_second = counter_rate(gpu_tasks, elapsed);
+        s_metrics.sw_tasks_per_second = counter_rate(sw_tasks, elapsed);
+        s_metrics.gpu_task_percent = draw_tasks == 0U ? 0U :
+                                     (uint32_t)(((uint64_t)gpu_tasks * 100ULL) / draw_tasks);
+        s_metrics.sw_label_tasks_per_second = counter_rate(
+            draw_stats.sw_label_tasks - s_last_draw_stats.sw_label_tasks, elapsed);
+        s_metrics.route_unit_switches_per_second = counter_rate(
+            draw_stats.route_unit_switches - s_last_draw_stats.route_unit_switches, elapsed);
+        s_metrics.gpu_submits_per_second = counter_rate(
+            draw_stats.gpu_submit_count - s_last_draw_stats.gpu_submit_count, elapsed);
+        s_metrics.gpu_submit_bytes_per_second = counter_rate(
+            draw_stats.gpu_submit_bytes - s_last_draw_stats.gpu_submit_bytes, elapsed);
+        s_metrics.gpu_flushes_per_second = counter_rate(
+            draw_stats.gpu_flush_calls - s_last_draw_stats.gpu_flush_calls, elapsed);
+        s_metrics.gpu_finishes_per_second = counter_rate(
+            draw_stats.gpu_finish_calls - s_last_draw_stats.gpu_finish_calls, elapsed);
+        s_metrics.gpu_finish_wait_ms_per_second = counter_rate(
+            draw_stats.gpu_finish_wait_ms_total - s_last_draw_stats.gpu_finish_wait_ms_total,
+            elapsed);
+        s_metrics.gpu_busy_us_per_second = counter_rate(gpu_busy_us, elapsed);
+        s_metrics.gpu_busy_percent = (uint32_t)(((uint64_t)gpu_busy_us * 100ULL) /
+                                                ((uint64_t)elapsed * 1000ULL));
+        if (s_metrics.gpu_busy_percent > 100U)
+        {
+            s_metrics.gpu_busy_percent = 100U;
+        }
+        if (s_metrics.gpu_busy_percent > s_metrics.gpu_busy_peak_percent)
+        {
+            s_metrics.gpu_busy_peak_percent = s_metrics.gpu_busy_percent;
+        }
+        s_metrics.gpu_jobs_per_second = counter_rate(gpu_jobs, elapsed);
+        s_metrics.gpu_job_average_us = gpu_jobs == 0U ? 0U : gpu_busy_us / gpu_jobs;
     }
+    s_metrics.gpu_busy_us_total = gpu_busy_us_total;
+    s_metrics.gpu_completed_job_count = gpu_jobs_total;
+    s_metrics.gpu_busy_average_percent = total_elapsed == 0U ? 0U :
+        (uint32_t)(((uint64_t)gpu_busy_us_total * 100ULL) /
+                   ((uint64_t)total_elapsed * 1000ULL));
+    if (s_metrics.gpu_busy_average_percent > 100U)
+    {
+        s_metrics.gpu_busy_average_percent = 100U;
+    }
+    s_metrics.gpu_job_average_total_us = gpu_jobs_total == 0U ? 0U :
+                                         gpu_busy_us_total / gpu_jobs_total;
+    s_metrics.gpu_task_count = draw_stats.executed_gpu_tasks;
+    s_metrics.sw_task_count = draw_stats.executed_sw_tasks;
+    s_metrics.routed_gpu_task_count = draw_stats.routed_gpu_tasks;
+    s_metrics.routed_sw_task_count = draw_stats.routed_sw_tasks;
+    s_metrics.route_unit_switch_count = draw_stats.route_unit_switches;
+    s_metrics.gpu_submit_count = draw_stats.gpu_submit_count;
+    s_metrics.gpu_finish_wait_max_ms = draw_stats.gpu_finish_wait_ms_max;
+    s_metrics.gpu_job_max_us = draw_stats.gpu_busy_us_max;
     s_last_refresh_count = s_metrics.refresh_count;
     s_last_render_count = s_metrics.render_count;
     s_last_flush_count = s_metrics.flush_count;
     s_last_flushed_pixels = s_metrics.flushed_pixels;
     s_last_sample_ms = now;
+    s_last_draw_stats = draw_stats;
 
     rt_memory_info(&total, &used, &max_used);
     s_metrics.heap_total = (uint32_t)total;
@@ -118,6 +202,9 @@ void ft_metrics_init(lv_display_t *display, lv_obj_t *root)
     s_last_flushed_pixels = 0U;
     s_render_start_ms = 0U;
     s_last_sample_ms = rt_tick_get_millisecond();
+    lv_draw_runtime_stats_get(&s_last_draw_stats);
+    s_metrics_start_ms = s_last_sample_ms;
+    s_metrics_start_draw_stats = s_last_draw_stats;
     lv_display_add_event_cb(display, display_event_cb, LV_EVENT_REFR_READY, RT_NULL);
     lv_display_add_event_cb(display, display_event_cb, LV_EVENT_RENDER_START, RT_NULL);
     lv_display_add_event_cb(display, display_event_cb, LV_EVENT_RENDER_READY, RT_NULL);
@@ -178,4 +265,37 @@ void ft_metrics_print_status(void)
                (unsigned long)s_metrics.peak_ui_objects,
                (long)s_metrics.last_route_object_delta,
                (long)s_metrics.last_route_heap_delta);
+    rt_kprintf("draw: gpu=%lu/%lus sw=%lu/%lus gpu-share=%lu%% sw-label=%lu/s "
+               "route-gpu/sw=%lu/%lu switches=%lu/%lus\n"
+               "vg-lite: submits=%lu/%lus cmd=%luB/s flush=%lu/s finish=%lu/s "
+               "wait=%lums/s max=%lums\n"
+               "gpu-hw: busy=%lu%% avg=%lu%% peak=%lu%% (%luus/s) "
+               "jobs=%lu/s avg-job=%luus max=%luus total=%luus/%lujobs/%luus\n",
+               (unsigned long)s_metrics.gpu_task_count,
+               (unsigned long)s_metrics.gpu_tasks_per_second,
+               (unsigned long)s_metrics.sw_task_count,
+               (unsigned long)s_metrics.sw_tasks_per_second,
+               (unsigned long)s_metrics.gpu_task_percent,
+               (unsigned long)s_metrics.sw_label_tasks_per_second,
+               (unsigned long)s_metrics.routed_gpu_task_count,
+               (unsigned long)s_metrics.routed_sw_task_count,
+               (unsigned long)s_metrics.route_unit_switch_count,
+               (unsigned long)s_metrics.route_unit_switches_per_second,
+               (unsigned long)s_metrics.gpu_submit_count,
+               (unsigned long)s_metrics.gpu_submits_per_second,
+               (unsigned long)s_metrics.gpu_submit_bytes_per_second,
+               (unsigned long)s_metrics.gpu_flushes_per_second,
+               (unsigned long)s_metrics.gpu_finishes_per_second,
+               (unsigned long)s_metrics.gpu_finish_wait_ms_per_second,
+               (unsigned long)s_metrics.gpu_finish_wait_max_ms,
+               (unsigned long)s_metrics.gpu_busy_percent,
+               (unsigned long)s_metrics.gpu_busy_average_percent,
+               (unsigned long)s_metrics.gpu_busy_peak_percent,
+               (unsigned long)s_metrics.gpu_busy_us_per_second,
+               (unsigned long)s_metrics.gpu_jobs_per_second,
+               (unsigned long)s_metrics.gpu_job_average_us,
+               (unsigned long)s_metrics.gpu_job_max_us,
+               (unsigned long)s_metrics.gpu_busy_us_total,
+               (unsigned long)s_metrics.gpu_completed_job_count,
+               (unsigned long)s_metrics.gpu_job_average_total_us);
 }

@@ -7,7 +7,8 @@ belong here. Keep reusable hardware drivers in the BSP layer.
 
 - `sound0` is the default output: PSoC Edge TDM0/I2S TX -> ES8388 DAC ->
   MD8002 bridge amplifier -> onboard mono speaker. The RT-Thread device format
-  is 16 kHz, stereo, 16-bit; the analog board path sums both DAC outputs.
+  supports 16/24/48/96 kHz, 16/24-bit and logical mono/stereo; the physical
+  I2S link remains two-slot and the analog board path sums both DAC outputs.
 - `mic0` is the default input: the two onboard PDM microphones share clock/data
   and are captured as 16 kHz, two-channel, 16-bit audio.
 - The AMIC2 analog microphone front end is physically present but has no
@@ -31,7 +32,12 @@ contract and validation procedure.
 The board powers the ES8388 rail before device initialization but keeps the
 MD8002 amplifier disabled. The ES8388 driver owns P21.6 and enables the
 amplifier only after codec setup, preventing the previous unconditional boot
-enable and reducing power-up pops.
+enable and reducing power-up pops. A `sound0` format change is transactional:
+TDM word size, LRCK/BCLK/MCLK and the ES8388 DAC word length, speed mode and
+MCLK/Fs ratio must all accept the candidate before it becomes visible. Codec
+registers are read back, and a failed update restores the previous complete
+path. `feather_i2s_diag` reports both the logical `sound0` format and the live
+ES8388 readback.
 
 ## Settings behavior
 

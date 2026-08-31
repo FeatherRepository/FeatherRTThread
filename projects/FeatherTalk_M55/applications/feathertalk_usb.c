@@ -2,6 +2,7 @@
 #include <rtdevice.h>
 #include <stdlib.h>
 #include <string.h>
+#include <board.h>
 #include "board_storage.h"
 #include "feathertalk_storage.h"
 #include "feathertalk_usb.h"
@@ -32,7 +33,6 @@ static ft_usb_status_t s_usb_status =
     defined(RT_USING_CHERRYUSB) && defined(RT_CHERRYUSB_DEVICE) && \
     defined(RT_CHERRYUSB_DEVICE_MSC)
 
-#include <board.h>
 #include "usbd_core.h"
 #include "usbd_msc.h"
 
@@ -555,9 +555,36 @@ void ft_usb_refresh(void)
 }
 
 #ifdef RT_USING_FINSH
+static uint32_t usb_reg_read(uint32_t offset)
+{
+    return *(volatile uint32_t *)(USBHS_BASE + offset);
+}
+
+static void usb_shell_print_dwc2_regs(void)
+{
+    const uint32_t out_ep2 = 0x0B00U + 2U * 0x20U;
+
+    rt_kprintf("DWC2 GINTSTS=%08lx GINTMSK=%08lx DSTS=%08lx\n",
+               (unsigned long)usb_reg_read(0x0014U),
+               (unsigned long)usb_reg_read(0x0018U),
+               (unsigned long)usb_reg_read(0x0808U));
+    rt_kprintf("DWC2 DOEPMSK=%08lx DAINT=%08lx DAINTMSK=%08lx\n",
+               (unsigned long)usb_reg_read(0x0814U),
+               (unsigned long)usb_reg_read(0x0818U),
+               (unsigned long)usb_reg_read(0x081CU));
+    rt_kprintf("DWC2 OUT2 CTL=%08lx INT=%08lx TSIZ=%08lx DMA=%08lx\n",
+               (unsigned long)usb_reg_read(out_ep2 + 0x00U),
+               (unsigned long)usb_reg_read(out_ep2 + 0x08U),
+               (unsigned long)usb_reg_read(out_ep2 + 0x10U),
+               (unsigned long)usb_reg_read(out_ep2 + 0x14U));
+    rt_kprintf("DWC2 ISO OUT re-arms=%lu\n",
+               (unsigned long)usbd_dwc2_get_iso_out_rearm_count(0U));
+}
+
 static void usb_shell_print_status(void)
 {
     ft_usb_status_t status;
+    ft_usb_uac_status_t uac;
 
     ft_usb_get_status(&status);
     rt_kprintf("USB role=device function=%s active=%u connected=%u configured=%u "
@@ -598,6 +625,7 @@ static void usb_shell_print_status(void)
 #endif
     if (status.function == FT_USB_FUNCTION_AUDIO)
     {
+        ft_usb_uac_get_status(&uac);
         rt_kprintf("UAC2 out: %lu Hz %u-bit %u-ch stream=%u host->device=%luKiB overruns=%lu\n",
                    (unsigned long)status.uac_output_sample_rate,
                    status.uac_output_sample_bits,
@@ -617,6 +645,16 @@ static void usb_shell_print_status(void)
                    (unsigned long)status.uac_host_update_count,
                    (unsigned long)status.uac_device_update_count,
                    status.uac_format_pending ? 1U : 0U);
+        rt_kprintf("UAC2 diag cb=%lu ring=%luB read=%luB wake=%lu open=%lu "
+                   "write=%lu/%luB worker=%u\n",
+                   (unsigned long)uac.output_callback_count,
+                   (unsigned long)uac.output_ring_used,
+                   (unsigned long)uac.output_ring_read_bytes,
+                   (unsigned long)uac.output_worker_wakeups,
+                   (unsigned long)uac.output_sound_open_count,
+                   (unsigned long)uac.output_sound_write_calls,
+                   (unsigned long)uac.output_sound_write_bytes,
+                   uac.output_worker_state);
     }
 }
 
@@ -627,6 +665,11 @@ static int feather_usb(int argc, char **argv)
     if (argc == 1 || (argc == 2 && strcmp(argv[1], "status") == 0))
     {
         usb_shell_print_status();
+        return RT_EOK;
+    }
+    if (argc == 2 && strcmp(argv[1], "regs") == 0)
+    {
+        usb_shell_print_dwc2_regs();
         return RT_EOK;
     }
     if (argc == 2 && strcmp(argv[1], "storage") == 0)
@@ -642,7 +685,7 @@ static int feather_usb(int argc, char **argv)
             (uint8_t)strtoul(argv[4], RT_NULL, 10));
     else
     {
-        rt_kprintf("Usage: feather_usb [status|storage|audio|stop|format <rate> <bits> <channels>]\n");
+        rt_kprintf("Usage: feather_usb [status|regs|storage|audio|stop|format <rate> <bits> <channels>]\n");
         return -RT_EINVAL;
     }
 

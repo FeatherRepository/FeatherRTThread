@@ -161,6 +161,11 @@ static void rotate270_l8(const uint8_t * src, uint8_t * dst, int32_t src_width, 
  *   GLOBAL FUNCTIONS
  **********************/
 
+void __attribute__((weak)) lv_draw_sw_task_perf_hook(uint32_t task_type)
+{
+    LV_UNUSED(task_type);
+}
+
 void lv_draw_sw_init(void)
 {
 
@@ -501,6 +506,7 @@ static void execute_drawing(lv_draw_sw_unit_t * u)
     LV_PROFILER_BEGIN;
     /*Render the draw task*/
     lv_draw_task_t * t = u->task_act;
+    lv_draw_sw_task_perf_hook(t->type);
     switch(t->type) {
         case LV_DRAW_TASK_TYPE_FILL:
             lv_draw_sw_fill((lv_draw_unit_t *)u, t->draw_dsc, &t->area);

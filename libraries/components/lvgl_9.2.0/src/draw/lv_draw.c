@@ -52,6 +52,12 @@ static inline uint32_t get_layer_size_kb(uint32_t size_byte)
  *   GLOBAL FUNCTIONS
  **********************/
 
+void __attribute__((weak)) lv_draw_task_route_perf_hook(uint32_t unit_id, uint32_t task_type)
+{
+    LV_UNUSED(unit_id);
+    LV_UNUSED(task_type);
+}
+
 void lv_draw_init(void)
 {
 #if LV_USE_OS
@@ -144,6 +150,8 @@ void lv_draw_finalize_task_creation(lv_layer_t * layer, lv_draw_task_t * t)
             u = u->next;
         }
 
+        lv_draw_task_route_perf_hook(t->preferred_draw_unit_id, t->type);
+
         lv_draw_dispatch();
     }
     else {
@@ -155,6 +163,8 @@ void lv_draw_finalize_task_creation(lv_layer_t * layer, lv_draw_task_t * t)
             if(u->evaluate_cb) u->evaluate_cb(u, t);
             u = u->next;
         }
+
+        lv_draw_task_route_perf_hook(t->preferred_draw_unit_id, t->type);
     }
     LV_PROFILER_END;
 }

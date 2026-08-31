@@ -838,7 +838,7 @@ static void status_timer_cb(lv_timer_t *timer)
     char clock[20];
     char timezone[16];
     char system_text[256];
-    char metrics_text[256];
+    char metrics_text[768];
     char tile[64];
     const char *battery = "--";
     const char *network = ft_preferences_text("不可用", "unavailable");
@@ -927,11 +927,21 @@ static void status_timer_cb(lv_timer_t *timer)
                 "M55 UI：当前 %lu FPS，调度 %lu Hz\n"
                 "帧 %lu，刷新 %lu，%lu 像素/秒\n渲染 %lu ms，峰值 %lu ms\n"
                 "堆：%lu/%lu 字节，峰值 %lu\nUI 对象峰值：%lu\n"
-                "上次路由变化：对象 %ld，堆 %ld",
+                "上次路由变化：对象 %ld，堆 %ld\n"
+                "绘制任务：GPU %lu/s，SW %lu/s，GPU 占比 %lu%%\n"
+                "软件文字 %lu/s，GPU/SW 路由切换 %lu/s\n"
+                "GPU 提交 %lu/s（%lu 字节/秒），flush %lu/s，finish %lu/s\n"
+                "GPU 等待 %lu ms/秒，单次峰值 %lu ms\n"
+                "GPU 硬件忙碌 %lu%%，平均任务 %lu us，峰值 %lu us",
                 "M55 UI: present %lu FPS, scheduler %lu Hz\n"
                 "Frames %lu, flush %lu, %lu pixels/s\nRender %lu ms, peak %lu ms\n"
                 "Heap: %lu/%lu bytes, peak %lu\nUI objects peak: %lu\n"
-                "Last route delta: objects %ld, heap %ld"),
+                "Last route delta: objects %ld, heap %ld\n"
+                "Draw tasks: GPU %lu/s, SW %lu/s, GPU share %lu%%\n"
+                "SW labels %lu/s, GPU/SW route switches %lu/s\n"
+                "GPU submit %lu/s (%lu bytes/s), flush %lu/s, finish %lu/s\n"
+                "GPU wait %lu ms/s, single peak %lu ms\n"
+                "GPU hardware busy %lu%%, average job %lu us, peak %lu us"),
                 (unsigned long)metrics.fps, (unsigned long)metrics.refresh_fps,
                 (unsigned long)metrics.render_count, (unsigned long)metrics.flush_count,
                 (unsigned long)metrics.flushed_pixels_per_second,
@@ -939,7 +949,21 @@ static void status_timer_cb(lv_timer_t *timer)
                 (unsigned long)metrics.render_time_max_ms,
                 (unsigned long)metrics.heap_used, (unsigned long)metrics.heap_total,
                 (unsigned long)metrics.heap_max_used, (unsigned long)metrics.peak_ui_objects,
-                (long)metrics.last_route_object_delta, (long)metrics.last_route_heap_delta);
+                (long)metrics.last_route_object_delta, (long)metrics.last_route_heap_delta,
+                (unsigned long)metrics.gpu_tasks_per_second,
+                (unsigned long)metrics.sw_tasks_per_second,
+                (unsigned long)metrics.gpu_task_percent,
+                (unsigned long)metrics.sw_label_tasks_per_second,
+                (unsigned long)metrics.route_unit_switches_per_second,
+                (unsigned long)metrics.gpu_submits_per_second,
+                (unsigned long)metrics.gpu_submit_bytes_per_second,
+                (unsigned long)metrics.gpu_flushes_per_second,
+                (unsigned long)metrics.gpu_finishes_per_second,
+                (unsigned long)metrics.gpu_finish_wait_ms_per_second,
+                (unsigned long)metrics.gpu_finish_wait_max_ms,
+                (unsigned long)metrics.gpu_busy_percent,
+                (unsigned long)metrics.gpu_job_average_us,
+                (unsigned long)metrics.gpu_job_max_us);
     (void)label_set_text_changed(s_status_uptime, bar);
     ft_pages_update_system_status(system_text, metrics_text);
     ft_pages_live_tile_update(tile);
