@@ -4,6 +4,9 @@ This module brings up the CYW55500A1 controller on the PSoC Edge E84 board,
 downloads the board-specific PatchRAM image, starts the AIROC host stack, and
 provides BLE scan/advertising diagnostics through the M33 msh console.
 
+The complete Chinese bring-up chronology, failure analysis, fixes, and board
+reproduction procedure are recorded in [BLUETOOTH_BRINGUP_zh.md](BLUETOOTH_BRINGUP_zh.md).
+
 ## Repository-contained dependency layout
 
 The build only reads Bluetooth files below this directory:

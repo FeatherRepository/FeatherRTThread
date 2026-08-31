@@ -71,3 +71,16 @@ M55 终端可用 `feather_m55_status` 查看 LVGL 与 IPC 状态。
 2026-08-31 真机全量 UI/存储回归为 `326 PASS / 0 FAIL / 150 actions`；其中
 `files.delete.contract`、`files.clipboard.contract`、`files.name.contract` 均实际
 擦写 `/flash` 并通过，过程中未再出现 `M33 XIP park failed`、HardFault 或复位。
+
+## 蓝牙当前状态
+
+CYW55500A1 的官方 PatchRAM 与 AIROC Host Stack 已在 M33 打通。冷启动会以 3 Mbit/s
+下载 126,951 字节、519 条 HCD 记录，随后以 115200 bit/s 运行；真机 Host 状态为
+`ready/error=0`，启动扫描为 18 reports / 11 unique，运行期复扫为 19 / 11，非连接
+广播开关通过。
+
+当前真实入口是 M33 MSH 的 `bt_status`、`bt_scan`、`bt_scan_stop`、`bt_devices` 和
+`bt_adv on|off`。M33 尚未通过 IPC 向 M55 发布真实蓝牙能力与扫描列表，因此 UI 仍应
+显示不可用；配对、加密连接、Bond、密钥持久化和 GATT 也尚未完成。完整调试过程、
+问题根因、复现方法和后续计划见
+[BLUETOOTH_BRINGUP_zh.md](../FeatherTalk_M33/applications/bluetooth/BLUETOOTH_BRINGUP_zh.md)。

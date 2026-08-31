@@ -24,7 +24,7 @@
 3. 路由栈容量固定为 8；测试覆盖 push/pop/home、溢出拒绝、深层释放和返回 Start。
 4. 偏好后端按计划使用内存桩，保存强调色、Tile 透明度、背景模式和 revision；生产持久化后端仍可在不改 UI API 的情况下替换。
 5. 资源格式与位置规则见 `UI_ASSET_POLICY_zh.md`，转换工具为 `tools/freather/ui-asset-convert.py`。
-6. M33 每个心跳发送 16 字节系统状态帧和 16 字节快捷状态帧。RTC 有效时发送 Unix 时间；当前板级电源、电池、网络、蓝牙和旋转驱动未启用，字段使用 `unknown/unavailable` 和显式能力位，未填充虚构数据。
+6. M33 每个心跳发送 16 字节系统状态帧和 16 字节快捷状态帧。RTC 有效时发送 Unix 时间；当前板级电源、电池、Wi-Fi/网络和旋转驱动未启用。M33 蓝牙 Host 已单独打通，但尚未映射到 ABI 4 快捷状态帧，因此 M55 端蓝牙字段仍使用 `unknown/unavailable` 和显式能力位，不填充虚构数据。
 7. System 显示双核和性能状态；Settings 修改真实偏好；Media 支持上一首、播放/暂停、下一首和音量；Gallery 浏览 Flash/SD 图片并设置壁纸；Files 刷新真实的存储可用性；About 显示产品/固件/ABI 版本。
 8. System Live Tile 每秒更新；通知中心使用滑动动画；Search 使用 Spinner 动画；System/MSH 暴露 FPS、刷新次数、当前/峰值堆和 UI 对象峰值。
 
@@ -338,7 +338,7 @@
 
 ## 已知边界
 
-- 电池、电源采样、Wi-Fi/网络、蓝牙和屏幕旋转的板级驱动尚未在产品配置中启用；SD 卡已经通过 SDHC1/Elm-FatFS 接入 `/sdcard`，末尾固定 2 MiB 外部 Flash 作为 `/flash` FAT 用户盘，USB Device MSC 使用 Flash/SD 双 LUN。UI 与 ABI 4 IPC 已具备无线能力、启用、连接和 Wi-Fi 信号强度接入点，并明确显示不可用。显示亮度已经接入 M55 `pwm18`。
+- 电池、电源采样、Wi-Fi/网络和屏幕旋转的板级驱动尚未在产品配置中启用；M33 蓝牙已能扫描和非连接广播，但真实状态/命令/设备列表尚未接入 M33→M55 IPC，因此 UI 仍明确显示不可用。SD 卡已经通过 SDHC1/Elm-FatFS 接入 `/sdcard`，末尾固定 2 MiB 外部 Flash 作为 `/flash` FAT 用户盘，USB Device MSC 使用 Flash/SD 双 LUN；显示亮度已经接入 M55 `pwm18`。
 - 强调色、Tile 透明度、背景/壁纸、时间制式、固定时区和语言已通过 `/flash/.feathertalk` A/B 配置掉电保存；USB 导出、本机格式化和自动测试均具备冻结/恢复协议。
 - 自动测试宏当前为板级验收而启用；发布固件应关闭 `CONFIG_FEATHERTALK_UI_TEST_MODE`。
 
@@ -459,3 +459,48 @@
 - CYW55500A1 官方 PatchRAM、HCI-UART integration 和 AIROC host stack 的有效输入均已放入 `FeatherTalk_M33/applications/bluetooth` 管理，构建输出确认不读取仓库外路径。PatchRAM 以 3 Mbit/s 下载后切回 115200 bit/s，host `ready/error=0`；启动扫描得到 18 reports / 11 unique，运行期复扫得到 19 / 11，广播 on/off 均成功。
 - 启动时原 `0x28` 不是控制器故障，而是 `USE_AIROC_STACK_SMP=0` 时供应商包装函数默认返回 `WICED_ERROR` 的假告警。禁用 SMP 现按合法配置返回 success；当前明确只承诺扫描和非连接广播，配对、加密、绑定、密钥持久化与 GATT 留到下一阶段。
 - 下载脚本同步修复了另一个独立问题：PSE84 `reset_halt` 返回 Tcl 0 时 OpenOCD 本身不会退出失败。现在由仓库内 Tcl guard 检查停机域、Secure boot PC、Test Mode 和写后 Non-Secure 启动条件，再允许官方 FLM 擦写。修正版实机写入 372,736 字节、校验 365,728 字节通过。
+
+## 2026-08-31 蓝牙进度快照与后续计划
+
+详细的硬件链路、固件来源、调试时间线、八类故障根因、复现命令和日志索引见
+[蓝牙调试与上板记录](../../../FeatherTalk_M33/applications/bluetooth/BLUETOOTH_BRINGUP_zh.md)。
+
+当前进度：
+
+| 层级 | 状态 | 已完成/当前边界 |
+| --- | --- | --- |
+| 板级供电与 HCI UART | 已完成、已板测 | P16.3 无线电源、REG_ON、SCB4、RTS/CTS 和自动波特率链路通过 |
+| CYW55500A1 PatchRAM | 已完成、已板测 | 官方匹配组件随每次冷启动下载；126,951 字节、519 条 HCD 记录 |
+| AIROC Host Stack | 已完成、已板测 | M33 启动为 `ready/error=0`，本机地址可读，运行波特率 115200 bit/s |
+| BLE Observer | 已完成、已板测 | 启动扫描 18/11、运行期复扫 19/11，地址、RSSI、类型和广播名可查询 |
+| 非连接广播 | 已完成、已板测 | `bt_adv on/off` 均返回 0，状态可查询 |
+| 仓库可复现性 | 已完成 | 官方 BTSTACK/固件固定为子模块，HCI 集成源码入库，不读取开发机绝对路径 |
+| 双核并发稳定性 | 已完成、已板测 | M55 完整 UI/Flash 回归 `326 PASS / 0 FAIL / 150 actions`，M33 蓝牙持续在线 |
+| M33→M55 蓝牙 IPC | 未完成、下一阶段第一项 | ABI 4 有无线状态槽位，但 M33 尚未发布真实蓝牙 capability/enabled/connected/scan 数据 |
+| Settings/快捷面板真实控制 | 未完成 | M55 仍应显示蓝牙不可用，不能因为 M33 MSH 可扫描就伪造 UI 开关成功 |
+| 连接与 GATT | 未完成 | 尚无连接、服务发现、Characteristic 读写、Notification/Indication 验证 |
+| SMP/配对/Bond | 明确禁用 | 尚无 I/O 策略、身份密钥、Link Key 回调和掉电持久化 |
+| 低功耗与恢复 | 未完成 | HOST_WAKE/DEVICE_WAKE、控制器睡眠、异常重启和下载失败恢复尚未产品化 |
+| Wi-Fi | 未纳入本轮 | 蓝牙闭环不代表 Wi-Fi 驱动、固件或网络栈已经打通 |
+
+下一阶段按依赖顺序推进：
+
+1. **P1：蓝牙 IPC 与 UI 接入。** 在不破坏 16 字节 ABI 4 契约的前提下，由 M33 发布
+   capability、Host ready、enabled、advertising、scanning、connected 和错误状态；为扫描
+   列表设计分页/事件消息。Settings 和快捷面板只调用 M33 命令，不直接接触 HCI。
+   验收要求是 MSH 与 UI 状态一致，M33 不在线或 Host failed 时 UI 自动退回不可用。
+2. **P2：连接与基础 GATT。** 先连接一个已知 BLE 测试外设，完成连接/断开、MTU、服务
+   发现、Characteristic 读写和 Notification；加入超时、用户取消和断连清理。验收要求是
+   连续连接/断开 100 次无对象、线程或 heap 泄漏。
+3. **P3：SMP 与密钥持久化。** 明确开发板的显示/输入能力与配对策略，实现本机身份密钥
+   和远端 Bond/Link Key 的读取、更新、删除与 CRC/双槽掉电保存，再启用 SMP 相关宏。
+   验收包括首次配对、重启后重连、删除设备、错误 PIN/确认拒绝和存储损坏回退。
+4. **P4：产品 GATT 与应用模型。** 在通用链路稳定后再定义 FeatherTalk 自有服务，避免把
+   扫描结果、控制命令和业务数据耦合到 UI 页面；同时建立权限、长度和并发访问边界。
+5. **P5：低功耗与故障恢复。** 接入 HOST_WAKE/DEVICE_WAKE、控制器休眠和系统电源状态；
+   为 CTS 超时、PatchRAM 失败、HCI 卡死和控制器掉电增加有次数上限的恢复状态机。
+6. **P6：联合回归与量化。** 同时运行 BLE 扫描/连接、M55 动画、SD/Flash、USB MSC 和 IPC，
+   记录 UART 错包、扫描丢失、连接稳定性、heap 峰值、线程栈余量、功耗和 8/24 小时压力结果。
+
+阶段口径保持严格：P1 完成前只能说“蓝牙底层和 M33 MSH 可用”；P2 完成后才能说
+“BLE 可连接”；P3 完成后才能说“安全配对和 Bond 可用”。
