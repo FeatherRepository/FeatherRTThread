@@ -37,14 +37,19 @@ extern "C" {
 
 struct lv_vg_lite_pending_t;
 
+#define LV_VG_LITE_PIPELINE_SLOTS 2U
+
 struct lv_draw_vg_lite_unit_t {
     lv_draw_unit_t base_unit;
     lv_draw_task_t * task_act;
 
     struct lv_vg_lite_pending_t * image_dsc_pending;
+    struct lv_vg_lite_pending_t * image_dsc_pending_slots[LV_VG_LITE_PIPELINE_SLOTS];
 
     lv_cache_t * grad_cache;
     struct lv_vg_lite_pending_t * grad_pending;
+    struct lv_vg_lite_pending_t * grad_pending_slots[LV_VG_LITE_PIPELINE_SLOTS];
+    uint8_t pending_slot;
 
     lv_cache_t * stroke_cache;
 

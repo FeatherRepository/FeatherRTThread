@@ -55,6 +55,8 @@
 #include "lv_font_fmt_txt.h"
 #include "lv_string.h"
 #include "lv_global.h"
+#include "lv_gpu_batch.h"
+#include "lv_draw_runtime_stats.h"
 
 /*********************
  *      DEFINES
@@ -421,6 +423,12 @@ void lv_display_refr_timer(lv_timer_t * tmr)
 
     lv_refr_join_area();
     refr_sync_areas();
+
+    /* Freeze dispatch while LVGL walks the complete scene. The draw tasks keep
+     * their normal dependency graph, but encoding starts only at flush time. */
+    if(disp_refr->inv_p != 0) {
+        lv_gpu_batch_frame_begin();
+    }
     refr_invalid_areas();
 
     if(disp_refr->inv_p == 0) goto refr_finish;
@@ -1182,10 +1190,18 @@ static void draw_buf_flush(lv_display_t * disp)
     /*Flush the rendered content to the display*/
     lv_layer_t * layer = disp->layer_head;
 
+    lv_draw_runtime_stats_note_batch_collection_end();
     while(layer->draw_task_head) {
-        lv_draw_dispatch_wait_for_request();
         lv_draw_dispatch();
+        if(layer->draw_task_head) {
+            lv_draw_dispatch_wait_for_request();
+        }
     }
+    lv_draw_runtime_stats_note_batch_dispatch_end();
+
+    /* The frame buffer becomes visible/copyable only after its single logical
+     * GPU batch has been submitted and completed. */
+    lv_gpu_batch_frame_end();
 
     /* In double buffered mode wait until the other buffer is freed
      * and driver is ready to receive the new buffer.

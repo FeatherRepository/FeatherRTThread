@@ -135,6 +135,10 @@ void lv_vector_path_clear(lv_vector_path_t * path);
  */
 void lv_vector_path_delete(lv_vector_path_t * path);
 
+/** Mark a completed path immutable so a hardware backend may retain a native
+ * representation. Calling any path mutator clears the immutable state. */
+void lv_vector_path_set_immutable(lv_vector_path_t * path);
+
 /**
  * Begin a new sub path and set a point to path
  * @param path              pointer to a path
@@ -463,6 +467,17 @@ void lv_vector_dsc_skew(lv_vector_dsc_t * dsc, float skew_x, float skew_y);
  * @param path          pointer to a path
  */
 void lv_vector_dsc_add_path(lv_vector_dsc_t * dsc, const lv_vector_path_t * path);
+
+/**
+ * Add an immutable path without copying its command and point arrays.
+ *
+ * The path must not be modified or deleted until the queued draw task has
+ * completed.  Subsequent frames may reuse the same path, allowing hardware
+ * backends to retain and upload a native command stream once.
+ * @param dsc               pointer to a vector graphic descriptor
+ * @param path              pointer to a persistent immutable path
+ */
+void lv_vector_dsc_add_path_static(lv_vector_dsc_t * dsc, lv_vector_path_t * path);
 
 /**
  * Clear a rectangle area use current fill color

@@ -51,6 +51,17 @@ typedef enum {
     LV_FONT_GLYPH_FORMAT_CUSTOM = 0xFF, /**< Custom format*/
 } lv_font_glyph_format_t;
 
+#define LV_FONT_VECTOR_GLYPH_MAGIC 0x4C565047UL /* "LVPG" */
+
+/** Backend-neutral vector glyph payload returned by get_glyph_bitmap().
+ * The path is immutable and expressed in its canonical design coordinates;
+ * scale converts those coordinates to the selected font size. */
+typedef struct {
+    uint32_t magic;
+    lv_vector_path_t * path;
+    float scale;
+} lv_font_vector_glyph_data_t;
+
 /** Describes the properties of a glyph.*/
 typedef struct {
     const lv_font_t *
@@ -100,6 +111,7 @@ struct lv_font_t {
     int32_t base_line;           /**< Base line measured from the bottom of the line_height*/
     uint8_t subpx   : 2;            /**< An element of `lv_font_subpx_t`*/
     uint8_t kerning : 1;            /**< An element of `lv_font_kerning_t`*/
+    uint8_t glyph_dsc_cacheable : 1; /**< Glyph metrics are immutable and may be cached across frames*/
 
     int8_t underline_position;      /**< Distance between the top of the underline and base line (< 0 means below the base line)*/
     int8_t underline_thickness;     /**< Thickness of the underline*/

@@ -1,5 +1,6 @@
 #include <rtthread.h>
 #include <rtdevice.h>
+#include <stdlib.h>
 #include <string.h>
 #include <feathertalk/ipc_protocol.h>
 #ifdef RT_USING_FINSH
@@ -2126,6 +2127,12 @@ int feathertalk_ui_init(void)
     ft_metrics_init(display, screen);
     status_timer_cb(RT_NULL);
     (void)lv_timer_create(status_timer_cb, 1000U, RT_NULL);
+    /* Switching the product port to full-frame direct scanout replaces the
+     * display draw buffers after LVGL created its default screen.  Rebuild the
+     * first invalid area only after the complete shell exists; otherwise the
+     * one pre-port refresh can be consumed while the scene is still empty and
+     * the refresh timer remains paused forever. */
+    lv_obj_invalidate(screen);
     s_ui_initialized = true;
     (void)ft_apps_get(&app_count);
     rt_kprintf("[FeatherTalk UI] shell ready: %ldx%ld apps=%lu route-depth=%lu\n",
@@ -2140,6 +2147,227 @@ int feathertalk_ui_init(void)
 }
 
 #ifdef RT_USING_FINSH
+typedef enum
+{
+    FT_BENCH_SCENE_HOME = 0,
+    FT_BENCH_SCENE_SEARCH,
+    FT_BENCH_SCENE_SYSTEM,
+    FT_BENCH_SCENE_SETTINGS,
+    FT_BENCH_SCENE_MEDIA,
+    FT_BENCH_SCENE_RECORDER,
+    FT_BENCH_SCENE_GALLERY,
+    FT_BENCH_SCENE_FILES,
+    FT_BENCH_SCENE_ABOUT,
+    FT_BENCH_SCENE_SETTINGS_DISPLAY,
+    FT_BENCH_SCENE_SETTINGS_AUDIO,
+    FT_BENCH_SCENE_SETTINGS_WIFI,
+    FT_BENCH_SCENE_SETTINGS_BLUETOOTH,
+    FT_BENCH_SCENE_SETTINGS_STORAGE,
+    FT_BENCH_SCENE_SETTINGS_USB,
+    FT_BENCH_SCENE_SETTINGS_TIME_LANGUAGE,
+    FT_BENCH_SCENE_SETTINGS_PERSONALIZATION,
+    FT_BENCH_SCENE_ALL_APPS,
+    FT_BENCH_SCENE_SHADE_OPEN,
+    FT_BENCH_SCENE_SHADE_DRAG,
+    FT_BENCH_SCENE_SEARCH_KEYBOARD,
+    FT_BENCH_SCENE_SETTINGS_KEYBOARD,
+    FT_BENCH_SCENE_TILE_EDIT,
+    FT_BENCH_SCENE_GALLERY_VIEWER,
+    FT_BENCH_SCENE_FILES_ACTION,
+    FT_BENCH_SCENE_MEDIA_PLAYING,
+    FT_BENCH_SCENE_ALERT,
+    FT_BENCH_SCENE_COUNT
+} ft_bench_scene_t;
+
+static const char *const s_bench_scene_names[FT_BENCH_SCENE_COUNT] =
+{
+    "home", "search", "system", "settings", "media", "recorder",
+    "gallery", "files", "about", "settings-display", "settings-audio",
+    "settings-wifi", "settings-bluetooth", "settings-storage", "settings-usb",
+    "settings-time-language", "settings-personalization", "all-apps",
+    "shade-open", "shade-drag", "search-keyboard", "settings-keyboard",
+    "tile-edit", "gallery-viewer", "files-action", "media-playing", "alert"
+};
+
+static void benchmark_scene_reset(void)
+{
+    if (s_alert != RT_NULL && lv_obj_is_valid(s_alert))
+        lv_msgbox_close(s_alert);
+    ft_tiles_exit_edit();
+    if (s_notification_panel != RT_NULL && lv_obj_is_valid(s_notification_panel))
+    {
+        lv_anim_delete(s_notification_panel, notification_anim_y_cb);
+        s_notification_visible = false;
+        s_notification_dragging = false;
+        s_notification_animating = false;
+        notification_anim_y_cb(s_notification_panel, notification_closed_y());
+        notification_anim_completed_cb(RT_NULL);
+    }
+    ft_router_home();
+}
+
+static int benchmark_scene_open_page(ft_page_id_t page)
+{
+    int result;
+
+    if (page == FT_PAGE_HOME) return RT_EOK;
+    if (page >= FT_PAGE_SETTINGS_DISPLAY)
+    {
+        result = ft_router_push(FT_PAGE_SETTINGS);
+        if (result != RT_EOK) return result;
+    }
+    return ft_router_push(page);
+}
+
+static void benchmark_scene_async_cb(void *user_data)
+{
+    ft_bench_scene_t scene = (ft_bench_scene_t)((uintptr_t)user_data - 1U);
+    uint32_t start_ms = rt_tick_get_millisecond();
+    int result = RT_EOK;
+    bool scene_result = true;
+
+    if ((unsigned)scene >= FT_BENCH_SCENE_COUNT) return;
+    benchmark_scene_reset();
+    if (scene <= FT_BENCH_SCENE_SETTINGS_PERSONALIZATION)
+        result = benchmark_scene_open_page((ft_page_id_t)scene);
+    else
+    {
+        switch (scene)
+        {
+        case FT_BENCH_SCENE_ALL_APPS:
+            ft_pages_show_all_apps();
+            break;
+        case FT_BENCH_SCENE_SHADE_OPEN:
+            notification_settle(true);
+            break;
+        case FT_BENCH_SCENE_SHADE_DRAG:
+        {
+            int32_t middle = notification_closed_y() +
+                             (notification_open_y() - notification_closed_y()) / 2;
+            ft_notifications_mark_all_read();
+            notification_render();
+            s_notification_visible = true;
+            notification_anim_y_cb(s_notification_panel, middle);
+            break;
+        }
+        case FT_BENCH_SCENE_SEARCH_KEYBOARD:
+            result = benchmark_scene_open_page(FT_PAGE_SEARCH);
+            if (result == RT_EOK)
+                scene_result = ft_pages_benchmark_set_keyboard_visible(true);
+            break;
+        case FT_BENCH_SCENE_SETTINGS_KEYBOARD:
+            result = benchmark_scene_open_page(FT_PAGE_SETTINGS);
+            if (result == RT_EOK)
+                scene_result = ft_pages_benchmark_set_keyboard_visible(true);
+            break;
+        case FT_BENCH_SCENE_TILE_EDIT:
+            scene_result = ft_tiles_preview_edit(0U);
+            break;
+        case FT_BENCH_SCENE_GALLERY_VIEWER:
+        {
+            const ft_ui_preferences_t *preferences = ft_preferences_get();
+            const char *path = preferences->wallpaper_path[0] != '\0' ?
+                               preferences->wallpaper_path : "/flash/Pictures/02.jpg";
+            scene_result = ft_gallery_request_open_file(path);
+            if (scene_result) result = benchmark_scene_open_page(FT_PAGE_GALLERY);
+            break;
+        }
+        case FT_BENCH_SCENE_FILES_ACTION:
+            result = benchmark_scene_open_page(FT_PAGE_FILES);
+            if (result == RT_EOK)
+                scene_result = ft_pages_benchmark_open_file_action();
+            break;
+        case FT_BENCH_SCENE_MEDIA_PLAYING:
+            result = benchmark_scene_open_page(FT_PAGE_MEDIA);
+            if (result == RT_EOK)
+                scene_result = ft_pages_benchmark_set_media_playing(true);
+            break;
+        case FT_BENCH_SCENE_ALERT:
+            feathertalk_ui_alert("FeatherTalk", "GPU/CPU pipeline performance scene");
+            break;
+        default:
+            result = -RT_EINVAL;
+            break;
+        }
+    }
+    if (!scene_result && result == RT_EOK) result = -RT_ERROR;
+    if (lv_screen_active() != RT_NULL)
+        lv_obj_invalidate(lv_screen_active());
+    rt_kprintf("[UI-SCENE] ready id=%u name=%s page=%d depth=%lu setup=%lums result=%d\n",
+               (unsigned)scene, s_bench_scene_names[scene],
+               (int)ft_router_current_page(), (unsigned long)ft_router_depth(),
+               (unsigned long)(rt_tick_get_millisecond() - start_ms), result);
+}
+
+static int feather_ui_scene(int argc, char **argv)
+{
+    unsigned long scene;
+    char *end = RT_NULL;
+    lv_result_t result;
+    size_t i;
+
+    if (!s_ui_initialized) return -RT_ERROR;
+    if (argc < 2 || strcmp(argv[1], "list") == 0)
+    {
+        for (i = 0U; i < FT_BENCH_SCENE_COUNT; i++)
+            rt_kprintf("%u\t%s\n", (unsigned)i, s_bench_scene_names[i]);
+        return argc < 2 ? -RT_EINVAL : RT_EOK;
+    }
+    scene = strtoul(argv[1], &end, 10);
+    if (end == argv[1] || *end != '\0' || scene >= FT_BENCH_SCENE_COUNT)
+        return -RT_EINVAL;
+    lv_lock();
+    result = lv_async_call(benchmark_scene_async_cb,
+                           (void *)(uintptr_t)(scene + 1U));
+    lv_unlock();
+    if (result != LV_RESULT_OK) return -RT_ENOMEM;
+    rt_kprintf("[UI-SCENE] queued id=%lu name=%s\n", scene,
+               s_bench_scene_names[scene]);
+    return RT_EOK;
+}
+MSH_CMD_EXPORT(feather_ui_scene,
+               Select one repeatable UI performance scene; use list for IDs.);
+
+static void tile_preview_async_cb(void *user_data)
+{
+    uintptr_t request = (uintptr_t)user_data;
+    if (request == 0U)
+        ft_tiles_exit_edit();
+    else if (!ft_tiles_preview_edit((size_t)(request - 1U)))
+        rt_kprintf("FeatherTalk UI: tile preview index is unavailable\n");
+}
+
+static int feather_ui_tile_preview(int argc, char **argv)
+{
+    uintptr_t request;
+    lv_result_t result;
+
+    if (!s_ui_initialized) return -RT_ERROR;
+    if (argc < 2)
+    {
+        rt_kprintf("usage: feather_ui_tile_preview <index|off>\n");
+        return -RT_EINVAL;
+    }
+    if (strcmp(argv[1], "off") == 0)
+        request = 0U;
+    else
+    {
+        char *end = RT_NULL;
+        unsigned long index = strtoul(argv[1], &end, 10);
+        if (end == argv[1] || *end != '\0') return -RT_EINVAL;
+        request = (uintptr_t)index + 1U;
+    }
+
+    lv_lock();
+    result = lv_async_call(tile_preview_async_cb, (void *)request);
+    lv_unlock();
+    if (result != LV_RESULT_OK) return -RT_ENOMEM;
+    rt_kprintf("FeatherTalk UI: tile edit preview queued\n");
+    return RT_EOK;
+}
+MSH_CMD_EXPORT(feather_ui_tile_preview,
+               Preview or close Tile edit animation without synthetic storage tests.);
+
 static int feather_ui_status(void)
 {
     const ft_ui_preferences_t *preferences = ft_preferences_get();
@@ -2241,6 +2469,18 @@ static int feather_ui_status(void)
     return 0;
 }
 MSH_CMD_EXPORT(feather_ui_status, Show FeatherTalk M55 UI shell status);
+static int feather_ui_bench(void)
+{
+    int result;
+    if (!s_ui_initialized) return -RT_ERROR;
+    result = ft_metrics_bench_request(60U);
+    if (result == RT_EOK)
+        rt_kprintf("FeatherTalk UI: queued 60-frame full-screen GPU benchmark\n");
+    else
+        rt_kprintf("FeatherTalk UI: benchmark request failed (%d)\n", result);
+    return result;
+}
+MSH_CMD_EXPORT(feather_ui_bench, Run a repeatable 60-frame full-screen GPU benchmark);
 #ifdef FEATHERTALK_UI_TEST_MODE
 static int feather_ui_notification_preview(void)
 {

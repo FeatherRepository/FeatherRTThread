@@ -18,6 +18,22 @@ extern "C" {
 
 #if LV_USE_DRAW_VG_LITE
 
+/*
+ * Uploaded paths use the VG-Lite CALL opcode.  PSE84 validation proved that
+ * CALL/RETURN is reliable when the uploaded DATA payload has an explicit END
+ * before RETURN; the driver now enforces that invariant for fill and stroke
+ * streams.  Diagnostic builds can still override this value.
+ */
+#ifndef LV_VG_LITE_USE_PATH_UPLOAD
+#define LV_VG_LITE_USE_PATH_UPLOAD 1
+#endif
+
+/* GC265 fill/font CALL streams are validated.  Flattened stroke CALL output
+ * is kept independent until its pixel result matches the inline path. */
+#ifndef LV_VG_LITE_USE_STROKE_UPLOAD
+#define LV_VG_LITE_USE_STROKE_UPLOAD 0
+#endif
+
 /*********************
  *      DEFINES
  *********************/
@@ -40,6 +56,13 @@ void lv_vg_lite_path_init(lv_draw_vg_lite_unit_t * unit);
 void lv_vg_lite_path_deinit(lv_draw_vg_lite_unit_t * unit);
 
 lv_vg_lite_path_t * lv_vg_lite_path_create(vg_lite_format_t data_format);
+
+/** Wrap an immutable, already encoded VG-Lite path stream without copying it. */
+lv_vg_lite_path_t * lv_vg_lite_path_create_static(vg_lite_format_t data_format,
+                                                   vg_lite_quality_t quality,
+                                                   const void * path_data,
+                                                   uint32_t path_length,
+                                                   const float bounds[4]);
 
 void lv_vg_lite_path_destroy(lv_vg_lite_path_t * path);
 
@@ -84,6 +107,10 @@ void lv_vg_lite_path_close(lv_vg_lite_path_t * path);
 
 void lv_vg_lite_path_end(lv_vg_lite_path_t * path);
 
+vg_lite_error_t lv_vg_lite_path_upload(lv_vg_lite_path_t * path);
+
+vg_lite_error_t lv_vg_lite_path_upload_stroke(lv_vg_lite_path_t * path);
+
 void lv_vg_lite_path_append_rect(lv_vg_lite_path_t * path,
                                  float x, float y,
                                  float w, float h,
@@ -110,6 +137,16 @@ void lv_vg_lite_path_append_path(lv_vg_lite_path_t * dest, const lv_vg_lite_path
 uint8_t lv_vg_lite_vlc_op_arg_len(uint8_t vlc_op);
 
 uint8_t lv_vg_lite_path_format_len(vg_lite_format_t format);
+
+/** Prepare and retain the native uploaded form of an immutable LVGL path. */
+lv_vg_lite_path_t * lv_draw_vg_lite_vector_path_prepare(const lv_vector_path_t * path,
+                                                         bool add_end, float bounds[4]);
+
+/** Bind an offline-generated native path to an immutable LVGL vector path. */
+bool lv_draw_vg_lite_vector_path_attach_native(lv_vector_path_t * path,
+                                               bool add_end,
+                                               lv_vg_lite_path_t * native_path,
+                                               const float bounds[4]);
 
 void lv_vg_lite_path_for_each_data(const vg_lite_path_t * path, lv_vg_lite_path_iter_cb_t cb, void * user_data);
 

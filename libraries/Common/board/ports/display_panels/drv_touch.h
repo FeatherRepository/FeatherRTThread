@@ -86,5 +86,6 @@ typedef struct
 int rt_hw_ST7102_init(const char *name, struct rt_touch_config *cfg);
 int rt_hw_ST7102_port(void);
 rt_err_t ST7102_get_single_touch(rt_int16_t *touch_x, rt_int16_t *touch_y);
+rt_err_t ST7102_get_resolution(rt_uint16_t *width, rt_uint16_t *height);
 void ST7102_get_diagnostics(st7102_touch_diagnostics_t *diagnostics);
 #endif

@@ -112,10 +112,10 @@ uint16_t ft_layout_icon_size(uint16_t design_size)
 const lv_font_t *ft_layout_font(int32_t design_size)
 {
     int32_t size = ft_layout_px(design_size);
-    if (size <= 13) return &feathertalk_noto_sans_sc_12;
-    if (size <= 15) return &feathertalk_noto_sans_sc_14;
-    if (size <= 18) return &feathertalk_noto_sans_sc_16;
-    return &feathertalk_noto_sans_sc_22;
+    if (size <= 13) return &feathertalk_vector_font_12;
+    if (size <= 15) return &feathertalk_vector_font_14;
+    if (size <= 18) return &feathertalk_vector_font_16;
+    return &feathertalk_vector_font_22;
 }
 
 int32_t ft_layout_tile_width(bool wide)

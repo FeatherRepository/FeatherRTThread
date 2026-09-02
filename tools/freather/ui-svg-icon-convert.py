@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rasterize constrained FeatherTalk SVG icons into LVGL 9.2 A8 assets.
+"""Convert constrained FeatherTalk SVG icons into LVGL A8 and vector assets.
 
 The converter intentionally accepts only the small, deterministic SVG subset
 used by applications/ui/assets-src.  It has no third-party dependencies and
@@ -10,6 +10,7 @@ references instead of silently producing an incomplete icon.
 import argparse
 import math
 import re
+import struct
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -43,6 +44,10 @@ def parse_args():
     parser.add_argument("output_h", type=Path, help="generated C header")
     parser.add_argument("--sizes", default="24,32,48", help="comma-separated output sizes")
     parser.add_argument("--samples", type=int, default=4, help="supersampling grid per axis")
+    parser.add_argument("--vector-output-c", type=Path,
+                        help="optional generated vector geometry C source")
+    parser.add_argument("--vector-output-h", type=Path,
+                        help="optional generated vector geometry C header")
     return parser.parse_args()
 
 
@@ -245,7 +250,7 @@ def write_outputs(entries, output_c, output_h, sizes, source_root):
     declarations = []
     definitions = []
     total_bytes = 0
-    for path, identifier, rendered in entries:
+    for path, identifier, _view_box, _shapes, rendered in entries:
         relative = path.relative_to(source_root).as_posix()
         for size in sizes:
             symbol = f"ft_icon_asset_{identifier}_{size}"
@@ -282,6 +287,217 @@ def write_outputs(entries, output_c, output_h, sizes, source_root):
     return total_bytes
 
 
+def vector_shape(shape):
+    tag, attributes, appearance = shape
+    fill_enabled = appearance.get("fill", "black") != "none" and tag not in {"line", "polyline"}
+    stroke_enabled = appearance.get("stroke", "none") != "none"
+    flags = (1 if fill_enabled else 0) | (2 if stroke_enabled else 0)
+
+    if tag in {"polyline", "polygon"}:
+        vertices = points(attributes.get("points"))
+        shape_type = 1 if tag == "polyline" else 2
+        values = (0.0, 0.0, 0.0, 0.0)
+    elif tag == "line":
+        vertices = []
+        shape_type = 0
+        values = (number(attributes.get("x1")), number(attributes.get("y1")),
+                  number(attributes.get("x2")), number(attributes.get("y2")))
+    elif tag == "rect":
+        vertices = []
+        shape_type = 3
+        values = (number(attributes.get("x")), number(attributes.get("y")),
+                  number(attributes.get("width")), number(attributes.get("height")))
+    elif tag in {"circle", "ellipse"}:
+        vertices = []
+        shape_type = 4
+        radius_x = number(attributes.get("r")) if tag == "circle" else number(attributes.get("rx"))
+        radius_y = radius_x if tag == "circle" else number(attributes.get("ry"))
+        values = (number(attributes.get("cx")), number(attributes.get("cy")),
+                  radius_x, radius_y)
+    else:
+        raise ValueError(f"unsupported vector shape: {tag}")
+
+    common_opacity = opacity(appearance.get("opacity"), 1.0)
+    if fill_enabled and common_opacity * opacity(appearance.get("fill-opacity"), 1.0) != 1.0:
+        raise ValueError("vector icons require fully opaque fill geometry")
+    if stroke_enabled and common_opacity * opacity(appearance.get("stroke-opacity"), 1.0) != 1.0:
+        raise ValueError("vector icons require fully opaque stroke geometry")
+
+    stroke_style = None
+    if stroke_enabled:
+        caps = {"butt": 0, "square": 1, "round": 2}
+        joins = {"miter": 0, "bevel": 1, "round": 2}
+        cap = appearance.get("stroke-linecap", "butt")
+        join = appearance.get("stroke-linejoin", "miter")
+        if cap not in caps or join not in joins:
+            raise ValueError(f"unsupported vector stroke style: {cap}/{join}")
+        stroke_style = (number(appearance.get("stroke-width"), 1.0), caps[cap], joins[join])
+
+    return shape_type, flags, vertices, values, stroke_style
+
+
+def c_float(value):
+    text = f"{value:.6f}".rstrip("0").rstrip(".")
+    if "." not in text:
+        text += ".0"
+    return text + "f"
+
+
+def float_word(value):
+    return struct.unpack("<I", struct.pack("<f", float(value)))[0]
+
+
+def append_native_command(words, opcode, coordinates=()):
+    words.append(opcode)
+    words.extend(float_word(value) for value in coordinates)
+
+
+def append_native_shape(words, shape_type, vertices, values):
+    if shape_type == 0:  # line
+        append_native_command(words, 0x02, values[0:2])
+        append_native_command(words, 0x04, values[2:4])
+    elif shape_type in {1, 2}:  # polyline / polygon
+        append_native_command(words, 0x02, vertices[0])
+        for vertex in vertices[1:]:
+            append_native_command(words, 0x04, vertex)
+        if shape_type == 2:
+            append_native_command(words, 0x01)
+    elif shape_type == 3:  # rect
+        x, y, width, height = values
+        append_native_command(words, 0x02, (x, y))
+        append_native_command(words, 0x04, (x + width, y))
+        append_native_command(words, 0x04, (x + width, y + height))
+        append_native_command(words, 0x04, (x, y + height))
+        append_native_command(words, 0x01)
+    elif shape_type == 4:  # ellipse
+        cx, cy, rx, ry = values
+        k = 0.55228475
+        append_native_command(words, 0x02, (cx + rx, cy))
+        append_native_command(words, 0x08,
+                              (cx + rx, cy + k * ry, cx + k * rx, cy + ry, cx, cy + ry))
+        append_native_command(words, 0x08,
+                              (cx - k * rx, cy + ry, cx - rx, cy + k * ry, cx - rx, cy))
+        append_native_command(words, 0x08,
+                              (cx - rx, cy - k * ry, cx - k * rx, cy - ry, cx, cy - ry))
+        append_native_command(words, 0x08,
+                              (cx + k * rx, cy - ry, cx + rx, cy - k * ry, cx + rx, cy))
+        append_native_command(words, 0x01)
+    else:
+        raise ValueError(f"unsupported native vector shape type: {shape_type}")
+
+
+def native_shape_bounds(shape_type, vertices, values):
+    if shape_type == 0:
+        coordinates = ((values[0], values[1]), (values[2], values[3]))
+    elif shape_type in {1, 2}:
+        coordinates = vertices
+    elif shape_type == 3:
+        x, y, width, height = values
+        coordinates = ((x, y), (x + width, y + height))
+    elif shape_type == 4:
+        cx, cy, rx, ry = values
+        coordinates = ((cx - rx, cy - ry), (cx + rx, cy + ry))
+    else:
+        raise ValueError(f"unsupported native vector shape type: {shape_type}")
+    return (min(item[0] for item in coordinates),
+            min(item[1] for item in coordinates),
+            max(item[0] for item in coordinates),
+            max(item[1] for item in coordinates))
+
+
+def union_bounds(current, addition):
+    if current is None:
+        return addition
+    return (min(current[0], addition[0]), min(current[1], addition[1]),
+            max(current[2], addition[2]), max(current[3], addition[3]))
+
+
+def format_words(values):
+    lines = []
+    for offset in range(0, len(values), 8):
+        rows = ", ".join(f"0x{value:08x}U" for value in values[offset:offset + 8])
+        lines.append(f"    {rows},")
+    return "\n".join(lines)
+
+
+def write_vector_outputs(entries, output_c, output_h, source_root):
+    declarations = []
+    definitions = []
+    for path, identifier, view_box, shapes, _rendered in entries:
+        relative = path.relative_to(source_root).as_posix()
+        fill_words = []
+        stroke_words = []
+        fill_bounds = None
+        stroke_bounds = None
+        stroke_styles = set()
+        for shape in shapes:
+            shape_type, flags, vertices, values, stroke_style = vector_shape(shape)
+            if stroke_style is not None:
+                stroke_styles.add(stroke_style)
+            if flags & 1:
+                append_native_shape(fill_words, shape_type, vertices, values)
+                fill_bounds = union_bounds(
+                    fill_bounds, native_shape_bounds(shape_type, vertices, values))
+            if flags & 2:
+                append_native_shape(stroke_words, shape_type, vertices, values)
+                stroke_bounds = union_bounds(
+                    stroke_bounds, native_shape_bounds(shape_type, vertices, values))
+
+        if len(stroke_styles) > 1:
+            raise ValueError(f"{path.name} uses multiple stroke styles; split the asset first")
+        stroke_width, stroke_cap, stroke_join = next(iter(stroke_styles), (0.0, 0, 0))
+        if fill_words:
+            fill_words.append(0x00)  # VG-Lite END for a filled compound path.
+        fill_symbol = f"ft_icon_vector_{identifier}_fill_path"
+        stroke_symbol = f"ft_icon_vector_{identifier}_stroke_path"
+        asset_symbol = f"ft_icon_vector_{identifier}"
+        arrays = []
+        if fill_words:
+            arrays.append(
+                f"static const uint32_t {fill_symbol}[] = {{\n{format_words(fill_words)}\n}};\n")
+        if stroke_words:
+            arrays.append(
+                f"static const uint32_t {stroke_symbol}[] = {{\n{format_words(stroke_words)}\n}};\n")
+        definitions.append(
+            f"/* Source: {relative} */\n"
+            "\n".join(arrays) +
+            f"const ft_icon_vector_asset_t {asset_symbol} = {{\n"
+            f"    {fill_symbol if fill_words else '0'}, {len(fill_words) * 4}U,\n"
+            f"    {stroke_symbol if stroke_words else '0'}, {len(stroke_words) * 4}U,\n"
+            f"    {', '.join(c_float(value) for value in (fill_bounds or (0, 0, 0, 0)))},\n"
+            f"    {', '.join(c_float(value) for value in (stroke_bounds or (0, 0, 0, 0)))},\n"
+            f"    {c_float(view_box[0])}, {c_float(view_box[1])}, "
+            f"{c_float(view_box[2])}, {c_float(view_box[3])},\n"
+            f"    {c_float(stroke_width)}, {stroke_cap}U, {stroke_join}U,\n"
+            "};\n")
+        declarations.append(f"extern const ft_icon_vector_asset_t {asset_symbol};")
+
+    guard = "FEATHERTALK_ICON_VECTOR_ASSETS_H"
+    header = (
+        "/* Generated by tools/freather/ui-svg-icon-convert.py. Do not edit. */\n"
+        f"#ifndef {guard}\n#define {guard}\n\n#include <stdint.h>\n\n"
+        "typedef struct {\n"
+        "    const uint32_t *fill_path;\n    uint32_t fill_path_bytes;\n"
+        "    const uint32_t *stroke_path;\n    uint32_t stroke_path_bytes;\n"
+        "    float fill_min_x;\n    float fill_min_y;\n"
+        "    float fill_max_x;\n    float fill_max_y;\n"
+        "    float stroke_min_x;\n    float stroke_min_y;\n"
+        "    float stroke_max_x;\n    float stroke_max_y;\n"
+        "    float view_x;\n    float view_y;\n    float view_w;\n    float view_h;\n"
+        "    float stroke_width;\n    uint8_t stroke_cap;\n    uint8_t stroke_join;\n"
+        "} ft_icon_vector_asset_t;\n\n" +
+        "\n".join(declarations) +
+        f"\n\n#endif /* {guard} */\n")
+    source = (
+        "/* Generated by tools/freather/ui-svg-icon-convert.py. Do not edit. */\n"
+        "#include \"feathertalk_icon_vector_assets.h\"\n\n" +
+        "\n".join(definitions))
+    output_c.parent.mkdir(parents=True, exist_ok=True)
+    output_h.parent.mkdir(parents=True, exist_ok=True)
+    output_c.write_text(source, encoding="utf-8", newline="\n")
+    output_h.write_text(header, encoding="utf-8", newline="\n")
+
+
 def main():
     args = parse_args()
     try:
@@ -311,11 +527,15 @@ def main():
                     raise ValueError(f"{path.name} renders empty at {size}px")
                 if all(value == 255 for value in data):
                     raise ValueError(f"{path.name} renders fully opaque at {size}px")
-            entries.append((path, identifier, rendered))
+            entries.append((path, identifier, view_box, shapes, rendered))
     except (OSError, ET.ParseError, ValueError) as error:
         raise SystemExit(f"SVG conversion failed: {error}") from error
 
     total_bytes = write_outputs(entries, args.output_c, args.output_h, sizes, args.input)
+    if bool(args.vector_output_c) != bool(args.vector_output_h):
+        raise SystemExit("--vector-output-c and --vector-output-h must be used together")
+    if args.vector_output_c:
+        write_vector_outputs(entries, args.vector_output_c, args.vector_output_h, args.input)
     print(f"Generated {len(entries)} icons x {len(sizes)} sizes, {total_bytes} A8 bytes")
 
 

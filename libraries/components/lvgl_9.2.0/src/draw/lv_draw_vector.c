@@ -52,11 +52,21 @@
 typedef struct {
     lv_vector_path_t * path;
     lv_vector_draw_dsc_t dsc;
+    bool owns_path;
 } lv_vector_draw_task;
 
 /**********************
  *  STATIC PROTOTYPES
  **********************/
+
+static void path_invalidate_backend(lv_vector_path_t * path)
+{
+    if(path->backend_data && path->backend_data_free_cb) {
+        path->backend_data_free_cb(path->backend_data);
+    }
+    path->backend_data = NULL;
+    path->backend_data_free_cb = NULL;
+}
 
 static void _copy_draw_dsc(lv_vector_draw_dsc_t * dst, const lv_vector_draw_dsc_t * src)
 {
@@ -97,6 +107,8 @@ void lv_matrix_transform_point(const lv_matrix_t * matrix, lv_fpoint_t * point)
 
 void lv_matrix_transform_path(const lv_matrix_t * matrix, lv_vector_path_t * path)
 {
+    path_invalidate_backend(path);
+    path->immutable = false;
     lv_fpoint_t * pt = lv_array_front(&path->points);
     uint32_t size = lv_array_size(&path->points);
     for(uint32_t i = 0; i < size; i++) {
@@ -118,6 +130,8 @@ lv_vector_path_t * lv_vector_path_create(lv_vector_path_quality_t quality)
 
 void lv_vector_path_copy(lv_vector_path_t * target_path, const lv_vector_path_t * path)
 {
+    path_invalidate_backend(target_path);
+    target_path->immutable = false;
     target_path->quality = path->quality;
     lv_array_copy(&target_path->ops, &path->ops);
     lv_array_copy(&target_path->points, &path->points);
@@ -125,19 +139,30 @@ void lv_vector_path_copy(lv_vector_path_t * target_path, const lv_vector_path_t 
 
 void lv_vector_path_clear(lv_vector_path_t * path)
 {
+    path_invalidate_backend(path);
+    path->immutable = false;
     lv_array_clear(&path->ops);
     lv_array_clear(&path->points);
 }
 
 void lv_vector_path_delete(lv_vector_path_t * path)
 {
+    path_invalidate_backend(path);
     lv_array_deinit(&path->ops);
     lv_array_deinit(&path->points);
     lv_free(path);
 }
 
+void lv_vector_path_set_immutable(lv_vector_path_t * path)
+{
+    LV_ASSERT_NULL(path);
+    path->immutable = true;
+}
+
 void lv_vector_path_move_to(lv_vector_path_t * path, const lv_fpoint_t * p)
 {
+    path_invalidate_backend(path);
+    path->immutable = false;
     CHECK_AND_RESIZE_PATH_CONTAINER(path, 1);
 
     lv_vector_path_op_t op = LV_VECTOR_PATH_OP_MOVE_TO;
@@ -152,6 +177,8 @@ void lv_vector_path_line_to(lv_vector_path_t * path, const lv_fpoint_t * p)
         return;
     }
 
+    path_invalidate_backend(path);
+    path->immutable = false;
     CHECK_AND_RESIZE_PATH_CONTAINER(path, 1);
 
     lv_vector_path_op_t op = LV_VECTOR_PATH_OP_LINE_TO;
@@ -166,6 +193,8 @@ void lv_vector_path_quad_to(lv_vector_path_t * path, const lv_fpoint_t * p1, con
         return;
     }
 
+    path_invalidate_backend(path);
+    path->immutable = false;
     CHECK_AND_RESIZE_PATH_CONTAINER(path, 2);
 
     lv_vector_path_op_t op = LV_VECTOR_PATH_OP_QUAD_TO;
@@ -182,6 +211,8 @@ void lv_vector_path_cubic_to(lv_vector_path_t * path, const lv_fpoint_t * p1, co
         return;
     }
 
+    path_invalidate_backend(path);
+    path->immutable = false;
     CHECK_AND_RESIZE_PATH_CONTAINER(path, 3);
 
     lv_vector_path_op_t op = LV_VECTOR_PATH_OP_CUBIC_TO;
@@ -198,6 +229,8 @@ void lv_vector_path_close(lv_vector_path_t * path)
         return;
     }
 
+    path_invalidate_backend(path);
+    path->immutable = false;
     CHECK_AND_RESIZE_PATH_CONTAINER(path, 1);
 
     lv_vector_path_op_t op = LV_VECTOR_PATH_OP_CLOSE;
@@ -452,6 +485,8 @@ void lv_vector_path_append_arc(lv_vector_path_t * path, const lv_fpoint_t * c, f
 
 void lv_vector_path_append_path(lv_vector_path_t * path, const lv_vector_path_t * subpath)
 {
+    path_invalidate_backend(path);
+    path->immutable = false;
     uint32_t ops_size = lv_array_size(&path->ops);
     uint32_t nops_size = lv_array_size(&subpath->ops);
     uint32_t point_size = lv_array_size(&path->points);
@@ -709,10 +744,58 @@ void lv_vector_dsc_add_path(lv_vector_dsc_t * dsc, const lv_vector_path_t * path
     lv_memset(new_task, 0, sizeof(lv_vector_draw_task));
 
     new_task->path = lv_vector_path_create(0);
+    new_task->owns_path = true;
 
     _copy_draw_dsc(&(new_task->dsc), &(dsc->current_dsc));
     lv_vector_path_copy(new_task->path, path);
     new_task->dsc.scissor_area = rect;
+}
+
+void lv_vector_dsc_add_path_static(lv_vector_dsc_t * dsc, lv_vector_path_t * path)
+{
+    lv_area_t rect;
+    if(!lv_area_intersect(&rect, &(dsc->layer->_clip_area), &(dsc->current_dsc.scissor_area))) {
+        return;
+    }
+
+    if(dsc->current_dsc.fill_dsc.opa == 0
+       && dsc->current_dsc.stroke_dsc.opa == 0) {
+        return;
+    }
+
+    if(!dsc->tasks.task_list) {
+        dsc->tasks.task_list = lv_malloc(sizeof(lv_ll_t));
+        LV_ASSERT_MALLOC(dsc->tasks.task_list);
+        lv_ll_init(dsc->tasks.task_list, sizeof(lv_vector_draw_task));
+    }
+
+    lv_vector_draw_task * new_task = (lv_vector_draw_task *)lv_ll_ins_tail(dsc->tasks.task_list);
+    lv_memset(new_task, 0, sizeof(lv_vector_draw_task));
+
+    path->immutable = true;
+    new_task->path = path;
+    new_task->owns_path = false;
+    _copy_draw_dsc(&(new_task->dsc), &(dsc->current_dsc));
+    new_task->dsc.scissor_area = rect;
+}
+
+bool lv_vector_path_is_immutable(const lv_vector_path_t * path)
+{
+    return path != NULL && path->immutable;
+}
+
+void * lv_vector_path_get_backend_data(const lv_vector_path_t * path)
+{
+    return path ? path->backend_data : NULL;
+}
+
+void lv_vector_path_set_backend_data(lv_vector_path_t * path, void * data,
+                                     void (*free_cb)(void * data))
+{
+    LV_ASSERT_NULL(path);
+    if(path->backend_data != data) path_invalidate_backend(path);
+    path->backend_data = data;
+    path->backend_data_free_cb = free_cb;
 }
 
 void lv_vector_clear_area(lv_vector_dsc_t * dsc, const lv_area_t * rect)
@@ -791,7 +874,7 @@ void lv_vector_for_each_destroy_tasks(lv_ll_t * task_list, vector_draw_task_cb c
             cb(data, task->path, &(task->dsc));
         }
 
-        if(task->path) {
+        if(task->path && task->owns_path) {
             lv_vector_path_delete(task->path);
         }
         lv_array_deinit(&(task->dsc.stroke_dsc.dash_pattern));

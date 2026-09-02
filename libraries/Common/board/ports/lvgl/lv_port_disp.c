@@ -17,6 +17,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include "cy_graphics.h"
+#include "drv_lcd.h"
 
 
 /*******************************************************************************
@@ -40,13 +41,19 @@
 #define LVGL_DRAW_BUF_LINES LVGL_DRAW_BUF_REQUESTED_LINES
 #endif
 
+#ifndef FEATHERTALK_USING_LVGL_GPU_BATCH
 #define LVGL_DRAW_BUF_SIZE (MY_DISP_HOR_RES * LVGL_DRAW_BUF_LINES * 2U)
-
 CY_SECTION(".cy_gpu_buf") LV_ATTRIBUTE_MEM_ALIGN uint8_t disp_buf1[LVGL_DRAW_BUF_SIZE];
 CY_SECTION(".cy_gpu_buf") LV_ATTRIBUTE_MEM_ALIGN uint8_t disp_buf2[LVGL_DRAW_BUF_SIZE];
 /* Frame buffers used by GFXSS to render UI */
 void *frame_buffer1 = &disp_buf1;
 void *frame_buffer2 = &disp_buf2;
+#else
+static lv_draw_buf_t disp_draw_buf1;
+static lv_draw_buf_t disp_draw_buf2;
+void *frame_buffer1;
+void *frame_buffer2;
+#endif
 
 cy_stc_gfx_context_t gfx_context;
 
@@ -75,6 +82,13 @@ extern void lcd_flush_rgb565_area(const void *pixels, uint32_t x, uint32_t y,
 static void LV_ATTRIBUTE_FAST_MEM disp_flush(lv_display_t *disp_drv, const lv_area_t *area,
         uint8_t *color_p)
 {
+#ifdef FEATHERTALK_USING_LVGL_GPU_BATCH
+    (void)area;
+    if (lcd_gpu_surface_present_async(color_p) != RT_EOK)
+    {
+        rt_kprintf("LVGL direct scanout rejected framebuffer %p\n", color_p);
+    }
+#else
     uint32_t x = (uint32_t)area->x1;
     uint32_t y = (uint32_t)area->y1;
     uint32_t width = (uint32_t)(area->x2 - area->x1 + 1);
@@ -83,6 +97,7 @@ static void LV_ATTRIBUTE_FAST_MEM disp_flush(lv_display_t *disp_drv, const lv_ar
 
     lcd_flush_rgb565_area(color_p, x, y, width, height, src_stride,
                           lv_display_flush_is_last(disp_drv) ? RT_TRUE : RT_FALSE);
+#endif
 
     /* Inform the graphics library that you are ready with the flushing */
     lv_display_flush_ready(disp_drv);
@@ -127,8 +142,13 @@ static void LV_ATTRIBUTE_FAST_MEM disp_flush(lv_display_t *disp_drv, const lv_ar
 *******************************************************************************/
 void lv_port_disp_init(void)
 {
+#ifndef FEATHERTALK_USING_LVGL_GPU_BATCH
     memset(disp_buf1, 0, sizeof(disp_buf1));
     memset(disp_buf2, 0, sizeof(disp_buf2));
+#else
+    lcd_gpu_surface_info_t surface_info;
+    uint32_t surface_bytes;
+#endif
 
     lv_display_t *disp = lv_display_create(MY_DISP_HOR_RES, MY_DISP_VER_RES);
 
@@ -136,8 +156,33 @@ void lv_port_disp_init(void)
 
     lv_tick_set_cb(&rt_tick_get_millisecond);
 
+#ifdef FEATHERTALK_USING_LVGL_GPU_BATCH
+    RT_ASSERT(lcd_gpu_surface_get_info(&surface_info) == RT_EOK);
+    RT_ASSERT(surface_info.width == MY_DISP_HOR_RES);
+    RT_ASSERT(surface_info.height == MY_DISP_VER_RES);
+    RT_ASSERT(surface_info.framebuffer_count >= 2U);
+    frame_buffer1 = lcd_gpu_surface_get(0U);
+    frame_buffer2 = lcd_gpu_surface_get(1U);
+    RT_ASSERT(frame_buffer1 != RT_NULL && frame_buffer2 != RT_NULL);
+    surface_bytes = (uint32_t)surface_info.stride_pixels * surface_info.height * sizeof(uint16_t);
+    /* The LCD driver owns and initializes both scanout surfaces before LVGL
+     * starts.  Do not memset them here: cached CPU writes made after the GPU
+     * has taken ownership can be evicted later and overwrite freshly rendered
+     * pixels.  FULL mode repaints every visible pixel before presentation. */
+    RT_ASSERT(lv_draw_buf_init(&disp_draw_buf1, surface_info.width, surface_info.height,
+                              LV_COLOR_FORMAT_RGB565,
+                              (uint32_t)surface_info.stride_pixels * sizeof(uint16_t),
+                              frame_buffer1, surface_bytes) == LV_RESULT_OK);
+    RT_ASSERT(lv_draw_buf_init(&disp_draw_buf2, surface_info.width, surface_info.height,
+                              LV_COLOR_FORMAT_RGB565,
+                              (uint32_t)surface_info.stride_pixels * sizeof(uint16_t),
+                              frame_buffer2, surface_bytes) == LV_RESULT_OK);
+    lv_display_set_draw_buffers(disp, &disp_draw_buf1, &disp_draw_buf2);
+    lv_display_set_render_mode(disp, LV_DISPLAY_RENDER_MODE_FULL);
+#else
     lv_display_set_buffers(disp, disp_buf1, disp_buf2, sizeof(disp_buf1),
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
+#endif
 
     // lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_270);
 }

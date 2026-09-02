@@ -4,7 +4,13 @@ import os
 
 cwd = GetCurrentDir()
 generated_path = os.path.join(cwd, 'assets', 'generated')
-src = Glob('*.c') + Glob(os.path.join('assets', 'generated', '*.c'))
+generated_src = Glob(os.path.join('assets', 'generated', '*.c'))
+# The product shell uses the canonical offline VG-Lite outline font.  Keep the
+# older per-size A8 sources in the tree only as migration artifacts; compiling
+# them makes it too easy for a page to silently reintroduce the bitmap path.
+generated_src = [item for item in generated_src
+                 if not os.path.basename(str(item)).startswith('feathertalk_noto_sans_sc_')]
+src = Glob('*.c') + generated_src
 applications_path = os.path.normpath(os.path.join(cwd, '..'))
 
 group = DefineGroup('FeatherTalk UI', src,

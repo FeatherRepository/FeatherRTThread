@@ -4937,6 +4937,50 @@ static lv_obj_t *create_about_page(lv_obj_t *parent)
                             FT_ICON_ABOUT, text);
 }
 
+bool ft_pages_benchmark_set_keyboard_visible(bool visible)
+{
+    ft_page_id_t page = ft_router_current_page();
+
+    if (page == FT_PAGE_SEARCH && s_search_keyboard_tray != RT_NULL &&
+        lv_obj_is_valid(s_search_keyboard_tray))
+    {
+        search_keyboard_set_visible(visible);
+        return true;
+    }
+    if (page == FT_PAGE_SETTINGS && s_settings_keyboard_tray != RT_NULL &&
+        lv_obj_is_valid(s_settings_keyboard_tray))
+    {
+        settings_keyboard_set_visible(visible);
+        return true;
+    }
+    return false;
+}
+
+bool ft_pages_benchmark_set_media_playing(bool playing)
+{
+    if (ft_router_current_page() != FT_PAGE_MEDIA || s_media_button == RT_NULL ||
+        !lv_obj_is_valid(s_media_button)) return false;
+    if (s_media_playing != playing)
+        (void)lv_obj_send_event(s_media_button, LV_EVENT_CLICKED, RT_NULL);
+    return s_media_playing == playing;
+}
+
+bool ft_pages_benchmark_open_file_action(void)
+{
+    const ft_ui_preferences_t *preferences;
+    const char *path;
+    const char *name;
+
+    if (ft_router_current_page() != FT_PAGE_FILES) return false;
+    preferences = ft_preferences_get();
+    path = preferences->wallpaper_path[0] != '\0' ?
+           preferences->wallpaper_path : FT_STORAGE_FLASH_MOUNT_PATH "/Pictures/02.jpg";
+    name = strrchr(path, '/');
+    name = name != RT_NULL && name[1] != '\0' ? name + 1 : path;
+    files_show_action_menu(name, path, false, false);
+    return s_files_action_box != RT_NULL && lv_obj_is_valid(s_files_action_box);
+}
+
 #ifdef FEATHERTALK_UI_TEST_MODE
 bool ft_pages_test_icon_assignments_unique(void)
 {

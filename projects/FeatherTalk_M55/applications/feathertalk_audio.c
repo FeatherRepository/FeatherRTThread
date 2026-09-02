@@ -12,6 +12,31 @@
 #define FT_AUDIO_INPUT_DEVICE  "mic0"
 #define FT_AUDIO_INPUT_GAIN_MAX 75U
 
+/* These are driver capabilities, not UI choices.  Keeping the table beside
+ * sound0's adapter gives every consumer (local settings, UAC and MSH) the
+ * same source of truth when the codec/TDM implementation changes. */
+static const uint32_t s_output_sample_rates[] = {16000U, 24000U, 48000U, 96000U};
+static const uint8_t s_output_sample_bits[] = {16U, 24U};
+static const uint8_t s_output_channels[] = {1U, 2U};
+
+static void audio_fill_output_capabilities(ft_audio_status_t *status)
+{
+    status->output_volume_max = AUDIO_VOLUME_MAX;
+    status->input_gain_max = FT_AUDIO_INPUT_GAIN_MAX;
+    status->output_sample_rate_count =
+        (uint8_t)(sizeof(s_output_sample_rates) / sizeof(s_output_sample_rates[0]));
+    status->output_sample_bits_count =
+        (uint8_t)(sizeof(s_output_sample_bits) / sizeof(s_output_sample_bits[0]));
+    status->output_channel_count =
+        (uint8_t)(sizeof(s_output_channels) / sizeof(s_output_channels[0]));
+    memcpy(status->output_sample_rates, s_output_sample_rates,
+           sizeof(s_output_sample_rates));
+    memcpy(status->output_sample_bits_supported, s_output_sample_bits,
+           sizeof(s_output_sample_bits));
+    memcpy(status->output_channels_supported, s_output_channels,
+           sizeof(s_output_channels));
+}
+
 static int audio_get_caps(rt_device_t device, int main_type,
                           struct rt_audio_caps *caps)
 {
@@ -61,6 +86,7 @@ int ft_audio_get_status(ft_audio_status_t *status)
 
     if (status == RT_NULL) return -RT_EINVAL;
     memset(status, 0, sizeof(*status));
+    audio_fill_output_capabilities(status);
     status->analog_input_supported = false;
 
     output = rt_device_find(FT_AUDIO_OUTPUT_DEVICE);
@@ -134,10 +160,17 @@ bool ft_audio_output_format_supported(uint32_t sample_rate,
                                       uint8_t sample_bits,
                                       uint8_t channels)
 {
-    bool rate_supported = sample_rate == 16000U || sample_rate == 24000U ||
-                          sample_rate == 48000U || sample_rate == 96000U;
-    return rate_supported && (sample_bits == 16U || sample_bits == 24U) &&
-           (channels == 1U || channels == 2U);
+    size_t i;
+    bool rate_supported = false;
+    bool bits_supported = false;
+    bool channels_supported = false;
+    for (i = 0U; i < sizeof(s_output_sample_rates) / sizeof(s_output_sample_rates[0]); i++)
+        if (s_output_sample_rates[i] == sample_rate) rate_supported = true;
+    for (i = 0U; i < sizeof(s_output_sample_bits) / sizeof(s_output_sample_bits[0]); i++)
+        if (s_output_sample_bits[i] == sample_bits) bits_supported = true;
+    for (i = 0U; i < sizeof(s_output_channels) / sizeof(s_output_channels[0]); i++)
+        if (s_output_channels[i] == channels) channels_supported = true;
+    return rate_supported && bits_supported && channels_supported;
 }
 
 int ft_audio_set_output_format(uint32_t sample_rate, uint8_t sample_bits,

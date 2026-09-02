@@ -32,6 +32,21 @@
 #define CDMIN(x, y) ((x) > (y) ? (y) : (x))
 #define CDMAX(x, y) ((x) > (y) ? (x) : (y))
 
+/*
+ * Uploaded paths are command streams read directly by GC355.  Some ports map
+ * the VG-Lite heap as cacheable memory, but the generic driver deliberately
+ * has no dependency on a particular CPU/cache API.  Keep a weak no-op here
+ * and let the platform provide the cache-maintenance implementation.
+ */
+#if defined(__GNUC__)
+__attribute__((weak))
+#endif
+void vg_lite_uploaded_path_cache_clean(const void *memory, vg_lite_uint32_t bytes)
+{
+    (void)memory;
+    (void)bytes;
+}
+
 
 extern uint32_t transform(vg_lite_point_t* result, vg_lite_float_t x, vg_lite_float_t y, vg_lite_matrix_t* matrix);
 extern uint32_t convert_blend(vg_lite_blend_t blend);
@@ -290,6 +305,17 @@ vg_lite_error_t vg_lite_clear_path(vg_lite_path_t* path)
 
 #if gcFEATURE_VG_STROKE_PATH
     if (path->stroke) {
+        if (path->stroke->uploaded.handle != NULL) {
+            vg_lite_kernel_free_t free_cmd;
+            free_cmd.memory_handle = path->stroke->uploaded.handle;
+            error = vg_lite_kernel(VG_LITE_FREE, &free_cmd);
+            if (error != VG_LITE_SUCCESS)
+                return error;
+            path->stroke->uploaded.address = 0;
+            path->stroke->uploaded.bytes = 0;
+            path->stroke->uploaded.handle = NULL;
+            path->stroke->uploaded.memory = NULL;
+        }
         if (path->stroke->path_list_divide) {
             vg_lite_path_list_ptr cur_list;
             while (path->stroke->path_list_divide) {
@@ -351,12 +377,25 @@ vg_lite_error_t vg_lite_upload_path(vg_lite_path_t * path)
 
     vg_lite_error_t error = VG_LITE_SUCCESS;
     uint32_t bytes;
+    uint32_t payload_bytes;
+    const uint32_t end_opcode = VLC_OP_END;
     vg_lite_buffer_t Buf, *buffer;
 
+    if (path == NULL || path->path == NULL || path->path_length == 0)
+        return VG_LITE_INVALID_ARGUMENT;
+    if (path->uploaded.handle != NULL)
+        return VG_LITE_SUCCESS;
+
+    memset(&Buf, 0, sizeof(Buf));
     buffer = &Buf;
 
-    /* Compute the number of bytes required for path + command buffer prefix/postfix. */
-    bytes = (8 + path->path_length + 7 + 8) & ~7;
+    /* CLOSE only closes the current contour; it does not terminate a path
+     * stream.  Append an explicit zero/END word before RETURN.  Without this,
+     * a 64-bit-aligned stream ending in CLOSE makes GC265 parse RETURN as path
+     * data and stall.  Four zero bytes are safe END padding for every path
+     * data format supported here. */
+    payload_bytes = path->path_length + sizeof(uint32_t);
+    bytes = 8 + ((payload_bytes + 7) & ~7) + 8;
 
     /* Allocate GPU memory. */
     buffer->width  = bytes;
@@ -365,19 +404,28 @@ vg_lite_error_t vg_lite_upload_path(vg_lite_path_t * path)
     buffer->format = VG_LITE_A8;
     VG_LITE_RETURN_ERROR(vg_lite_allocate(buffer));
 
+    /* DATA payload length is rounded to 64-bit command words.  GC355 still
+     * fetches the padded bytes after the path's END opcode, so they must be
+     * deterministic NOP/END bytes rather than stale heap contents. */
+    memset(buffer->memory, 0, bytes);
+
     /* Initialize command buffer prefix. */
-    ((uint32_t *) buffer->memory)[0] = VG_LITE_DATA((path->path_length + 7) / 8);
+    ((uint32_t *) buffer->memory)[0] = VG_LITE_DATA((payload_bytes + 7) / 8);
     ((uint32_t *) buffer->memory)[1] = 0;
     
     /* Copy the path data. */
     memcpy((uint32_t *) buffer->memory + 2, path->path, path->path_length);
+    memcpy((uint8_t *)buffer->memory + 8 + path->path_length,
+           &end_opcode, sizeof(end_opcode));
 
     /* Initialize command buffer postfix. */
     ((uint32_t *) buffer->memory)[(bytes >> 2) - 2] = VG_LITE_RETURN();
     ((uint32_t *) buffer->memory)[(bytes >> 2) - 1] = 0;
 
+    /* The GC355 fetches this stream without CPU cache snooping. */
+    vg_lite_uploaded_path_cache_clean(buffer->memory, bytes);
+
     /* Mark path as uploaded. */
-    path->path = buffer->memory;
     path->uploaded.handle = buffer->handle;
     path->uploaded.address = buffer->address;
     path->uploaded.memory = buffer->memory;
@@ -387,6 +435,56 @@ vg_lite_error_t vg_lite_upload_path(vg_lite_path_t * path)
     
     /* Return pointer to vg_lite_buffer structure. */
     return error;
+}
+
+vg_lite_error_t vg_lite_upload_stroke(vg_lite_path_t * path)
+{
+#if gcFEATURE_VG_STROKE_PATH
+    vg_lite_error_t error = VG_LITE_SUCCESS;
+    uint32_t bytes;
+    uint32_t payload_bytes;
+    const uint32_t end_opcode = VLC_OP_END;
+    vg_lite_buffer_t buffer;
+
+    if (path == NULL || path->stroke == NULL || path->stroke_path == NULL ||
+        path->stroke_size == 0)
+        return VG_LITE_INVALID_ARGUMENT;
+    if (path->stroke->uploaded.handle != NULL)
+        return VG_LITE_SUCCESS;
+
+    memset(&buffer, 0, sizeof(buffer));
+    payload_bytes = path->stroke_size + sizeof(uint32_t);
+    bytes = 8 + ((payload_bytes + 7) & ~7) + 8;
+    buffer.width = bytes;
+    buffer.height = 1;
+    buffer.stride = 0;
+    buffer.format = VG_LITE_A8;
+    VG_LITE_RETURN_ERROR(vg_lite_allocate(&buffer));
+
+    /* Match the native GC355 upload format: zero the rounded DATA payload. */
+    memset(buffer.memory, 0, bytes);
+
+    ((uint32_t *)buffer.memory)[0] = VG_LITE_DATA((payload_bytes + 7) / 8);
+    ((uint32_t *)buffer.memory)[1] = 0;
+    memcpy((uint32_t *)buffer.memory + 2, path->stroke_path, path->stroke_size);
+    memcpy((uint8_t *)buffer.memory + 8 + path->stroke_size,
+           &end_opcode, sizeof(end_opcode));
+    ((uint32_t *)buffer.memory)[(bytes >> 2) - 2] = VG_LITE_RETURN();
+    ((uint32_t *)buffer.memory)[(bytes >> 2) - 1] = 0;
+
+    /* The flattened stroke is another persistent GPU command stream. */
+    vg_lite_uploaded_path_cache_clean(buffer.memory, bytes);
+
+    path->stroke->uploaded.handle = buffer.handle;
+    path->stroke->uploaded.address = buffer.address;
+    path->stroke->uploaded.memory = buffer.memory;
+    path->stroke->uploaded.bytes = bytes;
+    VLM_PATH_STROKE_ENABLE_UPLOAD(*path);
+    return VG_LITE_SUCCESS;
+#else
+    (void)path;
+    return VG_LITE_NOT_SUPPORT;
+#endif
 }
 
 vg_lite_uint32_t vg_lite_get_path_length(vg_lite_uint8_t *cmd, vg_lite_uint32_t count, vg_lite_format_t format)

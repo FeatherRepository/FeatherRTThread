@@ -1,0 +1,15 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+src = Glob('*.c')
+ui = os.path.normpath(os.path.join(cwd, '..', 'ui'))
+usb = os.path.normpath(os.path.join(cwd, '..', '..', '..', '..',
+                                    'libraries', 'Common', 'board', 'ports', 'usb'))
+inc = [cwd, os.path.normpath(os.path.join(cwd, '..')), ui, usb]
+
+group = DefineGroup('FeatherTalk GPU UI', src,
+                    depend=['FEATHERTALK_USING_GPU_UI'],
+                    CPPPATH=inc)
+
+Return('group')

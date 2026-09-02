@@ -183,9 +183,15 @@ void ft_pages_apply_preferences(void);
 void ft_pages_apply_language(void);
 void ft_pages_update_system_status(const char *system_text, const char *metrics_text);
 void ft_pages_live_tile_update(const char *line);
+/* Read-only/visual scene controls used by the repeatable board performance
+ * sweep. They never persist preferences or modify files. */
+bool ft_pages_benchmark_set_keyboard_visible(bool visible);
+bool ft_pages_benchmark_set_media_playing(bool playing);
+bool ft_pages_benchmark_open_file_action(void);
 
 int ft_tiles_create(lv_obj_t *container, const ft_app_descriptor_t *apps, size_t count);
 void ft_tiles_exit_edit(void);
+bool ft_tiles_preview_edit(size_t index);
 void ft_tiles_apply_opacity(uint8_t global_opacity);
 void ft_tiles_set_external_text(ft_page_id_t page_id, const char *text);
 void ft_tiles_set_localized_name(ft_page_id_t page_id,
@@ -230,6 +236,7 @@ void ft_metrics_get(ft_ui_metrics_t *metrics);
 void ft_metrics_route_baseline(void);
 void ft_metrics_route_check(void);
 void ft_metrics_print_status(void);
+int ft_metrics_bench_request(uint32_t frames);
 
 #ifdef FEATHERTALK_UI_TEST_MODE
 lv_obj_t *ft_tiles_test_get_object(size_t index);

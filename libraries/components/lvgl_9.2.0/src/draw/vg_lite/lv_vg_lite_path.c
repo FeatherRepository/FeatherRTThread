@@ -38,6 +38,7 @@ struct lv_vg_lite_path_t {
     vg_lite_path_t base;
     size_t mem_size;
     uint8_t format_len;
+    bool owns_path_data;
 };
 
 typedef struct {
@@ -46,10 +47,6 @@ typedef struct {
     float max_x;
     float max_y;
 } lv_vg_lite_path_bounds_t;
-
-/**********************
- *  STATIC PROTOTYPES
- **********************/
 
 /**********************
  *  STATIC VARIABLES
@@ -84,6 +81,7 @@ lv_vg_lite_path_t * lv_vg_lite_path_create(vg_lite_format_t data_format)
     lv_vg_lite_path_t * path = lv_malloc_zeroed(sizeof(lv_vg_lite_path_t));
     LV_ASSERT_MALLOC(path);
     path->format_len = lv_vg_lite_path_format_len(data_format);
+    path->owns_path_data = true;
     LV_ASSERT(vg_lite_init_path(
                   &path->base,
                   data_format,
@@ -96,13 +94,47 @@ lv_vg_lite_path_t * lv_vg_lite_path_create(vg_lite_format_t data_format)
     return path;
 }
 
+lv_vg_lite_path_t * lv_vg_lite_path_create_static(vg_lite_format_t data_format,
+                                                   vg_lite_quality_t quality,
+                                                   const void * path_data,
+                                                   uint32_t path_length,
+                                                   const float bounds[4])
+{
+    lv_vg_lite_path_t * path;
+
+    if(path_data == NULL || path_length == 0U || bounds == NULL) return NULL;
+    path = lv_malloc_zeroed(sizeof(*path));
+    if(path == NULL) return NULL;
+    path->format_len = lv_vg_lite_path_format_len(data_format);
+    path->owns_path_data = false;
+    if(path->format_len == 0U ||
+       vg_lite_init_path(&path->base, data_format, quality, 0U, NULL,
+                         bounds[0], bounds[1], bounds[2], bounds[3]) != VG_LITE_SUCCESS) {
+        lv_free(path);
+        return NULL;
+    }
+
+    /* Avoid vg_lite_init_path()'s legacy CLOSE-to-END mutation: generated
+     * streams may intentionally be centerlines without END for stroking. */
+    path->base.path = (void *)path_data;
+    path->base.path_length = path_length;
+    path->base.path_changed = 1;
+    path->base.bounding_box[0] = bounds[0];
+    path->base.bounding_box[1] = bounds[1];
+    path->base.bounding_box[2] = bounds[2];
+    path->base.bounding_box[3] = bounds[3];
+    return path;
+}
+
 void lv_vg_lite_path_destroy(lv_vg_lite_path_t * path)
 {
     LV_PROFILER_BEGIN;
     LV_ASSERT_NULL(path);
     if(path->base.path != NULL) {
-        lv_free(path->base.path);
-        path->base.path = NULL;
+        if(path->owns_path_data) {
+            lv_free(path->base.path);
+            path->base.path = NULL;
+        }
 
         /* clear remaining path data */
         LV_VG_LITE_CHECK_ERROR(vg_lite_clear_path(&path->base));
@@ -244,6 +276,7 @@ static void lv_vg_lite_path_append_data(lv_vg_lite_path_t * path, const void * d
 {
     LV_ASSERT_NULL(path);
     LV_ASSERT_NULL(data);
+    LV_ASSERT(path->owns_path_data);
 
     if(path->base.path_length + len > path->mem_size) {
         if(path->mem_size == 0) {
@@ -328,6 +361,18 @@ void lv_vg_lite_path_end(lv_vg_lite_path_t * path)
     LV_ASSERT_NULL(path);
     lv_vg_lite_path_append_op(path, VLC_OP_END);
     path->base.add_end = 1;
+}
+
+vg_lite_error_t lv_vg_lite_path_upload(lv_vg_lite_path_t * path)
+{
+    LV_ASSERT_NULL(path);
+    return vg_lite_upload_path(&path->base);
+}
+
+vg_lite_error_t lv_vg_lite_path_upload_stroke(lv_vg_lite_path_t * path)
+{
+    LV_ASSERT_NULL(path);
+    return vg_lite_upload_stroke(&path->base);
 }
 
 void lv_vg_lite_path_append_rect(

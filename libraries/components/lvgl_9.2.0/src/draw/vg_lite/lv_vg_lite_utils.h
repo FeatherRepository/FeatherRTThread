@@ -137,6 +137,10 @@ void lv_vg_lite_image_dsc_init(struct lv_draw_vg_lite_unit_t * unit);
 
 void lv_vg_lite_image_dsc_deinit(struct lv_draw_vg_lite_unit_t * unit);
 
+void lv_vg_lite_pending_select(struct lv_draw_vg_lite_unit_t * unit, uint8_t slot);
+
+void lv_vg_lite_pending_release(struct lv_draw_vg_lite_unit_t * unit, uint8_t slot);
+
 vg_lite_blend_t lv_vg_lite_blend_mode(lv_blend_mode_t blend_mode);
 
 uint32_t lv_vg_lite_get_palette_size(vg_lite_buffer_format_t format);
@@ -178,6 +182,10 @@ void lv_vg_lite_disable_scissor(void);
 void lv_vg_lite_flush(struct lv_draw_vg_lite_unit_t * u);
 
 void lv_vg_lite_finish(struct lv_draw_vg_lite_unit_t * u);
+
+void lv_vg_lite_submit_frame(struct lv_draw_vg_lite_unit_t * u);
+
+void lv_vg_lite_wait_frame(struct lv_draw_vg_lite_unit_t * u, uint8_t pending_slot);
 
 /**********************
  *      MACROS

@@ -163,7 +163,7 @@ SECTIONS
         /* Read only code (constants) */
         *(.rodata .rodata.* .constdata .constdata.* .conststring .conststring.*)
         /* Exclude certain files from this section as they will be placed in RAM */
-        *(EXCLUDE_FILE(*cy_syslib.* *cy_syslib_ext.* *cy_smif.* *cy_smif_memnum.* *cy_smif_memslot.* *cy_smif_sfdp.* *cy_smif_hb_flash.* *mtb_hal_memoryspi.* *mtb_serial_memory.* *freertos/Source*.* *cy_clib_support*.* *cy_mutex_pool*.* *cy_time.* *cyabs_*.* *cy_worker_thread.* *cmsis*.*) .text*)
+        *(EXCLUDE_FILE(*cy_syslib.* *cy_syslib_ext.* *cy_smif.* *cy_smif_memnum.* *cy_smif_memslot.* *cy_smif_sfdp.* *cy_smif_hb_flash.* *mtb_hal_memoryspi.* *mtb_serial_memory.* *freertos/Source*.* *cy_clib_support*.* *cy_mutex_pool*.* *cy_time.* *cyabs_*.* *cy_worker_thread.* *cmsis*.* *vg_lite.o *vg_lite_path.o *vg_lite_matrix.o *lv_draw_vg_lite_*.o *lv_vg_lite_*.o *lv_refr.o *lv_draw.o *lv_draw_buf.o *lv_draw_rect.o *lv_draw_image.o *lv_draw_label.o *lv_image_decoder.o *lv_obj.o *lv_obj_draw.o *lv_obj_event.o *lv_obj_pos.o *lv_obj_style.o *lv_obj_tree.o *lv_display.o *lv_event.o *lv_area.o *lv_ll.o *lv_font.o *lv_font_fmt_txt.o *lv_text.o *lv_string_rtthread.o) .text*)
 
         . = ALIGN(4);
         /* section information for utest */
@@ -303,6 +303,43 @@ SECTIONS
         *cyabs_*.*(.text*)
         *cy_worker_thread.*(.text*)
         *cmsis*.*(.text*)
+        /* Frame-batched LVGL spends most CPU time encoding state packets and
+         * paths.  Keep the product's VG-Lite command-generation hot path in
+         * the 256 KiB M55 ITCM instead of executing it from external XIP. */
+        *vg_lite.o(.text*)
+        *vg_lite_path.o(.text*)
+        *vg_lite_matrix.o(.text*)
+        *lv_draw_vg_lite_*.o(.text*)
+        *lv_vg_lite_*.o(.text*)
+
+        /* The retained LVGL object model remains intact, but its per-frame
+         * traversal and draw-task construction must not bounce through slow
+         * external XIP for every object, style lookup and primitive. */
+        *lv_refr.o(.text*)
+        *lv_draw.o(.text*)
+        *lv_draw_buf.o(.text*)
+        *lv_draw_rect.o(.text*)
+        *lv_draw_image.o(.text*)
+        *lv_draw_label.o(.text*)
+        *lv_image_decoder.o(.text*)
+        *lv_obj.o(.text*)
+        *lv_obj_draw.o(.text*)
+        *lv_obj_event.o(.text*)
+        *lv_obj_pos.o(.text*)
+        *lv_obj_style.o(.text*)
+        *lv_obj_tree.o(.text*)
+        *lv_display.o(.text*)
+        *lv_event.o(.text*)
+        *lv_area.o(.text*)
+        *lv_ll.o(.text*)
+
+        /* Text-heavy phone UI frames repeatedly resolve UTF-8 glyphs and
+         * decode compact font tables while building the same GPU command
+         * chain.  Keep code hot; the large glyph bitmaps remain in XIP. */
+        *lv_font.o(.text*)
+        *lv_font_fmt_txt.o(.text*)
+        *lv_text.o(.text*)
+        *lv_string_rtthread.o(.text*)
 
         . = ALIGN(4);
     } > m55_code_INTERNAL AT > m55_nvm_sel

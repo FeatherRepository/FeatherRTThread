@@ -166,6 +166,11 @@ void __attribute__((weak)) lv_draw_sw_task_perf_hook(uint32_t task_type)
     LV_UNUSED(task_type);
 }
 
+void __attribute__((weak)) lv_draw_sw_before_dispatch_hook(uint32_t task_type)
+{
+    LV_UNUSED(task_type);
+}
+
 void lv_draw_sw_init(void)
 {
 
@@ -455,6 +460,11 @@ static int32_t dispatch(lv_draw_unit_t * draw_unit, lv_layer_t * layer)
         LV_PROFILER_END;
         return LV_DRAW_UNIT_IDLE;  /*Couldn't start rendering*/
     }
+
+    /* Synchronize pending accelerator writes before a worker thread starts
+     * touching the same layer. This hook deliberately runs on the LVGL thread,
+     * not inside the SW worker, so the VG-Lite command stream stays single-owner. */
+    lv_draw_sw_before_dispatch_hook(t->type);
 
     t->state = LV_DRAW_TASK_STATE_IN_PROGRESS;
     draw_sw_unit->base_unit.target_layer = layer;

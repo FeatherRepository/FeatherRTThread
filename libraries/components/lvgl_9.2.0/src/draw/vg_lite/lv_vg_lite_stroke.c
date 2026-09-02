@@ -121,6 +121,13 @@ lv_cache_entry_t * lv_vg_lite_stroke_get(struct lv_draw_vg_lite_unit_t * unit,
         return NULL;
     }
 
+    /* The reusable LVGL path is reset to VG_LITE_DRAW_ZERO before its
+     * commands are appended.  A pure-stroke path intentionally has no END
+     * opcode, so the cache comparator must see it as STROKE before validating
+     * and comparing the command stream.  Leaving it as ZERO makes the valid
+     * centerline fail lv_vg_lite_path_check(). */
+    LV_VG_LITE_CHECK_ERROR(vg_lite_set_path_type(vg_path, VG_LITE_DRAW_STROKE_PATH));
+
     /* prepare search key */
     stroke_item_t search_key;
     lv_memzero(&search_key, sizeof(search_key));
@@ -232,6 +239,18 @@ static bool stroke_create_cb(stroke_item_t * item, void * user_data)
         return false;
     }
 
+    /* The flattened stroke is immutable while this cache entry lives.  Where
+     * the platform validates VG-Lite CALL streams, upload both representations
+     * so each frame can reference them directly. */
+#if LV_VG_LITE_USE_PATH_UPLOAD && LV_VG_LITE_USE_STROKE_UPLOAD
+    if(lv_vg_lite_path_upload(item->path) != VG_LITE_SUCCESS) {
+        LV_LOG_WARN("stroke centerline upload failed; using CPU stream");
+    }
+    if(lv_vg_lite_path_upload_stroke(item->path) != VG_LITE_SUCCESS) {
+        LV_LOG_WARN("stroke outline upload failed; using CPU stream");
+    }
+#endif
+
     return true;
 }
 
@@ -267,8 +286,8 @@ static lv_cache_compare_res_t path_compare(const vg_lite_path_t * lhs, const vg_
 
 static lv_cache_compare_res_t stroke_compare_cb(const stroke_item_t * lhs, const stroke_item_t * rhs)
 {
-    if(lhs->width != lhs->width) {
-        return lhs->width > lhs->width ? 1 : -1;
+    if(lhs->width != rhs->width) {
+        return lhs->width > rhs->width ? 1 : -1;
     }
 
     if(lhs->cap != rhs->cap) {

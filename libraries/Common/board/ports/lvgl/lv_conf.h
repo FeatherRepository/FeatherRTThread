@@ -125,7 +125,13 @@
  *Requirements:
     `LV_USE_MATRIX = 1`.
     The rendering engine needs to support 3x3 matrix transformations.*/
-#define LV_DRAW_TRANSFORM_USE_MATRIX            0
+#define LV_DRAW_TRANSFORM_USE_MATRIX            1
+
+/* Fill/font CALL streams are verified on PSE84 and substantially reduce the
+ * per-frame command stream.  Flattened stroke CALLs are not pixel-equivalent
+ * on this silicon, so stroke geometry remains inline in the frame command. */
+#define LV_VG_LITE_USE_PATH_UPLOAD              1
+#define LV_VG_LITE_USE_STROKE_UPLOAD            0
 
 /* If a widget has `style_opa < 255` (not `bg_opa`, `text_opa` etc) or not NORMAL blend mode
  * it is buffered into a "simple" layer before rendering. The widget can be buffered in smaller chunks.

@@ -2,10 +2,17 @@
 #include <rtdevice.h>
 #include <rthw.h>
 #include <board.h>
+#if defined(BSP_USING_LVGL)
 #include "lvgl.h"
+#if !defined(FEATHERTALK_USING_UI_SHELL)
 #include "lv_demos.h"
+#endif
+#endif
 #include <feathertalk/version.h>
 #include "ipc/feathertalk_ipc.h"
+#ifdef FEATHERTALK_USING_GPU_UI
+#include "gpu_ui/feathertalk_gpu_ui.h"
+#endif
 #ifdef FEATHERTALK_USING_UI_SHELL
 #include "ui/feathertalk_ui.h"
 #endif
@@ -29,7 +36,9 @@
 #define BSP_LCD_ROTATION_DEGREES 0
 #endif
 
-#if defined(FEATHERTALK_USING_UI_SHELL)
+#if defined(FEATHERTALK_USING_GPU_UI)
+#define BSP_UI_NAME "feather-gpu-native"
+#elif defined(FEATHERTALK_USING_UI_SHELL)
 #define BSP_LVGL_DEMO_NAME "feathertalk-shell"
 #elif defined(BSP_LVGL_DEMO_BENCHMARK)
 #define BSP_LVGL_DEMO_NAME "benchmark"
@@ -39,11 +48,13 @@
 #define BSP_LVGL_DEMO_NAME "music"
 #endif
 
+#if defined(BSP_USING_LVGL)
 extern int lvgl_thread_init(void);
+#endif
 
-static void m55_lvgl_cpu_cache_enable(void)
+static void m55_cpu_cache_enable(void)
 {
-#if defined(BSP_LVGL_ENABLE_CPU_CACHE) && defined(RT_USING_CACHE)
+#if defined(RT_USING_CACHE)
 #if defined(__ICACHE_PRESENT) && (__ICACHE_PRESENT == 1U)
     if (!rt_hw_cpu_icache_status())
     {
@@ -79,6 +90,7 @@ static void m55_lcd_backlight_enable(void)
                      &CYBSP_DISP_BACKLIGHT_PWM_config);
 }
 
+#if defined(BSP_USING_LVGL)
 void lv_user_gui_init(void)
 {
 #if defined(FEATHERTALK_USING_UI_SHELL)
@@ -91,6 +103,7 @@ void lv_user_gui_init(void)
     lv_demo_music();
 #endif
 }
+#endif
 
 int main(void)
 {
@@ -104,7 +117,11 @@ int main(void)
 
     rt_kprintf("FeatherTalk M55 %s\n", FEATHERTALK_M55_FIRMWARE_VERSION);
     rt_kprintf("IPC ABI %u\n", FEATHERTALK_IPC_ABI_VERSION);
+#if defined(FEATHERTALK_USING_GPU_UI)
+    rt_kprintf("UI %s start, lcd rotation=%d\n", BSP_UI_NAME, BSP_LCD_ROTATION_DEGREES);
+#else
     rt_kprintf("LVGL %s demo start, lcd rotation=%d\n", BSP_LVGL_DEMO_NAME, BSP_LCD_ROTATION_DEGREES);
+#endif
     rt_kprintf("Console: M55 diagnostics on uart2; product MSH control stays on M33 uart5\n");
 
     rt_pin_mode(LED_PIN_G, PIN_MODE_OUTPUT);
@@ -112,9 +129,14 @@ int main(void)
     {
         rt_kprintf("FeatherTalk M55 IPC responder failed to start\n");
     }
-    m55_lvgl_cpu_cache_enable();
+    m55_cpu_cache_enable();
     rt_thread_mdelay(BSP_LCD_STARTUP_STABILIZE_MS);
+#if defined(FEATHERTALK_USING_GPU_UI)
+    if (feathertalk_gpu_ui_init() != RT_EOK)
+        rt_kprintf("FeatherUI startup failed\n");
+#else
     lvgl_thread_init();
+#endif
     rt_thread_mdelay(BSP_LCD_FIRST_FRAME_DELAY_MS);
     m55_lcd_backlight_enable();
     feathertalk_ipc_set_lvgl_ready();

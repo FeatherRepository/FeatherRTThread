@@ -3990,6 +3990,57 @@ static vg_lite_error_t _initialize_stroke_dash_parameters(
     return error;
 }
 
+static void _release_stroke_work_data(vg_lite_stroke_t *stroke_conversion)
+{
+    vg_lite_path_list_ptr path_list;
+    vg_lite_sub_path_ptr sub_path;
+
+    if (!stroke_conversion)
+        return;
+
+    /* vg_lite_update_stroke() has already flattened the result into the
+     * owning vg_lite_path_t::stroke_path command stream.  The linked lists
+     * below are conversion scratch data and are never consulted by draw;
+     * retaining them in LVGL's cross-frame stroke cache wastes most of the
+     * UI heap. */
+    while (stroke_conversion->path_list_divide)
+    {
+        vg_lite_path_point_ptr point;
+        path_list = stroke_conversion->path_list_divide;
+        stroke_conversion->path_list_divide = path_list->next;
+        while (path_list->path_points)
+        {
+            point = path_list->path_points;
+            path_list->path_points = point->next;
+            vg_lite_os_free(point);
+        }
+        vg_lite_os_free(path_list);
+    }
+
+    while (stroke_conversion->stroke_paths)
+    {
+        vg_lite_path_point_ptr point;
+        sub_path = stroke_conversion->stroke_paths;
+        stroke_conversion->stroke_paths = sub_path->next;
+        while (sub_path->point_list)
+        {
+            point = sub_path->point_list;
+            sub_path->point_list = point->next;
+            vg_lite_os_free(point);
+        }
+        vg_lite_os_free(sub_path);
+    }
+
+    stroke_conversion->path_points = NULL;
+    stroke_conversion->path_end = NULL;
+    stroke_conversion->left_point = NULL;
+    stroke_conversion->right_point = NULL;
+    stroke_conversion->stroke_points = NULL;
+    stroke_conversion->stroke_end = NULL;
+    stroke_conversion->cur_list = NULL;
+    stroke_conversion->last_stroke = NULL;
+}
+
 vg_lite_error_t vg_lite_update_stroke(
     vg_lite_path_t *path
     )
@@ -4063,6 +4114,8 @@ vg_lite_error_t vg_lite_update_stroke(
         *(uint8_t*)path->stroke_path = VLC_OP_END;
         path->stroke_size = _commandSize_float[VLC_OP_END];
     }
+
+    _release_stroke_work_data(stroke_conversion);
 
     return error;
 }

@@ -19,6 +19,8 @@
 #include "lv_vg_lite_utils.h"
 #include "lv_vg_lite_path.h"
 #include "lv_draw_vg_lite_type.h"
+#include "lv_gpu_batch.h"
+#include "lv_draw_runtime_stats.h"
 
 /*********************
  *      DEFINES
@@ -45,6 +47,7 @@ static void draw_letter_cb(lv_draw_unit_t * draw_unit, lv_draw_glyph_dsc_t * gly
                            lv_draw_fill_dsc_t * fill_draw_dsc, const lv_area_t * fill_area);
 
 static void draw_letter_bitmap(lv_draw_vg_lite_unit_t * u, const lv_draw_glyph_dsc_t * dsc);
+static void draw_letter_vector(lv_draw_vg_lite_unit_t * u, const lv_draw_glyph_dsc_t * dsc);
 
 #if LV_USE_FREETYPE
     static void freetype_outline_event_cb(lv_event_t * e);
@@ -98,13 +101,20 @@ static void draw_letter_cb(lv_draw_unit_t * draw_unit, lv_draw_glyph_dsc_t * gly
                 }
                 break;
 
-#if LV_USE_FREETYPE
             case LV_FONT_GLYPH_FORMAT_VECTOR: {
-                    if(lv_freetype_is_outline_font(glyph_draw_dsc->g->resolved_font)) {
+                    const lv_font_vector_glyph_data_t * vector_data = glyph_draw_dsc->glyph_data;
+                    if(vector_data != NULL && vector_data->magic == LV_FONT_VECTOR_GLYPH_MAGIC) {
+                        draw_letter_vector(u, glyph_draw_dsc);
+                    }
+#if LV_USE_FREETYPE
+                    else if(lv_freetype_is_outline_font(glyph_draw_dsc->g->resolved_font)) {
                         draw_letter_outline(u, glyph_draw_dsc);
                     }
+#endif
                 }
                 break;
+
+#if LV_USE_FREETYPE
 #endif /* LV_USE_FREETYPE */
 
             case LV_FONT_GLYPH_FORMAT_IMAGE: {
@@ -141,12 +151,14 @@ static void draw_letter_cb(lv_draw_unit_t * draw_unit, lv_draw_glyph_dsc_t * gly
 
 static void draw_letter_bitmap(lv_draw_vg_lite_unit_t * u, const lv_draw_glyph_dsc_t * dsc)
 {
+    uint32_t glyph_perf_start;
     lv_area_t clip_area;
     if(!lv_area_intersect(&clip_area, u->base_unit.clip_area, dsc->letter_coords)) {
         return;
     }
 
     LV_PROFILER_BEGIN;
+    glyph_perf_start = lv_draw_runtime_stats_gpu_glyph_begin();
 
     lv_area_t image_area = *dsc->letter_coords;
 
@@ -157,10 +169,28 @@ static void draw_letter_bitmap(lv_draw_vg_lite_unit_t * u, const lv_draw_glyph_d
 
     vg_lite_buffer_t src_buf;
     lv_draw_buf_t * draw_buf = dsc->glyph_data;
+    lv_draw_buf_t stable_draw_buf;
+    uint32_t glyph_bytes = draw_buf->header.stride * draw_buf->header.h;
+    void *stable_data = lv_gpu_batch_glyph_buffer_is_persistent(draw_buf) ?
+                        draw_buf->data :
+                        lv_gpu_batch_transient_copy(draw_buf->data, glyph_bytes, LV_DRAW_BUF_ALIGN);
+
+    if(stable_data != NULL) {
+        stable_draw_buf = *draw_buf;
+        stable_draw_buf.data = stable_data;
+        stable_draw_buf.unaligned_data = stable_data;
+        stable_draw_buf.data_size = glyph_bytes;
+        draw_buf = &stable_draw_buf;
+    }
     lv_vg_lite_buffer_from_draw_buf(&src_buf, draw_buf);
 
     vg_lite_color_t color;
     color = lv_vg_lite_color(dsc->color, dsc->opa, true);
+
+    if(stable_data != NULL) {
+        /* This command references frame-pinned A8 storage. */
+        lv_gpu_batch_note_gpu_command();
+    }
 
     LV_VG_LITE_ASSERT_SRC_BUFFER(&src_buf);
     LV_VG_LITE_ASSERT_DEST_BUFFER(&u->target_buffer);
@@ -182,7 +212,7 @@ static void draw_letter_bitmap(lv_draw_vg_lite_unit_t * u, const lv_draw_glyph_d
                                    &matrix,
                                    VG_LITE_BLEND_SRC_OVER,
                                    color,
-                                   VG_LITE_FILTER_LINEAR));
+                                   VG_LITE_FILTER_POINT));
         LV_PROFILER_END_TAG("vg_lite_blit_rect");
     }
     else {
@@ -215,18 +245,56 @@ static void draw_letter_bitmap(lv_draw_vg_lite_unit_t * u, const lv_draw_glyph_d
                                    VG_LITE_PATTERN_COLOR,
                                    0,
                                    color,
-                                   VG_LITE_FILTER_LINEAR));
+                                   VG_LITE_FILTER_POINT));
         LV_PROFILER_END_TAG("vg_lite_draw_pattern");
 
         lv_vg_lite_path_drop(u, path);
     }
 
-    /* TODO: The temporary buffer of the built-in font is reused.
-     * You need to wait for the GPU to finish using the buffer before releasing it.
-     * Later, use the font cache for management to improve efficiency.
-     */
-    lv_vg_lite_finish(u);
+    if(stable_data == NULL) {
+        /* Non-frame rendering and oversized glyphs retain upstream semantics. */
+        lv_vg_lite_finish(u);
+    }
+    lv_draw_runtime_stats_gpu_glyph_end(glyph_perf_start);
     LV_PROFILER_END;
+}
+
+static void draw_letter_vector(lv_draw_vg_lite_unit_t * u, const lv_draw_glyph_dsc_t * dsc)
+{
+    const lv_font_vector_glyph_data_t * vector_data = dsc->glyph_data;
+    uint32_t glyph_perf_start;
+    float bounds[4];
+    lv_vg_lite_path_t * outline;
+    vg_lite_path_t * path;
+    vg_lite_matrix_t matrix;
+
+    if(vector_data == NULL || vector_data->path == NULL || vector_data->scale <= 0.0f)
+        return;
+    if(lv_area_is_out(dsc->letter_coords, u->base_unit.clip_area, 0))
+        return;
+
+    outline = lv_draw_vg_lite_vector_path_prepare(vector_data->path, true, bounds);
+    if(outline == NULL) return;
+    glyph_perf_start = lv_draw_runtime_stats_gpu_glyph_begin();
+    path = lv_vg_lite_path_get_path(outline);
+    lv_vg_lite_path_set_bonding_box(outline, bounds[0], bounds[1], bounds[2], bounds[3]);
+    LV_VG_LITE_CHECK_ERROR(vg_lite_set_path_type(path, VG_LITE_DRAW_FILL_PATH));
+
+    vg_lite_identity(&matrix);
+    lv_vg_lite_matrix_multiply(&matrix, &u->global_matrix);
+    vg_lite_translate((float)dsc->letter_coords->x1,
+                      (float)dsc->letter_coords->y1, &matrix);
+    vg_lite_scale(vector_data->scale, vector_data->scale, &matrix);
+
+    LV_VG_LITE_ASSERT_DEST_BUFFER(&u->target_buffer);
+    LV_VG_LITE_ASSERT_PATH(path);
+    LV_VG_LITE_ASSERT_MATRIX(&matrix);
+    LV_VG_LITE_CHECK_ERROR(vg_lite_draw(&u->target_buffer, path,
+                                        VG_LITE_FILL_NON_ZERO, &matrix,
+                                        VG_LITE_BLEND_SRC_OVER,
+                                        lv_vg_lite_color(dsc->color, dsc->opa, true)));
+    lv_gpu_batch_note_gpu_command();
+    lv_draw_runtime_stats_gpu_glyph_end(glyph_perf_start);
 }
 
 #if LV_USE_FREETYPE

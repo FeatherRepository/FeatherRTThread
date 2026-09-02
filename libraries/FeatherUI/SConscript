@@ -1,0 +1,14 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+src = [item for item in Glob(os.path.join(cwd, 'src', '*.c'))
+       if os.path.basename(str(item)) not in
+       ('fui_font_5x7.c', 'fui_font_cjk_data.c')]
+inc = [os.path.join(cwd, 'include'), os.path.join(cwd, 'src')]
+
+group = DefineGroup('FeatherUI GPU native', src,
+                    depend=['FEATHERTALK_USING_GPU_UI'],
+                    CPPPATH=inc)
+
+Return('group')

@@ -87,15 +87,21 @@ void lv_vg_lite_grad_init(struct lv_draw_vg_lite_unit_t * u, uint32_t cache_cnt)
 
     u->grad_cache = lv_cache_create(&lv_cache_class_lru_rb_count, sizeof(grad_item_t), cache_cnt, ops);
     lv_cache_set_name(u->grad_cache, "VG_GRAD");
-    u->grad_pending = lv_vg_lite_pending_create(sizeof(lv_cache_entry_t *), 4);
-    lv_vg_lite_pending_set_free_cb(u->grad_pending, grad_cache_release_cb, u->grad_cache);
+    for(uint32_t i = 0; i < LV_VG_LITE_PIPELINE_SLOTS; i++) {
+        u->grad_pending_slots[i] = lv_vg_lite_pending_create(sizeof(lv_cache_entry_t *), 4);
+        lv_vg_lite_pending_set_free_cb(u->grad_pending_slots[i], grad_cache_release_cb, u->grad_cache);
+    }
+    u->grad_pending = u->grad_pending_slots[u->pending_slot];
 }
 
 void lv_vg_lite_grad_deinit(struct lv_draw_vg_lite_unit_t * u)
 {
     LV_ASSERT_NULL(u);
     LV_ASSERT_NULL(u->grad_pending)
-    lv_vg_lite_pending_destroy(u->grad_pending);
+    for(uint32_t i = 0; i < LV_VG_LITE_PIPELINE_SLOTS; i++) {
+        lv_vg_lite_pending_destroy(u->grad_pending_slots[i]);
+        u->grad_pending_slots[i] = NULL;
+    }
     u->grad_pending = NULL;
     lv_cache_destroy(u->grad_cache, NULL);
     u->grad_cache = NULL;

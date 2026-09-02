@@ -20,6 +20,7 @@
 #include <board.h>
 #include "vg_lite.h"
 #include "vg_lite_platform.h"
+#include "drv_lcd.h"
 #ifdef PKG_USING_CPU_USAGE
     #include <cpu_usage.h>
 #endif
@@ -71,7 +72,11 @@
 #define LCD_BL_PWM_DEV_NAME      "pwm18"
 #define LCD_BL_PWM_CHANNEL       0
 #define LCD_BL_PWM_PERIOD_NS     200000
-#define LCD_BL_DEFAULT_BRIGHTNESS 80
+#define LCD_BL_MIN_DUTY_PERCENT      50U
+#define LCD_BL_DEFAULT_DUTY_PERCENT  80U
+#define LCD_BL_DEFAULT_PERCENT \
+    ((LCD_BL_DEFAULT_DUTY_PERCENT - LCD_BL_MIN_DUTY_PERCENT) * 100U / \
+     (100U - LCD_BL_MIN_DUTY_PERCENT))
 #define LCD_AXIDMAC_CHANNEL      0U
 #define LCD_AXIDMAC_TIMEOUT_MS   20U
 #define LCD_AXIDMAC_ERROR_MASK   (CY_AXIDMAC_INTR_SRC_BUS_ERROR | \
@@ -133,13 +138,26 @@
 
 #define GPU_TESSELLATION_BUFFER_SIZE        ((LCD_LOGICAL_WIDTH) * 128U)
 #define APP_BUFFER_COUNT                    (2U)
+#if defined(FEATHERTALK_USING_GPU_UI) || defined(FEATHERTALK_USING_LVGL_GPU_BATCH)
+/* The whole FeatherUI frame must fit without the implicit submit() in
+ * push_state(). Two 256 KiB VG-Lite command buffers still leave over 700 KiB
+ * in the 3 MiB gfx_mem region after two 512-stride RGB565 scanout surfaces and
+ * both tessellation buffers have been reserved.  Board measurements peak at
+ * 67 KiB even for the densest popup, so 224 KiB keeps over 3x headroom while
+ * making room for the native antialiased product font. */
+#define DEFAULT_GPU_CMD_BUFFER_SIZE         (224U * 1024U)
+#define GPU_PATH_UPLOAD_RESERVE_SIZE        (256U * 1024U)
+#else
 #define DEFAULT_GPU_CMD_BUFFER_SIZE         ((64U) * (512))
+#define GPU_PATH_UPLOAD_RESERVE_SIZE        (0U)
+#endif
 #define VG_PARAMS_POS                       (0UL)
 #define GPU_MEM_BASE                        (0x0U)
 #define VGLITE_HEAP_SIZE        (((DEFAULT_GPU_CMD_BUFFER_SIZE) * \
                                  (APP_BUFFER_COUNT)) + \
                                  ((GPU_TESSELLATION_BUFFER_SIZE) * \
-                                 (APP_BUFFER_COUNT)))
+                                 (APP_BUFFER_COUNT)) + \
+                                 (GPU_PATH_UPLOAD_RESERVE_SIZE))
 CY_SECTION(".cy_gpu_buf") CY_ALIGN(__SCB_DCACHE_LINE_SIZE) uint8_t contiguous_mem[VGLITE_HEAP_SIZE] = { 0xFF };
 volatile void *vglite_heap_base = &contiguous_mem;
 
@@ -147,9 +165,39 @@ struct drv_lcd_device _lcd;
 
 GFXSS_Type *gfxbase = (GFXSS_Type*) GFXSS;
 static cy_stc_gfx_context_t lcd_gfx_context;
+/* The PDL config carries a DC interrupt mask but cy_gfxss_dc_init() does not
+ * program GCREGDISPLAYINTRENABLE.  Gate the periodic DISP0 interrupt so the
+ * semaphore represents exactly the frame following a framebuffer commit,
+ * rather than accumulating stale frame-done tokens. */
+static volatile rt_bool_t lcd_present_waiting;
+static volatile rt_bool_t lcd_present_pending;
+static volatile lcd_gpu_surface_stats_t lcd_surface_stats;
 
-CY_SECTION(".cy_gpu_buf") CY_ALIGN(__SCB_DCACHE_LINE_SIZE) static uint8_t graphics_storage[LCD_RENDER_BUF_SIZE + LCD_VISIBLE_X_OFFSET_BYTES] = {0xFF};
+#if defined(FEATHERTALK_USING_GPU_UI) || defined(FEATHERTALK_USING_LVGL_GPU_BATCH)
+#define LCD_GPU_PRESENT_THREAD_STACK_SIZE 1024U
+#define LCD_GPU_PRESENT_THREAD_PRIORITY   6U
+static struct rt_semaphore lcd_gpu_irq_sem;
+static struct rt_semaphore lcd_gpu_present_work_sem;
+static struct rt_thread lcd_gpu_present_thread;
+static rt_uint8_t lcd_gpu_present_thread_stack[LCD_GPU_PRESENT_THREAD_STACK_SIZE];
+static volatile rt_bool_t lcd_gpu_sync_ready;
+static volatile rt_bool_t lcd_gpu_irq_pending;
+static volatile uint32_t lcd_gpu_irq_flags;
+static volatile uint32_t lcd_gpu_submit_sequence;
+static volatile uint32_t lcd_gpu_complete_sequence;
+static volatile void *lcd_gpu_queued_framebuffer;
+static volatile uint32_t lcd_gpu_queued_sequence;
+#endif
+
+#if defined(FEATHERTALK_USING_GPU_UI) || defined(FEATHERTALK_USING_LVGL_GPU_BATCH)
+CY_SECTION(".cy_gpu_buf") CY_ALIGN(__SCB_DCACHE_LINE_SIZE)
+static uint8_t graphics_storage[2][LCD_RENDER_BUF_SIZE + LCD_VISIBLE_X_OFFSET_BYTES] = {{0xFF}};
+static uint8_t *graphics_buffer = &graphics_storage[0][LCD_VISIBLE_X_OFFSET_BYTES];
+#else
+CY_SECTION(".cy_gpu_buf") CY_ALIGN(__SCB_DCACHE_LINE_SIZE)
+static uint8_t graphics_storage[LCD_RENDER_BUF_SIZE + LCD_VISIBLE_X_OFFSET_BYTES] = {0xFF};
 static uint8_t *graphics_buffer = &graphics_storage[LCD_VISIBLE_X_OFFSET_BYTES];
+#endif
 
 #if LCD_NEEDS_SCANOUT_BUFFER
 CY_SECTION(".cy_gpu_buf") CY_ALIGN(__SCB_DCACHE_LINE_SIZE) static uint8_t graphics_scanout_storage[LCD_SCANOUT_BUF_SIZE] = {0x00};
@@ -165,14 +213,206 @@ static inline uint16_t *lcd_render_framebuffer(void)
     return (uint16_t *)graphics_buffer;
 }
 
+static void lcd_apply_gfxss_rotation(void);
+static void lcd_arm_present_done(void);
+static void lcd_wait_present_done(void);
+static rt_err_t lcd_wait_pending_present(uint32_t timeout_ms);
+static void lcd_dcache_invalidate_range(void *addr, uint32_t size);
+#if defined(FEATHERTALK_USING_GPU_UI) || defined(FEATHERTALK_USING_LVGL_GPU_BATCH)
+static void lcd_gpu_present_worker(void *parameter);
+#endif
+
 static inline uint32_t *lcd_scanout_framebuffer(void)
 {
 #if LCD_NEEDS_SCANOUT_BUFFER
     return (uint32_t *)graphics_scanout_storage;
 #else
+#if defined(FEATHERTALK_USING_GPU_UI) || defined(FEATHERTALK_USING_LVGL_GPU_BATCH)
+    return (uint32_t *)&graphics_storage[0][0];
+#else
     return (uint32_t *)&graphics_storage[0];
 #endif
+#endif
 }
+
+#if defined(FEATHERTALK_USING_GPU_UI) || defined(FEATHERTALK_USING_LVGL_GPU_BATCH)
+static rt_bool_t lcd_gpu_sequence_reached(uint32_t completed, uint32_t requested)
+{
+    return (int32_t)(completed - requested) >= 0 ? RT_TRUE : RT_FALSE;
+}
+
+/* VG-Lite calls this immediately before kicking the GPU. Clear the completion
+ * token belonging to the preceding command buffer and assign this submit a
+ * monotonically increasing sequence number. */
+void vg_lite_hardware_begin_platform_hook(void)
+{
+    rt_base_t level;
+
+    if (!lcd_gpu_sync_ready) return;
+    while (rt_sem_take(&lcd_gpu_irq_sem, 0) == RT_EOK) {}
+    level = rt_hw_interrupt_disable();
+    lcd_gpu_irq_pending = RT_FALSE;
+    lcd_gpu_irq_flags = 0U;
+    lcd_gpu_submit_sequence++;
+    rt_hw_interrupt_enable(level);
+}
+
+/* Called from the GPU ISR after END is observed but before the wrapper IRQ is
+ * acknowledged. It wakes both VG-Lite's waiter and the deferred scanout
+ * worker; neither path polls the GPU register anymore. */
+void vg_lite_hardware_complete_platform_hook(uint32_t flags)
+{
+    if (!lcd_gpu_sync_ready) return;
+    lcd_gpu_irq_flags = flags;
+    lcd_gpu_complete_sequence = lcd_gpu_submit_sequence;
+    lcd_gpu_irq_pending = RT_TRUE;
+    rt_sem_release(&lcd_gpu_irq_sem);
+    rt_sem_release(&lcd_gpu_present_work_sem);
+}
+
+int32_t vg_lite_platform_wait_interrupt(uint32_t timeout, uint32_t mask,
+                                        uint32_t *value)
+{
+    rt_base_t level;
+    rt_int32_t ticks;
+    rt_err_t result;
+    uint32_t flags;
+
+    if (!lcd_gpu_sync_ready) return -1;
+
+    level = rt_hw_interrupt_disable();
+    if (lcd_gpu_irq_pending)
+    {
+        flags = lcd_gpu_irq_flags;
+        lcd_gpu_irq_pending = RT_FALSE;
+        rt_hw_interrupt_enable(level);
+        if (value != RT_NULL) *value = flags & mask;
+        return 1;
+    }
+    rt_hw_interrupt_enable(level);
+
+    ticks = (timeout == 0U || timeout == UINT32_MAX) ? RT_WAITING_FOREVER :
+            rt_tick_from_millisecond(timeout);
+    result = rt_sem_take(&lcd_gpu_irq_sem, ticks);
+    if (result != RT_EOK) return 0;
+
+    level = rt_hw_interrupt_disable();
+    flags = lcd_gpu_irq_flags;
+    lcd_gpu_irq_pending = RT_FALSE;
+    rt_hw_interrupt_enable(level);
+    if (value != RT_NULL) *value = flags & mask;
+    return 1;
+}
+
+static rt_bool_t lcd_gpu_surface_is_valid(const void *framebuffer)
+{
+    return framebuffer == &graphics_storage[0][LCD_VISIBLE_X_OFFSET_BYTES] ||
+           framebuffer == &graphics_storage[1][LCD_VISIBLE_X_OFFSET_BYTES];
+}
+
+rt_err_t lcd_gpu_surface_get_info(lcd_gpu_surface_info_t *info)
+{
+    if (info == RT_NULL) return -RT_EINVAL;
+    info->width = LCD_LOGICAL_WIDTH;
+    info->height = LCD_LOGICAL_HEIGHT;
+    info->stride_pixels = LCD_RENDER_STRIDE;
+    info->framebuffer_count = 2U;
+    return RT_EOK;
+}
+
+void *lcd_gpu_surface_get(uint8_t index)
+{
+    if (index >= 2U) return RT_NULL;
+    return &graphics_storage[index][LCD_VISIBLE_X_OFFSET_BYTES];
+}
+
+rt_err_t lcd_gpu_surface_present(void *framebuffer)
+{
+    rt_err_t result = lcd_gpu_surface_present_async(framebuffer);
+    if (result != RT_EOK) return result;
+    return lcd_gpu_surface_wait_present(50U);
+}
+
+rt_err_t lcd_gpu_surface_present_async(void *framebuffer)
+{
+    rt_base_t level;
+    rt_bool_t already_complete;
+
+    if (!lcd_gpu_surface_is_valid(framebuffer)) return -RT_EINVAL;
+#if LCD_ROTATION_BACKEND_VGLITE
+    return -RT_ENOSYS;
+#else
+    /* The framebuffer still belongs to the GPU at this point. Queue its DC
+     * commit against the submit sequence; the worker exposes it only after
+     * the matching END interrupt, so scanout never observes a partial frame. */
+    if (lcd_present_pending || lcd_gpu_queued_framebuffer != RT_NULL)
+    {
+        rt_err_t result = lcd_gpu_surface_wait_present(50U);
+        if (result != RT_EOK) return result;
+    }
+
+    level = rt_hw_interrupt_disable();
+    lcd_gpu_queued_framebuffer = framebuffer;
+    lcd_gpu_queued_sequence = lcd_gpu_submit_sequence;
+    already_complete = lcd_gpu_sequence_reached(lcd_gpu_complete_sequence,
+                                                 lcd_gpu_queued_sequence);
+    rt_hw_interrupt_enable(level);
+    if (already_complete)
+        rt_sem_release(&lcd_gpu_present_work_sem);
+    return RT_EOK;
+#endif
+}
+
+rt_err_t lcd_gpu_surface_wait_present(uint32_t timeout_ms)
+{
+    if (!lcd_present_pending && lcd_gpu_queued_framebuffer == RT_NULL) return RT_EOK;
+    return lcd_wait_pending_present(timeout_ms);
+}
+
+void lcd_gpu_surface_cpu_read_begin(void *framebuffer)
+{
+    if (lcd_gpu_surface_is_valid(framebuffer))
+        lcd_dcache_invalidate_range(framebuffer, LCD_RENDER_BUF_SIZE);
+}
+
+void lcd_gpu_surface_get_stats(lcd_gpu_surface_stats_t *stats)
+{
+    if (stats == RT_NULL) return;
+    stats->dc_frame_irqs = lcd_surface_stats.dc_frame_irqs;
+    stats->presents = lcd_surface_stats.presents;
+    stats->present_wait_ms_total = lcd_surface_stats.present_wait_ms_total;
+    stats->present_wait_ms_max = lcd_surface_stats.present_wait_ms_max;
+    stats->present_timeouts = lcd_surface_stats.present_timeouts;
+}
+
+#else
+rt_err_t lcd_gpu_surface_get_info(lcd_gpu_surface_info_t *info)
+{
+    (void)info;
+    return -RT_ENOSYS;
+}
+void *lcd_gpu_surface_get(uint8_t index) { (void)index; return RT_NULL; }
+rt_err_t lcd_gpu_surface_present(void *framebuffer)
+{
+    (void)framebuffer;
+    return -RT_ENOSYS;
+}
+rt_err_t lcd_gpu_surface_present_async(void *framebuffer)
+{
+    (void)framebuffer;
+    return -RT_ENOSYS;
+}
+rt_err_t lcd_gpu_surface_wait_present(uint32_t timeout_ms)
+{
+    (void)timeout_ms;
+    return -RT_ENOSYS;
+}
+void lcd_gpu_surface_cpu_read_begin(void *framebuffer) { (void)framebuffer; }
+void lcd_gpu_surface_get_stats(lcd_gpu_surface_stats_t *stats)
+{
+    if (stats != RT_NULL) memset(stats, 0, sizeof(*stats));
+}
+#endif
 
 static void lcd_apply_gfxss_rotation(void)
 {
@@ -707,21 +947,137 @@ struct drv_lcd_device
     rt_uint8_t *back_buf;
 };
 
+static void lcd_arm_present_done(void)
+{
+    while (rt_sem_take(&_lcd.lcd_lock, 0) == RT_EOK)
+    {
+        /* Drop frame-done tokens produced before this framebuffer commit. */
+    }
+    lcd_present_waiting = RT_TRUE;
+    lcd_present_pending = RT_TRUE;
+    lcd_surface_stats.presents++;
+}
+
+static rt_err_t lcd_wait_pending_present(uint32_t timeout_ms)
+{
+    rt_err_t result;
+    uint32_t start_ms;
+    uint32_t elapsed_ms;
+
+#if defined(FEATHERTALK_USING_GPU_UI) || defined(FEATHERTALK_USING_LVGL_GPU_BATCH)
+    if (!lcd_present_pending && lcd_gpu_queued_framebuffer == RT_NULL) return RT_EOK;
+#else
+    if (!lcd_present_pending) return RT_EOK;
+#endif
+    start_ms = rt_tick_get_millisecond();
+    result = rt_sem_take(&_lcd.lcd_lock, rt_tick_from_millisecond(timeout_ms));
+    elapsed_ms = rt_tick_get_millisecond() - start_ms;
+    lcd_surface_stats.present_wait_ms_total += elapsed_ms;
+    if (elapsed_ms > lcd_surface_stats.present_wait_ms_max)
+    {
+        lcd_surface_stats.present_wait_ms_max = elapsed_ms;
+    }
+    if (result != RT_EOK)
+    {
+        lcd_surface_stats.present_timeouts++;
+        /* Keep ownership pending. A late DISP0 still retires the surface and
+         * a later caller can consume its semaphore instead of reusing a
+         * framebuffer which may still be scanned out. */
+        return result;
+    }
+    lcd_present_pending = RT_FALSE;
+    return result;
+}
+
+#if defined(FEATHERTALK_USING_GPU_UI) || defined(FEATHERTALK_USING_LVGL_GPU_BATCH)
+static void lcd_gpu_present_worker(void *parameter)
+{
+    (void)parameter;
+
+    while (1)
+    {
+        void *framebuffer;
+        uint32_t sequence;
+        rt_base_t level;
+        volatile cy_en_gfx_status_t status;
+
+        rt_sem_take(&lcd_gpu_present_work_sem, RT_WAITING_FOREVER);
+
+        level = rt_hw_interrupt_disable();
+        framebuffer = (void *)lcd_gpu_queued_framebuffer;
+        sequence = lcd_gpu_queued_sequence;
+        if (framebuffer == RT_NULL ||
+            !lcd_gpu_sequence_reached(lcd_gpu_complete_sequence, sequence))
+        {
+            rt_hw_interrupt_enable(level);
+            continue;
+        }
+        rt_hw_interrupt_enable(level);
+
+        /* Arm DISP0 before committing the address. This closes the race where
+         * an early frame interrupt arrives before the waiter is visible. */
+        lcd_arm_present_done();
+        gfxbase->GFXSS_DC.DCNANO.GCREGFRAMEBUFFERSTRIDE =
+            LCD_STRIDE * (LCD_BITS_PER_PIXEL / 8);
+        status = Cy_GFXSS_Set_FrameBuffer(gfxbase, (uint32_t *)framebuffer,
+                                         &lcd_gfx_context);
+        if (status == CY_GFX_SUCCESS)
+        {
+            lcd_apply_gfxss_rotation();
+        }
+        else
+        {
+            lcd_present_waiting = RT_FALSE;
+            lcd_present_pending = RT_FALSE;
+            rt_sem_release(&_lcd.lcd_lock);
+        }
+
+        level = rt_hw_interrupt_disable();
+        if (lcd_gpu_queued_framebuffer == framebuffer &&
+            lcd_gpu_queued_sequence == sequence)
+            lcd_gpu_queued_framebuffer = RT_NULL;
+        rt_hw_interrupt_enable(level);
+    }
+}
+#endif
+
 static void lcd_wait_present_done(void)
 {
-    (void)rt_sem_take(&_lcd.lcd_lock, RT_TICK_PER_SECOND / 20);
+    if (!lcd_present_pending) lcd_arm_present_done();
+    (void)lcd_wait_pending_present(50U);
 }
 
 rt_err_t lcd_wait_frame_done(uint32_t timeout_ms)
 {
-    return rt_sem_take(&_lcd.lcd_lock, rt_tick_from_millisecond(timeout_ms));
+    rt_err_t result;
+
+    if (lcd_present_pending)
+    {
+        return lcd_wait_pending_present(timeout_ms);
+    }
+
+    while (rt_sem_take(&_lcd.lcd_lock, 0) == RT_EOK)
+    {
+        /* Ignore a frame-done token that predates this wait request. */
+    }
+
+    lcd_present_waiting = RT_TRUE;
+    result = rt_sem_take(&_lcd.lcd_lock, rt_tick_from_millisecond(timeout_ms));
+    if (result != RT_EOK)
+    {
+        lcd_present_waiting = RT_FALSE;
+    }
+
+    return result;
 }
 
 #ifdef RT_USING_PWM
 static struct rt_device_pwm *g_lcd_bl_pwm = RT_NULL;
-static rt_err_t lcd_backlight_set(rt_uint8_t percent)
+rt_err_t lcd_backlight_set_percent(rt_uint8_t percent)
 {
     rt_uint32_t pulse;
+    rt_uint32_t duty_percent;
+    rt_err_t result;
 
     if (percent > 100U)
     {
@@ -740,8 +1096,47 @@ static rt_err_t lcd_backlight_set(rt_uint8_t percent)
         rt_pwm_enable(g_lcd_bl_pwm, LCD_BL_PWM_CHANNEL);
     }
 
-    pulse = (LCD_BL_PWM_PERIOD_NS * percent) / 100U;
-    rt_pwm_set(g_lcd_bl_pwm, LCD_BL_PWM_CHANNEL, LCD_BL_PWM_PERIOD_NS, pulse);
+    duty_percent = LCD_BL_MIN_DUTY_PERCENT +
+        ((rt_uint32_t)percent * (100U - LCD_BL_MIN_DUTY_PERCENT)) / 100U;
+    pulse = (LCD_BL_PWM_PERIOD_NS * duty_percent) / 100U;
+    result = rt_pwm_set(g_lcd_bl_pwm, LCD_BL_PWM_CHANNEL,
+                        LCD_BL_PWM_PERIOD_NS, pulse);
+    return result;
+}
+
+rt_err_t lcd_backlight_get_percent(rt_uint8_t *percent)
+{
+    struct rt_pwm_configuration configuration = {0};
+    rt_uint64_t duty_times_100;
+    rt_uint64_t scaled;
+
+    if (percent == RT_NULL) return -RT_EINVAL;
+    if (g_lcd_bl_pwm == RT_NULL)
+    {
+        g_lcd_bl_pwm = (struct rt_device_pwm *)rt_device_find(LCD_BL_PWM_DEV_NAME);
+        if (g_lcd_bl_pwm == RT_NULL) return -RT_ENOSYS;
+    }
+    configuration.channel = LCD_BL_PWM_CHANNEL;
+    if (rt_device_control(&g_lcd_bl_pwm->parent, PWM_CMD_GET,
+                          &configuration) != RT_EOK ||
+        configuration.period == 0U)
+        return -RT_ERROR;
+    duty_times_100 = (rt_uint64_t)configuration.pulse * 100U;
+    if (duty_times_100 <=
+        (rt_uint64_t)configuration.period * LCD_BL_MIN_DUTY_PERCENT)
+    {
+        *percent = 0U;
+        return RT_EOK;
+    }
+    scaled = ((duty_times_100 -
+              (rt_uint64_t)configuration.period * LCD_BL_MIN_DUTY_PERCENT) *
+              100U +
+              (rt_uint64_t)configuration.period *
+              (100U - LCD_BL_MIN_DUTY_PERCENT) / 2U) /
+             ((rt_uint64_t)configuration.period *
+              (100U - LCD_BL_MIN_DUTY_PERCENT));
+    if (scaled > 100U) scaled = 100U;
+    *percent = (rt_uint8_t)scaled;
     return RT_EOK;
 }
 #endif
@@ -862,29 +1257,27 @@ uint32_t calculate_idle_percentage(void)
 static void dc_irq_handler(void)
 {
     rt_interrupt_enter();
+    lcd_surface_stats.dc_frame_irqs++;
     Cy_GFXSS_Clear_DC_Interrupt(gfxbase, &lcd_gfx_context);
-    rt_sem_release(&_lcd.lcd_lock);
+    if (lcd_present_waiting)
+    {
+        lcd_present_waiting = RT_FALSE;
+        rt_sem_release(&_lcd.lcd_lock);
+    }
     rt_interrupt_leave();
 }
 
 static void gpu_irq_handler(void)
 {
     rt_interrupt_enter();
-    /*
-     * VG-Lite is built in bare-metal mode on this board, so its IRQ handler
-     * does not run the FreeRTOS completion path.  Sample the real hardware
-     * completion edge before the GFXSS interrupt is acknowledged.  The weak
-     * default lives in vg_lite_hal.c and the LVGL runtime profiler overrides
-     * it when profiling is enabled.
-     */
-    extern void vg_lite_hardware_complete_perf_hook(void);
-    vg_lite_hardware_complete_perf_hook();
-    Cy_GFXSS_Clear_GPU_Interrupt(gfxbase, &lcd_gfx_context);
+    /* Publish the VG-Lite END status before acknowledging the GFXSS wrapper
+     * interrupt. This wakes the scheduler-aware waiter and scanout worker. */
     vg_lite_IRQHandler();
+    Cy_GFXSS_Clear_GPU_Interrupt(gfxbase, &lcd_gfx_context);
     rt_interrupt_leave();
 }
 
-#if defined(BSP_USING_LVGL) || LCD_ROTATION_BACKEND_VGLITE
+#if defined(BSP_USING_LVGL) || defined(FEATHERTALK_USING_GPU_UI) || LCD_ROTATION_BACKEND_VGLITE
 static rt_err_t lcd_vglite_init_once(void)
 {
     static rt_bool_t vglite_ready = RT_FALSE;
@@ -901,6 +1294,14 @@ static rt_err_t lcd_vglite_init_once(void)
     vg_params.contiguous_mem_base[VG_PARAMS_POS] = (volatile void *)vglite_heap_base;
     vg_params.contiguous_mem_size[VG_PARAMS_POS] = VGLITE_HEAP_SIZE;
     vg_lite_init_mem(&vg_params);
+#if defined(FEATHERTALK_USING_GPU_UI) || defined(FEATHERTALK_USING_LVGL_GPU_BATCH)
+    vglite_status = vg_lite_set_command_buffer_size(DEFAULT_GPU_CMD_BUFFER_SIZE);
+    if (vglite_status != VG_LITE_SUCCESS)
+    {
+        LOG_E("VG-Lite command buffer size failed: %d", vglite_status);
+        return -RT_ERROR;
+    }
+#endif
 
     vglite_status = vg_lite_init((LCD_LOGICAL_WIDTH) / 4,
                                  (LCD_LOGICAL_HEIGHT) / 4);
@@ -940,6 +1341,10 @@ rt_err_t psoc_lcd_init(struct drv_lcd_device *lcd)
     }
 
     gfxbase->GFXSS_DC.DCNANO.GCREGFRAMEBUFFERSTRIDE = LCD_STRIDE * (LCD_BITS_PER_PIXEL / 8);
+    /* DISP0 is the hardware frame-consumed event used to retire a scanout
+     * surface.  The vendor init path currently ignores dc_cfg.interrupt_mask,
+     * so enable it explicitly before the first display commit. */
+    gfxbase->GFXSS_DC.DCNANO.GCREGDISPLAYINTRENABLE = GFXSS_DC_DISP0_INT_MASK;
     /* Initialize GFXXs DC interrupt */
     status = Cy_SysInt_Init(&dc_irq_cfg, dc_irq_handler);
     if (CY_SYSINT_SUCCESS != status)
@@ -1028,6 +1433,36 @@ int drv_lcd_hw_init(void)
         goto __exit;
     }
 
+#if defined(FEATHERTALK_USING_GPU_UI) || defined(FEATHERTALK_USING_LVGL_GPU_BATCH)
+    result = rt_sem_init(&lcd_gpu_irq_sem, "gpu_done", 0, RT_IPC_FLAG_FIFO);
+    if (result != RT_EOK)
+    {
+        LOG_E("init GPU completion semaphore failed!\n");
+        result = -RT_ENOMEM;
+        goto __exit;
+    }
+    result = rt_sem_init(&lcd_gpu_present_work_sem, "gpu_scan", 0, RT_IPC_FLAG_FIFO);
+    if (result != RT_EOK)
+    {
+        LOG_E("init GPU present semaphore failed!\n");
+        result = -RT_ENOMEM;
+        goto __exit;
+    }
+    result = rt_thread_init(&lcd_gpu_present_thread, "gpu_present",
+                            lcd_gpu_present_worker, RT_NULL,
+                            lcd_gpu_present_thread_stack,
+                            sizeof(lcd_gpu_present_thread_stack),
+                            LCD_GPU_PRESENT_THREAD_PRIORITY, 5U);
+    if (result != RT_EOK)
+    {
+        LOG_E("init GPU present worker failed!\n");
+        result = -RT_ENOMEM;
+        goto __exit;
+    }
+    lcd_gpu_sync_ready = RT_TRUE;
+    rt_thread_startup(&lcd_gpu_present_thread);
+#endif
+
 #if LCD_USE_AXIDMAC_AREA_COPY
     lcd_axidmac_lock = rt_mutex_create("lcd_dma", RT_IPC_FLAG_FIFO);
     if (lcd_axidmac_lock == RT_NULL)
@@ -1078,9 +1513,9 @@ int drv_lcd_hw_init(void)
         goto __exit;
     }
 #ifdef RT_USING_PWM
-    lcd_backlight_set(LCD_BL_DEFAULT_BRIGHTNESS);
+    lcd_backlight_set_percent(LCD_BL_DEFAULT_PERCENT);
 #endif
-#if defined(BSP_USING_LVGL) || LCD_ROTATION_BACKEND_VGLITE
+#if defined(BSP_USING_LVGL) || defined(FEATHERTALK_USING_GPU_UI) || LCD_ROTATION_BACKEND_VGLITE
     if (lcd_vglite_init_once() != RT_EOK)
     {
         result = -RT_ERROR;

@@ -30,6 +30,13 @@ struct lv_vector_path_t {
     lv_vector_path_quality_t quality;
     lv_array_t ops;
     lv_array_t points;
+    /* Persistent resources (SVG assets and vector glyphs) may attach a
+     * renderer-native representation here.  The owning draw backend is
+     * responsible for freeing it.  Mutable paths invalidate the attachment
+     * before changing their command stream. */
+    void * backend_data;
+    void (*backend_data_free_cb)(void * data);
+    bool immutable;
 };
 
 struct lv_vector_gradient_t {
@@ -95,6 +102,11 @@ struct lv_vector_dsc_t {
  **********************/
 
 void lv_vector_for_each_destroy_tasks(lv_ll_t * task_list, vector_draw_task_cb cb, void * data);
+
+bool lv_vector_path_is_immutable(const lv_vector_path_t * path);
+void * lv_vector_path_get_backend_data(const lv_vector_path_t * path);
+void lv_vector_path_set_backend_data(lv_vector_path_t * path, void * data,
+                                     void (*free_cb)(void * data));
 
 /**********************
  *      MACROS

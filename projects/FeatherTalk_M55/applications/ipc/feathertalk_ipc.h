@@ -1,6 +1,7 @@
 #ifndef FEATHERTALK_M55_IPC_H
 #define FEATHERTALK_M55_IPC_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef struct
@@ -34,5 +35,6 @@ void feathertalk_ipc_set_lvgl_ready(void);
 int feathertalk_ipc_get_system_status(feathertalk_system_status_t *status);
 int feathertalk_ipc_get_quick_status(feathertalk_quick_status_t *status);
 int feathertalk_ipc_set_quick_control(uint8_t control, uint8_t value);
+void feathertalk_ipc_set_periodic_report_enabled(bool enabled);
 
 #endif /* FEATHERTALK_M55_IPC_H */

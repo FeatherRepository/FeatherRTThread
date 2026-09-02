@@ -58,6 +58,11 @@ void __attribute__((weak)) lv_draw_task_route_perf_hook(uint32_t unit_id, uint32
     LV_UNUSED(task_type);
 }
 
+bool __attribute__((weak)) lv_draw_batch_defer_dispatch(void)
+{
+    return false;
+}
+
 void lv_draw_init(void)
 {
 #if LV_USE_OS
@@ -152,7 +157,12 @@ void lv_draw_finalize_task_creation(lv_layer_t * layer, lv_draw_task_t * t)
 
         lv_draw_task_route_perf_hook(t->preferred_draw_unit_id, t->type);
 
-        lv_draw_dispatch();
+        /* Product renderers may collect the complete refresh before allowing
+         * draw units to encode it. Evaluation still happens immediately so
+         * dependency and preferred-unit metadata remain identical to LVGL. */
+        if(!lv_draw_batch_defer_dispatch()) {
+            lv_draw_dispatch();
+        }
     }
     else {
         /*Let the draw units set their preference score*/

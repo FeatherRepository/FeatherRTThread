@@ -104,6 +104,7 @@ if os.path.exists(os.path.join(os.getcwd(), "libraries")):
     env.VariantDir('build/libraries/components', 'libraries/components', duplicate=0)
     env.VariantDir('build/libraries/M55_Config/board', 'libraries/M55_Config/board', duplicate=0)
     env.VariantDir('build/libraries/Common/board', 'libraries/Common/board', duplicate=0)
+    env.VariantDir('build/libraries/FeatherUI', 'libraries/FeatherUI', duplicate=0)
 
     objs.extend(SConscript('libraries/HAL_Drivers/SConscript', variant_dir='build/libraries/HAL_Drivers', duplicate=0))
     objs.extend(SConscript('libraries/components/Infineon_cmsis-latest/SConscript', variant_dir='build/libraries/components/Infineon_cmsis-latest', duplicate=0))
@@ -120,6 +121,7 @@ if os.path.exists(os.path.join(os.getcwd(), "libraries")):
     objs.extend(SConscript('libraries/components/littlefs/SConscript', variant_dir='build/libraries/components/littlefs', duplicate=0))
     objs.extend(SConscript('libraries/components/SConscript', variant_dir='build/libraries/components', duplicate=0))
     objs.extend(SConscript('libraries/Common/board/SConscript', variant_dir='build/libraries/Common/board', duplicate=0))
+    objs.extend(SConscript('libraries/FeatherUI/SConscript', variant_dir='build/libraries/FeatherUI', duplicate=0))
     objs.extend(SConscript('libraries/components/lvgl_9.2.0/SConscript', variant_dir='build/libraries/components/lvgl_9.2.0', duplicate=0))
 else:
     # Set VariantDir for external libraries
@@ -127,6 +129,7 @@ else:
     env.VariantDir('build/libraries/components', '../../libraries/components', duplicate=0)
     env.VariantDir('build/libraries/M55_Config/board', '../../libraries/M55_Config/board', duplicate=0)
     env.VariantDir('build/libraries/Common/board', '../../libraries/Common/board', duplicate=0)
+    env.VariantDir('build/libraries/FeatherUI', '../../libraries/FeatherUI', duplicate=0)
 
     objs.extend(SConscript('../../libraries/HAL_Drivers/SConscript', variant_dir='build/libraries/HAL_Drivers', duplicate=0))
     objs.extend(SConscript('../../libraries/components/Infineon_cmsis-latest/SConscript', variant_dir='build/libraries/components/Infineon_cmsis-latest', duplicate=0))
@@ -143,6 +146,7 @@ else:
     objs.extend(SConscript('../../libraries/components/littlefs/SConscript', variant_dir='build/libraries/components/littlefs', duplicate=0))
     objs.extend(SConscript('../../libraries/components/SConscript', variant_dir='build/libraries/components', duplicate=0))
     objs.extend(SConscript('../../libraries/Common/board/SConscript', variant_dir='build/libraries/Common/board', duplicate=0))
+    objs.extend(SConscript('../../libraries/FeatherUI/SConscript', variant_dir='build/libraries/FeatherUI', duplicate=0))
     objs.extend(SConscript('../../libraries/components/lvgl_9.2.0/SConscript', variant_dir='build/libraries/components/lvgl_9.2.0', duplicate=0))
 # make a building
 DoBuilding(TARGET, objs)

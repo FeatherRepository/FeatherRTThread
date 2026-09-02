@@ -39,3 +39,5 @@ settings/
 *.uvguix*
 cconfig.h
 *.asm
+/tmp/
+/tools/freather/logs/

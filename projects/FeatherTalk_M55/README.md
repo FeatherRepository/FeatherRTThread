@@ -4,8 +4,11 @@
 
 ## Introduction
 
-This product project is derived from **Edgi_Talk_M55_LVGL** and provides the initial LVGL application running on the **M55 application core** under the **RT-Thread real-time operating system**.
-The default screen is the official **LVGL Music Demo**, used to verify the LCD, touch input, LVGL rendering flow, and M55 graphics configuration. The product copy deliberately removes the large Virtual3D models and animation resources inherited from the SDK demo.
+This product runs on the **M55 application core** under RT-Thread. The default UI is the feature-complete **LVGL 9.2 FeatherTalk Shell**, with a product-specific frame pipeline: collect all draw tasks first, encode one continuous VG-Lite command chain, submit the GPU once per frame, and present through two direct-scanout RGB565 framebuffers.
+
+`libraries/FeatherUI` and `applications/gpu_ui` remain GPU-native experiments and comparison implementations. The current `product/edgi-talk` configuration enables `FEATHERTALK_USING_UI_SHELL` and `FEATHERTALK_USING_LVGL_GPU_BATCH`, and does not start `FEATHERTALK_USING_GPU_UI`.
+
+Run `feather_ui_bench` on the M55 console for a repeatable 60-frame full-screen benchmark and `feather_ui_status` for cumulative task, phase, GPU-busy, and scanout statistics. Two consecutive 2026-09-01 board runs measured 60/60 frames, **22.70–23.98 FPS**, one submit per frame, 100% GPU-routed draw tasks, **23.66–24.99% hardware GPU busy**, and about 7.4/19.4/10.8 ms average collect/encode/finish phases. Task-routing percentage and hardware-busy percentage are intentionally reported separately.
 
 ### LVGL Overview
 
@@ -76,16 +79,16 @@ LVGL is **MIT licensed** and supported by **SquareLine Studio** for GUI design a
 * Developed on the **Edgi-Talk platform**, running on the **M55 application core**.
 * Example features:
 
-  * Initialize **LVGL 9.2**, the LCD display driver, and the touch input driver
-  * Start the official **lv_demo_music** UI by default
-  * Support switching to **lv_demo_benchmark** and **lv_demo_stress**
+  * Initialize **LVGL 9.2**, frame-level GPU batching, LCD direct scanout, and touch input
+  * Start the FeatherTalk product Shell by default
+  * Keep **lv_demo_music**, **lv_demo_benchmark**, and **lv_demo_stress** as optional SDK comparison builds when the product Shell is disabled
   * Automatically respond to M33 HELLO and heartbeat messages over the PSoC E84 IPC Pipe
-  * Enable M55 I-Cache/D-Cache by default and use AXIDMAC to optimize RGB565 area copy
+  * Enable M55 I-Cache/D-Cache and draw directly into dual DC scanout framebuffers
 * Code structure is clear for understanding display driver integration and LVGL porting.
 
 ## Demo Description
 
-This project selects the LVGL demo through the `BSP_LVGL_DEMO_*` configuration options. The default configuration is `BSP_LVGL_DEMO_MUSIC`.
+The `BSP_LVGL_DEMO_*` options select native SDK comparison demos. They are not started while the FeatherTalk product Shell is enabled; disable the Shell first and select only one demo for an official-demo A/B build.
 
 | Configuration | Demo | Description |
 | --- | --- | --- |
@@ -108,11 +111,11 @@ To switch demos, modify the LVGL Demo configuration in **RT-Thread Settings** or
 ### Running Result
 
 * After flashing and powering on, the example starts automatically.
-* With the default configuration, the LCD starts the official **LVGL Music Demo**.
-* The serial console prints the current demo and LCD rotation angle, for example:
+* With the default configuration, the LCD starts the FeatherTalk UI Shell.
+* The serial console prints the UI-ready state, for example:
 
 ```
-LVGL music demo start, lcd rotation=0
+[FeatherTalk UI] shell ready: 480x800 apps=5 route-depth=1
 ```
 
 * `feather_m55_status` reports the M55 IPC and LVGL-ready state on the UART2 diagnostic console.
@@ -129,7 +132,7 @@ libs/TARGET_APP_KIT_PSE84_EVAL_EPC2/config/design.modus
 ```
 
 * Save and regenerate code after modifications.
-* The default configuration enables `BSP_LVGL_ENABLE_CPU_CACHE` and `BSP_LCD_USE_AXIDMAC_AREA_COPY`. If cache, framebuffer, or LCD refresh settings are changed, also check display buffer coherency.
+* The product configuration enables CPU cache, LVGL GPU batching, FULL render, and dual-framebuffer direct scanout. If cache, framebuffer, stride, or submission boundaries change, re-check GPU/DC ownership and the ELF `.cy_gpu_buf` size.
 * If the screen shows no output, check:
 
   * LCD connections and power supply

@@ -1091,6 +1091,11 @@ typedef unsigned int        vg_lite_color_t;
     /* Flush the command buffer without waiting for GPU to complete. */
     vg_lite_error_t vg_lite_flush(void);
 
+    /* Wait for the most recently submitted command buffer without submitting
+     * commands currently being assembled in the alternate buffer.  This is
+     * the synchronization primitive used by pipelined renderers. */
+    vg_lite_error_t vg_lite_wait(void);
+
     /* Get the value of register from register's address. */
     vg_lite_error_t vg_lite_get_register(vg_lite_uint32_t address, vg_lite_uint32_t* result);
 
@@ -1192,6 +1197,14 @@ typedef unsigned int        vg_lite_color_t;
 
     /* Upload a path to GPU memory so GPU can access it directly. */
     vg_lite_error_t vg_lite_upload_path(vg_lite_path_t *path);
+
+    /* Select whether push_call() appends the vendor CALL workaround STALL.
+     * This is a diagnostic control for validating a new GPU/driver pairing:
+     * -1 restores the build-time default, 0 disables it, 1 enables it. */
+    void vg_lite_set_call_stall_for_diagnostics(vg_lite_int32_t enabled);
+
+    /* Upload the flattened stroke command stream to GPU memory. */
+    vg_lite_error_t vg_lite_upload_stroke(vg_lite_path_t *path);
 
     /* Initialize a path object with attributes. */
     vg_lite_error_t vg_lite_init_path(vg_lite_path_t *path,
@@ -1369,6 +1382,15 @@ typedef unsigned int        vg_lite_color_t;
 
     /* Can be called before vg_lite_init() to overwrite the default VG_LITE_COMMAND_BUFFER_SIZE */
     vg_lite_error_t vg_lite_set_command_buffer_size(vg_lite_uint32_t size);
+
+    /* Read-only command-buffer occupancy for frame batching/profiling. */
+    void vg_lite_get_command_buffer_usage(vg_lite_uint32_t *used,
+                                          vg_lite_uint32_t *capacity);
+
+    /* Platform hook used after an uploaded path command stream is written.
+       Cache-coherent ports may keep the default no-op implementation. */
+    void vg_lite_uploaded_path_cache_clean(const void *memory,
+                                           vg_lite_uint32_t bytes);
 
     /* Set a user-defined external memory buffer (physical, 64-byte aligned) as VGLite command buffer.
        It should be called after vg_lite_init(). */

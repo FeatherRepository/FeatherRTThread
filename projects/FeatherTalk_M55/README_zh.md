@@ -4,8 +4,20 @@
 
 ## 简介
 
-本产品工程由 **Edgi_Talk_M55_LVGL** 派生，提供运行在 **RT-Thread 实时操作系统** 的 **M55 应用核** 上的初始 LVGL 应用。
-当前工程默认启动 LVGL 官方 **Music Demo**，用于验证 LCD、触摸输入、LVGL 渲染流程及 M55 图形配置。产品工程已移除 SDK 示例中体积较大的 Virtual3D 模型和动画资源。
+本产品工程运行在 **RT-Thread 实时操作系统** 的 **M55 应用核**。当前默认 UI 是已完成业务页面和交互的 **LVGL 9.2 FeatherTalk Shell**，但刷新管线已做产品级改造：整帧 draw task 先收集，再连续编码为一条 VG-Lite 命令链，每帧只提交一次 GPU，并使用双 RGB565 framebuffer 直接换帧。
+
+`libraries/FeatherUI` 和 `applications/gpu_ui` 保留为 GPU 原生实验/对照实现；当前 `product/edgi-talk` 配置启用 `FEATHERTALK_USING_UI_SHELL` 与 `FEATHERTALK_USING_LVGL_GPU_BATCH`，不启动 `FEATHERTALK_USING_GPU_UI`。
+
+## 当前 GPU 批处理路径
+
+- LVGL 页面、控件、主题、动画、字体和触摸事件模型保持不变。
+- 刷新阶段先完成全部任务收集，再统一 dispatch；当前桌面 GPU draw task 占比 100%。
+- VG-Lite 命令在同一帧连续追加，正常路径为 1 submit/frame。
+- 两张 512×800 stride 的 framebuffer 同时是 LVGL FULL draw buffer 和 DC scanout buffer，没有中间整帧 copy。
+- VG-Lite/刷新/字体热代码放入 M55 ITCM；冷页面和业务代码仍在外部 XIP。
+- 串口执行 `feather_ui_bench` 可运行可重复的 60 帧全屏基准，执行 `feather_ui_status` 可查看累计任务、分阶段耗时、GPU busy 和 scanout 等待。
+
+2026-09-01 连续两轮板测基线为 60/60 帧、**22.70–23.98 FPS**、1 submit/frame、GPU 任务路由占比 100%、GPU 核心实际 busy **23.66–24.99%**；平均 collect/encode/finish 约为 7.4/19.4/10.8 ms。任务路由率和硬件忙碌率是两个独立指标。详细架构和性能记录见 [PSE84 SoC/GPU2D 技术梳理](../../docs/board/PSOC-Edge-E84/PSE84_SOC_GPU2D_zh.md)。
 
 ## LVGL 简介
 
@@ -55,16 +67,16 @@ LVGL 作为一个开源项目，采用 **MIT License** 开源协议，既适合�
 * 工程基于 **Edgi-Talk** 平台开发，运行在 **M55 应用核** 上。
 * 示例功能包括：
 
-  * 初始化 **LVGL 9.2** 图形库、LCD 显示驱动和触摸输入驱动
-  * 默认启动官方 **lv_demo_music** 界面
-  * 支持切换 **lv_demo_benchmark** 和 **lv_demo_stress**
+  * 初始化 **LVGL 9.2**、整帧 GPU batch、LCD direct scanout 和触摸输入驱动
+  * 默认启动 FeatherTalk 产品 Shell；官方 `lv_demo_music` 不与产品 Shell 同时启动
+  * 关闭产品 Shell 后仍可切换 **lv_demo_music**、**lv_demo_benchmark** 和 **lv_demo_stress** 作 SDK 对照
   * 通过 PSoC E84 IPC Pipe 自动响应 M33 的 HELLO 和心跳消息
-  * 默认开启 M55 I-Cache/D-Cache，并使用 AXIDMAC 优化 RGB565 区域拷贝
+  * 默认开启 M55 I-Cache/D-Cache，双 framebuffer 直接由 GPU 绘制并交给 DC 扫描
 * 工程结构简洁，便于理解 **显示驱动接口** 和 **LVGL 移植流程**。
 
 ## 示例说明
 
-当前工程通过 `BSP_LVGL_DEMO_*` 配置项选择启动的 LVGL 示例，默认配置为 `BSP_LVGL_DEMO_MUSIC`。
+以下 `BSP_LVGL_DEMO_*` 是 SDK 原生 LVGL 示例。产品配置启用 FeatherTalk UI Shell 时不启动这些示例；需要做官方 demo A/B 时应先关闭产品 Shell，并且一次只启用一个 demo。
 
 | 配置项 | 示例 | 说明 |
 | --- | --- | --- |
@@ -87,11 +99,11 @@ LVGL 作为一个开源项目，采用 **MIT License** 开源协议，既适合�
 ### 运行效果
 
 * 烧录完成后，开发板上电即可运行示例工程。
-* 默认配置下，LCD 会自动启动官方 **LVGL Music Demo**。
-* 串口会打印当前启动的示例和 LCD 旋转角度，例如：
+* 默认配置下，LCD 会启动 FeatherTalk UI Shell。
+* 串口会打印 UI 就绪信息，例如：
 
 ```
-LVGL music demo start, lcd rotation=0
+[FeatherTalk UI] shell ready: 480x800 apps=5 route-depth=1
 ```
 
 * 在 M55 UART2 诊断终端执行 `feather_m55_status` 可查看 IPC 和 LVGL 就绪状态。
@@ -108,7 +120,7 @@ libs/TARGET_APP_KIT_PSE84_EVAL_EPC2/config/design.modus
 ```
 
 * 修改完成后保存配置，并重新生成代码。
-* 默认配置已开启 `BSP_LVGL_ENABLE_CPU_CACHE` 和 `BSP_LCD_USE_AXIDMAC_AREA_COPY`。如需修改缓存、Framebuffer 或 LCD 刷新方式，请同步检查显示缓冲区一致性。
+* 默认产品配置开启 CPU Cache、LVGL GPU batch、FULL render 和双 framebuffer direct scanout；如需修改 Cache、Framebuffer、stride 或提交边界，请同步检查 GPU/DC 所有权与 ELF 中 `.cy_gpu_buf` 大小。
 * 若显示屏幕无输出，请检查：
 
   * LCD 硬件连接与电源供给是否正常

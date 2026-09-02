@@ -13,6 +13,8 @@
 #include "../misc/lv_log.h"
 #include "../misc/lv_assert.h"
 #include "../stdlib/lv_string.h"
+#include "lv_font_fmt_txt.h"
+#include "lv_gpu_batch.h"
 
 /*********************
  *      DEFINES
@@ -29,6 +31,41 @@
 /**********************
  *  STATIC VARIABLES
  **********************/
+
+#ifdef FEATHERTALK_USING_LVGL_GPU_BATCH
+#define LV_FONT_DSC_CACHE_SLOTS 1024U
+#define LV_FONT_DSC_CACHE_PROBES 8U
+typedef struct
+{
+    const lv_font_t *font;
+    uint32_t letter;
+    uint32_t letter_next;
+    lv_font_glyph_dsc_t dsc;
+    bool found;
+    bool valid;
+} lv_font_dsc_cache_entry_t;
+
+static lv_font_dsc_cache_entry_t s_font_dsc_cache[LV_FONT_DSC_CACHE_SLOTS];
+
+static bool font_chain_has_stable_descriptors(const lv_font_t *font)
+{
+    while(font != NULL) {
+        if(font->get_glyph_dsc != lv_font_get_glyph_dsc_fmt_txt &&
+           !font->glyph_dsc_cacheable) return false;
+        font = font->fallback;
+    }
+    return true;
+}
+
+static uint32_t font_dsc_cache_slot(const lv_font_t *font, uint32_t letter, uint32_t letter_next)
+{
+    uintptr_t key = (uintptr_t)font;
+    return (uint32_t)(((key >> 4U) ^ (key >> 13U) ^
+                       ((uintptr_t)letter * 2654435761UL) ^
+                       ((uintptr_t)letter_next * 2246822519UL)) &
+                      (LV_FONT_DSC_CACHE_SLOTS - 1U));
+}
+#endif
 
 /**********************
  * GLOBAL PROTOTYPES
@@ -65,6 +102,32 @@ bool lv_font_get_glyph_dsc(const lv_font_t * font_p, lv_font_glyph_dsc_t * dsc_o
     LV_ASSERT_NULL(font_p);
     LV_ASSERT_NULL(dsc_out);
 
+#ifdef FEATHERTALK_USING_LVGL_GPU_BATCH
+    bool cacheable = font_chain_has_stable_descriptors(font_p);
+    uint32_t cache_slot = 0U;
+    uint32_t cache_probe;
+    lv_font_dsc_cache_entry_t *cache_entry = NULL;
+    if(cacheable) {
+        cache_slot = font_dsc_cache_slot(font_p, letter, letter_next);
+        for(cache_probe = 0U; cache_probe < LV_FONT_DSC_CACHE_PROBES; cache_probe++) {
+            lv_font_dsc_cache_entry_t *candidate =
+                &s_font_dsc_cache[(cache_slot + cache_probe) & (LV_FONT_DSC_CACHE_SLOTS - 1U)];
+            if(candidate->valid && candidate->font == font_p &&
+               candidate->letter == letter && candidate->letter_next == letter_next) {
+                *dsc_out = candidate->dsc;
+                lv_gpu_batch_note_font_descriptor_cache(true);
+                return candidate->found;
+            }
+            if(!candidate->valid) {
+                cache_entry = candidate;
+                break;
+            }
+        }
+        if(cache_entry == NULL) cache_entry = &s_font_dsc_cache[cache_slot];
+        lv_gpu_batch_note_font_descriptor_cache(false);
+    }
+#endif
+
 #if LV_USE_FONT_PLACEHOLDER
     const lv_font_t * placeholder_font = NULL;
 #endif
@@ -78,6 +141,16 @@ bool lv_font_get_glyph_dsc(const lv_font_t * font_p, lv_font_glyph_dsc_t * dsc_o
         if(found) {
             if(!dsc_out->is_placeholder) {
                 dsc_out->resolved_font = f;
+#ifdef FEATHERTALK_USING_LVGL_GPU_BATCH
+                if(cacheable) {
+                    cache_entry->font = font_p;
+                    cache_entry->letter = letter;
+                    cache_entry->letter_next = letter_next;
+                    cache_entry->dsc = *dsc_out;
+                    cache_entry->found = true;
+                    cache_entry->valid = true;
+                }
+#endif
                 return true;
             }
 #if LV_USE_FONT_PLACEHOLDER
@@ -94,6 +167,16 @@ bool lv_font_get_glyph_dsc(const lv_font_t * font_p, lv_font_glyph_dsc_t * dsc_o
         placeholder_font->get_glyph_dsc(placeholder_font, dsc_out, letter,
                                         placeholder_font->kerning == LV_FONT_KERNING_NONE ? 0 : letter_next);
         dsc_out->resolved_font = placeholder_font;
+#ifdef FEATHERTALK_USING_LVGL_GPU_BATCH
+        if(cacheable) {
+            cache_entry->font = font_p;
+            cache_entry->letter = letter;
+            cache_entry->letter_next = letter_next;
+            cache_entry->dsc = *dsc_out;
+            cache_entry->found = true;
+            cache_entry->valid = true;
+        }
+#endif
         return true;
     }
 #endif
@@ -112,6 +195,17 @@ bool lv_font_get_glyph_dsc(const lv_font_t * font_p, lv_font_glyph_dsc_t * dsc_o
     dsc_out->ofs_y = 0;
     dsc_out->format = LV_FONT_GLYPH_FORMAT_A1;
     dsc_out->is_placeholder = true;
+
+#ifdef FEATHERTALK_USING_LVGL_GPU_BATCH
+    if(cacheable) {
+        cache_entry->font = font_p;
+        cache_entry->letter = letter;
+        cache_entry->letter_next = letter_next;
+        cache_entry->dsc = *dsc_out;
+        cache_entry->found = false;
+        cache_entry->valid = true;
+    }
+#endif
 
     return false;
 }

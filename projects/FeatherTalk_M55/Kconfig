@@ -35,13 +35,47 @@ source "$RTT_DIR/../libraries/components/CherryUSB-1.6.0/Kconfig.rtt"
 
 menu "FeatherTalk Product"
 
+config FEATHERTALK_USING_GPU_UI
+    bool "Enable FeatherUI GPU-native shell"
+    depends on BSP_USING_LCD
+    default n
+    help
+        Replace LVGL with the product-owned retained UI runtime. Every frame is
+        collected into one immutable display list, encoded into one VG-Lite
+        command buffer, submitted once, and presented by swapping two native
+        DC8000Nano scanout surfaces. This option is intentionally independent
+        from BSP_USING_LVGL.
+
 config FEATHERTALK_USING_UI_SHELL
     bool "Enable FeatherTalk Windows Phone style UI shell"
-    depends on BSP_USING_LVGL
+    depends on BSP_USING_LVGL && !FEATHERTALK_USING_GPU_UI
     default y
     help
         Build the product-owned 480 x 800 shell, bounded page router, and
         application registry instead of starting an upstream LVGL demo.
+
+config FEATHERTALK_USING_LVGL_GPU_BATCH
+    bool "Collect each LVGL refresh into a frame-level GPU batch"
+    depends on FEATHERTALK_USING_UI_SHELL && BSP_USING_LVGL
+    default y
+    help
+        Keep the full LVGL product widget and interaction model, but defer draw
+        dispatch until the scene walk is complete. VG-Lite commands are then
+        encoded into a long frame stream and submitted at the display boundary.
+        Software draw tasks and short-lived layer resources remain explicit,
+        measured synchronization boundaries until their GPU replacements land.
+
+config FEATHERTALK_LVGL_GPU_TRANSIENT_BYTES
+    int "Per-frame GPU transient resource arena size"
+    depends on FEATHERTALK_USING_LVGL_GPU_BATCH
+    default 196608
+    help
+        GPU-visible storage retained until the current frame completes. The
+        first implementation uses it for A8 glyph copies so LVGL's reusable
+        font scratch buffer never forces a per-glyph GPU finish. Arena overflow
+        creates a measured split and safely reuses the storage. 192 KiB is the
+        largest guarded size that fits beside two 480x800 RGB565 buffers and
+        the enlarged VG-Lite command/tessellation buffers in the 3 MiB GFX RAM.
 
 config FEATHERTALK_USING_FLASH_STORAGE
     bool "Enable fixed 2 MiB internal Flash storage"

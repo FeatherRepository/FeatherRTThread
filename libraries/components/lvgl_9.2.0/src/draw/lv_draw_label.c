@@ -20,6 +20,7 @@
 #include "../stdlib/lv_mem.h"
 #include "../stdlib/lv_string.h"
 #include "../core/lv_global.h"
+#include "lv_gpu_batch.h"
 
 /*********************
  *      DEFINES
@@ -414,7 +415,16 @@ static void draw_letter(lv_draw_unit_t * draw_unit, lv_draw_glyph_dsc_t * dsc,  
 
     if(g.resolved_font) {
         lv_draw_buf_t * draw_buf = NULL;
+        lv_draw_buf_t * cached_draw_buf = NULL;
         if(LV_FONT_GLYPH_FORMAT_NONE < g.format && g.format < LV_FONT_GLYPH_FORMAT_IMAGE) {
+            cached_draw_buf = lv_gpu_batch_glyph_cache_lookup(g.resolved_font,
+                                                               g.gid.index,
+                                                               g.box_w,
+                                                               g.box_h,
+                                                               (uint8_t)g.format);
+        }
+        if(cached_draw_buf == NULL &&
+           LV_FONT_GLYPH_FORMAT_NONE < g.format && g.format < LV_FONT_GLYPH_FORMAT_IMAGE) {
             /*Only check draw buf for bitmap glyph*/
             draw_buf = lv_draw_buf_reshape(dsc->_draw_buf, 0, g.box_w, g.box_h, LV_STRIDE_AUTO);
             if(draw_buf == NULL) {
@@ -429,7 +439,21 @@ static void draw_letter(lv_draw_unit_t * draw_unit, lv_draw_glyph_dsc_t * dsc,  
             }
         }
 
-        dsc->glyph_data = (void *) lv_font_get_glyph_bitmap(&g, draw_buf);
+        if(cached_draw_buf != NULL) {
+            dsc->glyph_data = cached_draw_buf;
+        }
+        else {
+            dsc->glyph_data = (void *) lv_font_get_glyph_bitmap(&g, draw_buf);
+            if(dsc->glyph_data != NULL && draw_buf != NULL) {
+                lv_draw_buf_t * stored = lv_gpu_batch_glyph_cache_store(g.resolved_font,
+                                                                         g.gid.index,
+                                                                         g.box_w,
+                                                                         g.box_h,
+                                                                         (uint8_t)g.format,
+                                                                         draw_buf);
+                if(stored != NULL) dsc->glyph_data = stored;
+            }
+        }
         dsc->format = dsc->glyph_data ? g.format : LV_FONT_GLYPH_FORMAT_NONE;
     }
     else {

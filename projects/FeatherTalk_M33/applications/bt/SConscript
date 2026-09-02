@@ -25,6 +25,14 @@ if not GetDepend('FEATHERTALK_BT_STACK_BK'):
 
 if not os.path.isdir(bt_root) or not os.path.isdir(btstack_root):
     print('BK stack: bluetooth/port_rtthread or bluetooth/reference/btstack missing')
+    # Keep the M33 supervisor and the shared-SMIF safety service buildable even
+    # when the optional BlueKitchen source checkout is absent.  The stub
+    # reports Bluetooth unavailable; it never claims that the controller is
+    # ready and is not linked when the real stack is present.
+    group = DefineGroup('Bluetooth BK unavailable',
+                        ['bt_service_unavailable.c'],
+                        depend = [''],
+                        CPPPATH = [os.path.normpath(os.path.join(cwd, '..'))])
     Return('group')
 if not os.path.isfile(firmware_source):
     print('BK stack: CYW55500A1 firmware submodule missing:')

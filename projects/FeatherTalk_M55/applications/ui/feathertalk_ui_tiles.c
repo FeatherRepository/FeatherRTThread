@@ -124,6 +124,8 @@ static int32_t s_interaction_start_scroll_y;
 static lv_area_t s_interaction_visual_area;
 static bool s_interaction_visual_valid;
 
+static void tile_edit_enter(ft_start_tile_runtime_t *tile);
+
 static uint8_t clamp_u8(uint8_t value, uint8_t minimum, uint8_t maximum)
 {
     if (value < minimum) return minimum;
@@ -902,6 +904,13 @@ static void tile_edit_leave(void)
 void ft_tiles_exit_edit(void)
 {
     tile_edit_leave();
+}
+
+bool ft_tiles_preview_edit(size_t index)
+{
+    if (index >= s_tile_count || !object_valid(s_tiles[index].object)) return false;
+    tile_edit_enter(&s_tiles[index]);
+    return s_selected == &s_tiles[index];
 }
 
 static void tile_edit_enter(ft_start_tile_runtime_t *tile)

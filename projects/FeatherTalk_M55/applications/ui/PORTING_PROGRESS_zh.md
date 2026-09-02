@@ -175,7 +175,7 @@
 - 缩放拖动期间使用连续像素尺寸并触发 Flex 实时重排；松手时按当前响应式布局的列宽、基础行高和间距取整。列跨度限制为当前设备的 `tile_columns`，行跨度限制为 1..3，因此布局不会保存与 480×800 绑定的绝对尺寸。
 - 点选中 Tile、点桌面空白、切换 All Apps 或执行 Home/Back 会退出编辑并恢复滚动。自动测试新增公共/私有描述符、长按编辑、四手柄、占位符排序、2×2 缩放、兄弟重排、名称/透明度/图案修改、应用动态帧和默认布局恢复检查。
 - UI 事件层修复了两处问题：应用跳转曾监听长按后也会产生的 `CLICKED`；手柄曾监听 `LV_EVENT_ALL` 并在判断事件类型前无条件选中 Tile。现在应用只响应 `SHORT_CLICKED`，Tile 只响应 `LONG_PRESSED`，手柄只注册 `PRESSED/PRESSING/RELEASED/PRESS_LOST` 且仅在 `PRESSED` 中选中。
-- 第二次板上排查确认仅修 UI 事件仍不够。ST7123/ST7102 在 `0x0010` bit 3 给出新坐标帧，读完坐标表后会清除 INT；原 BSP 却在读完后用已经清除的 INT 判断是否抬手，因此静止手指会立即形成伪释放，LVGL 永远累积不到长按时间。驱动现按每槽 Valid 位与非零 Touch Intensity 双条件确认触点；没有新帧时保持上次状态，释放需连续 3 个坐标帧确认，并过滤 3 px 内的静止抖动。LVGL 长按阈值明确设为 500 ms，滚动阈值由 10 px 提升至 18 px。
+- 第二次板上排查确认仅修 UI 事件仍不够。最终按 ST7123 host protocol 修正为全 16 位寄存器寻址：`0x0010` bit 3 给出 With Coord，置位时必须从 `0x0014` 读到最后一个支持的坐标槽以自动清 INT。每槽只按协议定义的 Valid 位确认触点，不再错误要求非零 Touch Intensity；成功读到无坐标就是松手，只有 I2C 传输错误才短暂维持旧状态，并过滤 3 px 内静止抖动。LVGL 长按阈值明确设为 500 ms，滚动阈值由 10 px 提升至 18 px。
 - `feather_ui_status` 新增 Tile 编辑态、选中序号以及触摸 `frames/held/press/release` 计数。修复后的无人触摸基线为 `frames=0 held=0 press=0 release=0`，没有幽灵触摸；页面 Home、路由深度 1、`editing=0 selected=-1`。
 - M55 最终 `-Clean` 构建通过：text=876,784、data=3,768、bss=4,307,548 字节；HEX 2,476,857 字节，SHA-256 `E8AE2A5CE19420B4C4BD3812F73E522BF5F90E85027128611637ADA4B9C86597`。
 - 使用 Infineon Customized OpenOCD 5.19.0.4782 与 KitProg3 `0D141868022E2400` 烧录并校验该 clean M55 产物：写入 884,736 字节、校验 880,552 字节。M33 代码未变化，板上继续运行已签名并验证的 ABI 4 镜像。
@@ -594,3 +594,307 @@
   中伪装。Codex 所在 Windows 会话只暴露远程音频，尚未在本机 WASAPI 会话完成长时
   播放/录音、漂移、音质和显式 feedback endpoint 压力验证。详细记录见
   [UAC2 设计与实板记录](../audio/USB_AUDIO_UAC2_zh.md)。
+
+## 2026-09-01 Flash 图片不可见与 M33 XIP 守护恢复
+
+- 现象为 `/flash` 挂载目录存在但为空，Gallery 无法读取图片；M55 串口持续报告
+  `M33 XIP park failed before erase: -116`。USB MSC 当时未启用，故障不是卷被主机
+  独占，而是 M33 只留下启动时的 guard-ready 状态，之后不再响应 NOR program/erase
+  前的 SRAM park 请求。FAT 挂载/元数据写回失败后，本地目录自然不可用。
+- 没有绕过双核 XIP 保护，也没有格式化末尾 2 MiB 用户卷。M33 构建在选择 BK 栈但
+  可选 BlueKitchen 源目录缺失时，改为链接明确返回 `-RT_ENOSYS` 的不可用桩；IPC 与
+  SMIF guard 因而仍可独立构建和运行，真实 BK 源存在时不会编入该桩。
+- 重新构建、官方签名并烧录 M33 supervisor 后，M55 system/quick IPC 序号持续递增，
+  `/flash` 恢复列出 `System Volume Information`、`.feathertalk`、`Pictures`；其中
+  `01.jpg=136,780 B`、`02.jpg=111,496 B`。当前 `02.jpg` 已实际解码为 480×800
+  RGB565，非黑像素 384,000、checksum `0x8f45aa87`。
+- 连续复核期间没有再次出现 XIP park 超时或 FAL 擦写错误。M33 镜像写入/校验
+  167,936/161,604 B，外部写入范围止于 `0x6037ffff`，未触碰从 `0x60e00000`
+  开始的用户盘。
+
+## 2026-09-01 SVG 矢量图标接入与单提交修复
+
+- `ui-svg-icon-convert.py` 保留原 24/32/48 A8 产物，同时从受约束 SVG 子集生成 line、
+  polyline、polygon、rect、ellipse 的 shape/point 表。设备端不解析 SVG/XML；一个源文件
+  同时服务 VG-Lite 矢量路径和 A8 回退，避免两套图标人工漂移。
+- Back/Home/Search、网络和蓝牙状态、媒体控制、刷新、飞行模式、定位、亮度、旋转等
+  高频简单图标改为 LVGL Vector 绘制；应用图标等固定复杂图形暂留 A8。SVG stroke 在
+  首次使用时展开为 fill contour 并缓存，帧内只更新颜色、透明度和 viewBox 缩放矩阵。
+- 初次接入出现 10–12 submit/frame。取证确认不是 command buffer 容量不足：每次提交
+  仅约 4 KiB，batch 的 software/resource/explicit boundary 均为 0。根因是 Vector 后端
+  对每条 path 重复调用 `vg_lite_set_scissor()`；该调用设置 `scissor_dirty`，下一次
+  `set_render_target()` 会自动提交已有命令。
+- 后端现在比较 vector scissor 与 draw task clip；两者相同就复用已安装的硬件裁剪，只有
+  真正的子裁剪才改变并恢复 scissor。60 帧实板基准恢复为 `60 frames / 60 submits`，
+  vector 编码由约 12.4 ms/frame 降到 2.366 ms/frame；最终镜像结果为 25.74 FPS、
+  collect 9.721 ms、encode 15.552 ms、finish 10.808 ms、GPU busy 27.10%。
+- 官方 Customized OpenOCD 已完成写入和校验。运行时 framebuffer 回读能看到矢量
+  Back/Home/Search、状态栏 Bluetooth 及媒体控制图形；`feather_ui_status` 持续报告
+  GPU 路由 100%、平均 1.00 submit/frame、software/resource/explicit boundary 为 0。
+  画面回读文件仅用于本轮诊断，位于未跟踪的 `tmp/`，不作为产品资源提交。
+- 最终 M55 构建为 text=3,577,524、data=91,000、bss=4,614,584 字节，HEX
+  10,318,752 字节，SHA-256
+  `73CFD8D359A91BD2EE3B7D241C9D438FFAE184E04FD31750B7E462D970BD94CF`；OpenOCD
+  写入 3,670,016 字节并校验 3,668,524 字节。
+
+## 2026-09-02 50 个 SVG 全量矢量化与颜色通道修复
+
+- `FT_ICON_COUNT` 内全部 50 个图标已启用运行时矢量路径；A8 三档资源只保留为 path
+  创建失败时的防御性回退。应用、设置、录音、存储、状态栏、快捷操作和导航图标不再
+  因图标类别不同而走两种正常绘制路径。
+- 修复 LVGL Vector VG-Lite 后端的颜色打包：原实现把 `lv_color32_t` 写为
+  `0xAABBGGRR`，与本平台 `lv_vg_lite_color()` 使用的 `0xAARRGGBB` 不一致，导致
+  矢量图标红蓝通道交换。修复后显存回读中主题强调色为 `#0078d7`，与 Tile、文字和
+  A8/矩形后端一致。
+- M55 构建通过：text=3,577,516、data=91,000、bss=4,614,584 字节；HEX
+  10,318,736 字节，SHA-256
+  `AA9BC42A15FB002A2DBB7D1F335F5D487C377B0F9E3E178A0CB114EE080CF3B0`。Customized
+  OpenOCD 写入 3,670,016 字节并校验 3,668,516 字节。
+- 实板 60 帧结果为 60 render / 60 submit、23.90 FPS、collect 11.657 ms、encode
+  14.774 ms、finish 10.832 ms、GPU busy 25.39%；vector 为 4.809 ms/frame，image
+  降为 0.278 ms/frame。GPU 路由 100%、software draw 为 0、batch boundary/overflow
+  均为 0，仍满足一帧一条 GPU 命令链。
+- 相对 19 个图标矢量化版本，当前堆占用增加约 11.8 KiB、峰值增加约 23.9 KiB，来自
+  当前页面按需建立的额外 path cache，不是 50 份缓存一次性预分配。基准日志为
+  `tools/freather/logs/COM17-all-vector-color-bench.log`，状态日志为
+  `tools/freather/logs/COM17-all-vector-color-status.log`。
+
+## 2026-09-02 矢量 stroke 闭合、缓存生命周期与画质修复
+
+- A/B 对比确认 50 个 SVG 源和软件 A8 结果均正确，断口来自设备端旧的 stroke 整理层。
+  旧实现把每条中心线展开成独立矩形，再用圆形补 cap/join；矩形与圆点的轮廓绕向相反，
+  合并到同一 `LV_VECTOR_FILL_NONZERO` path 后重叠区发生抵消，因此 System 滑杆、Recorder
+  话筒和 Files 文件夹出现孔洞、断口或不连续拐角。
+- 应用层现为每个图标分别缓存 fill path 与原始 stroke centerline。SVG 的 polygon 继续
+  显式 close，polyline 保持开放；线宽、round/butt/square cap 和 miter/bevel/round join
+  原样交给 VG-Lite `vg_lite_update_stroke()`，不再手工近似最终轮廓。Home 显存回读确认
+  System、Recorder、Files、Back、Home、Search 与软件 A8 参考一致。
+- 修复 LVGL VG-Lite stroke cache 两项缺陷：比较函数原先错误比较 `lhs->width` 与自身，
+  现改为比较 `rhs->width`；纯 stroke 中心线进入缓存前显式标为
+  `VG_LITE_DRAW_STROKE_PATH`，避免无 END 的合法中心线被 ZERO/fill 规则误判并断言。
+- `vg_lite_update_stroke()` 生成最终 `stroke_path` 后立即释放展平点、分段与临时轮廓链表，
+  只保留跨帧绘制必需的最终命令流和上传状态。冷启动 Home 堆为
+  1,079,736 / 1,356,248 B，与手工展开版 1,080,328 B 基本相同；未清理的试验版曾在跨页
+  后达到 1,354,600 B，已明确淘汰。
+- 最终 60 帧真机基准为 60 render / 60 submit、26.08 FPS、collect 10.181 ms、encode
+  12.881 ms、finish 10.676 ms、GPU busy 27.32%；Vector 2.390 ms/frame，software draw、
+  batch boundary 与 overflow 均为 0。相较错误手工展开版的 23.90 FPS / 4.809 ms Vector，
+  画质与性能同时改善。
+- 最终 M55 为 text=3,576,644、data=91,000、bss=4,614,784 字节；HEX 10,316,277 字节，
+  SHA-256 `3C861431F53C4AB3E15EE55BFEE5CE277184680D5D7E2B6C09360062A9519CA8`。
+  OpenOCD 写入 3,670,016 字节并校验 3,667,644 字节。基准和状态日志为
+  `tools/freather/logs/COM17-native-stroke-work-free-final-bench.log` 与
+  `tools/freather/logs/COM17-native-stroke-work-free-home-status.log`。
+
+## 2026-09-02 字体/SVG 离线原生化与完整 GPU 单链
+
+- `build-lvgl-vector-font.js` 现将 Noto Sans SC 的 7,586 个字形直接输出为 canonical
+  1000 UPM、`VG_LITE_S16` 命令流，共 5,924,806 字节路径数据。12/14/16/22 px 共用
+  同一份轮廓；M55 运行时只查表、设置平移/缩放矩阵和颜色，不再解析 TTF，也不再逐命令
+  重建 LVGL/VG-Lite path。矢量字体被标记为稳定 descriptor，60 帧基准达到
+  11,926 hit / 8 miss，布局/字体成本降至 0.648 ms/frame。
+- `ui-svg-icon-convert.py` 将全部 50 个 SVG 的 fill 与原始 stroke centerline 直接生成
+  `VG_LITE_FP32` 命令流，并分别记录真实几何边界。设备端轻量包装直接引用 XIP 常量；
+  不解析 XML，不遍历 shape/point，不复制路径。24/32/48 A8 仍是创建失败时的防御性回退。
+- `lv_vg_lite_path_create_static()` 支持以只读方式包装离线原生流，区分路径数据所有权，
+  避免销毁包装时释放 XIP 常量；immutable LVGL path 可直接绑定 fill/stroke native cache。
+  旧的四份 A8 中文字体源已从产品 `SConscript` 排除，防止页面静默退回位图字体。
+- 已重新完成 fill/font `vg_lite_upload_path()`/CALL 根因验证。GC265 的 CALL/RETURN 和 CALL 后
+  `STALL 0x10` 均可用；旧停滞来自上传 DATA 在 8 字节对齐的末尾 `CLOSE` 后直接放置
+  `RETURN`，缺少真正的 `END`。上传器现对上传路径补 32 位 `END`、对完整上传块 clean
+  D-Cache，并启用 `LV_VG_LITE_USE_PATH_UPLOAD=1`。返回值之外已经检查 GPU 完成、
+  像素校验和、同帧 100 次 CALL、真实 SVG fill 跨 100 帧复用和完整桌面 60 帧压力。
+- 精确 SVG 边界先把错误版本的 23 submits/frame 恢复到 5；剩余拆分来自官方驱动把
+  纯 scissor dirty 当成 render-target 改变并强制 flush。现在纯 scissor 更新作为有序
+  `0x0A13` 状态留在同一链，真实 target/mirror/gamma/flexa 改变仍保留原同步规则。
+- 最终真机 60 帧为 **60 render / 60 submit**、26.22 FPS、collect 6.286 ms、encode
+  6.875 ms、finish/GPU wait 11.235 ms、GPU busy 29.13%。其中 Vector 1.687 ms/frame；
+  Label 4.014 ms/frame，内含 70 个矢量字形的命令编码 3.366 ms，布局/字体仅 0.648 ms。
+  GPU 路由 100%，software/resource/explicit boundary 和 transient overflow 均为 0。
+- 干净构建通过：text=7,507,244、data=91,080、bss=4,614,784 字节，`.app_code_itcm`
+  219,792 字节，`.cy_gpu_buf` 2,809,856 字节，HEX 21,372,341 字节，SHA-256
+  `7231FFF2E7E40A4ABA28BC2357BA4027F9E67A876B26938E5070D9414CB7EB4C`。最后一次实板镜像
+  与干净构建的链接尺寸一致；基准日志为
+  `tools/freather/logs/COM17-native-vector-scissor-chain-bench.log`。
+
+## 2026-09-02 VG-Lite path upload/CALL 根因闭环
+
+- 新增独立于 LVGL 页面结构的 `feather_vg_path_test`。它在 LVGL/GPU 所属线程中创建
+  64×64 BGRA 离屏目标，分别执行 inline、upload-only、CALL、CALL 无 STALL、真实 SVG、
+  同帧循环和跨帧循环，并回读像素数与 FNV 校验和；不会再用“上传 API 返回 0”替代完成
+  中断。芯片实测为 GCNanoUltraV `chip=0x265 rev=0x1003`。
+- 最小 END 三角形的 inline/CALL 均改变 1,200 像素，校验和同为 `0x9cc8104d`；有无
+  CALL 后 `STALL 0x10` 都能完成。1,156 字节 `tile-pattern` 真实 SVG 的 inline/CALL
+  校验和同为 `0xb4cbcfde`；同帧 100 次 CALL 和跨 100 次独立 finish 复用均完成。
+- 专门构造 40 字节、8 字节对齐且真正以 `CLOSE` 结束的 FP32 三角形。inline 会停滞，
+  新增的 5 秒有限等待返回错误并读到 GPU idle `0x7ffffffe`，证明 `CLOSE` 不能替代
+  `END`。旧上传布局为 `DATA(path), RETURN`，非对齐流仅因零 padding 偶然正常。
+- `vg_lite_upload_path()` 与 `vg_lite_upload_stroke()` 现在把 DATA payload 增加 4 字节，
+  复制源路径后显式写入 32 位 `END`，再按 64 位对齐并放置 `RETURN`，最后 clean 完整
+  上传区。相同 CLOSE 边界流变为 64 字节
+  `DATA(6 qword), ..., CLOSE, END, padding, RETURN`，3 ms 完成并得到正确校验和。
+- 非 FreeRTOS `vg_lite_hal_wait_interrupt()` 过去忽略 `timeout`，导致失败表现为永久卡死；
+  现在 `vg_lite_finish()` 的 5,000 ms 等待可退出并报告寄存器，timeout=0/UINT32_MAX 仍保留
+  无限等待语义。此改动是诊断/容错，不用于掩盖 GPU 错误。
+- 产品默认已改为 `LV_VG_LITE_USE_PATH_UPLOAD=1`。本阶段数据中的 LVGL 转换路径上传是
+  诊断构型；后续完整页面生命周期压力证明它不能作为产品通用策略。产品最终只让离线 SVG/
+  字体通过 `attach_native()` 显式 opt-in，运行时转换路径保持内联。完整 Home 首帧和
+  60 帧压力均通过，后者为 60 render / 60 submit、26.13 FPS、collect 9.671 ms、encode
+  9.203 ms、finish 10.578 ms、GPU busy 27.06%。相对只上传 LVGL 转换路径，label 从
+  6.273 降至 5.721 ms/frame，glyph draw 从 5.239 降至 4.837 ms/frame。
+- 证据日志：`COM17-vg-close-inline.log`（预期失败反例）、
+  `COM17-vg-close-call-fixed.log`、`COM17-vg-call-100-fixed.log`、
+  `COM17-vg-asset-call-100-fixed.log`、`COM17-vg-asset-frames-100-fixed.log`、
+  `COM17-vg-upload-ui-bench-60-fixed.log` 与 `COM17-vg-native-upload-ui-bench-60.log`，
+  以及最终固件的 `COM17-vg-native-upload-asset-frames-512.log`、
+  `COM17-vg-native-upload-final-status.log`，均位于 `tools/freather/logs/`。
+
+## 2026-09-02 Stroke CALL 隔离、触摸协议修复与卡死回归
+
+- 实板 framebuffer A/B 证明 SVG 源、fill 和字体路径正确；缺失的 System 滑杆、Media
+  圆环等画面来自最终 stroke path 的独立 upload/CALL。该路径能收到完成 IRQ，但像素与
+  内联结果不等价。因此产品保持 `LV_VG_LITE_USE_PATH_UPLOAD=1`、新增并关闭
+  `LV_VG_LITE_USE_STROKE_UPLOAD=0`。Stroke 仍由 GPU 在本帧主 command buffer 内执行，
+  不是 CPU/A8 回退；压力测试仍为 60 render / 60 submit。回读
+  `touch-fix-fb1.png`/`touch-fix-fb2.png` 已确认桌面全部可见图标的描边闭合、颜色正确。
+- 触摸根因是 BSP 把 Sitronix 报告页当 8 位寄存器读取。驱动现按 ST7123 host protocol
+  对所有寄存器发送 16 位地址，先读 `0x0010` Advanced Touch Info，仅在 With Coord(bit 3)
+  置位后读取 `0x0014` 起的 10 个 7-byte 坐标槽；读取最后槽由控制器自动清 INT，不再向
+  只读状态寄存器写清零。实板读到真实 `480x800`、10 points、firmware `01`、revision
+  `01470105`，旧 8 位寻址则全零。
+- “成功读到无坐标”现在是确定的松手事件。旧状态机会无限复用上一次按下坐标，第一次
+  触摸后 LVGL 永远保持 pressed，外观上等同卡死；只有 I2C 传输失败才短暂保留 held 状态。
+  I2C 轮询放在独立 20 ms 输入线程，UI 刷新线程不再同步等待总线。
+- 修复后连续三轮 60 帧全屏压力均完成：25.97、26.08、26.16 FPS，每轮 60 submit，
+  GPU busy 27.70% 左右，software boundary/overflow/scanout timeout 均为 0。最终重新烧录后的
+  单轮为 26.13 FPS，render max 78 ms；串口在每轮后继续响应。证据为
+  `COM17-stability-bench-3x.log`、`COM17-release-fix-validation.log`、
+  `COM17-final-stability-validation.log`、`COM17-vg-inline-100.log` 与
+  `COM17-vg-asset-frames-100.log`。
+- 当前远程条件下没有真实手指输入，`frames/press/release` 仍为 0，所以这里只确认控制器
+  在线、协议/坐标范围正确、UI 不被轮询拖死；物理按下帧与坐标变换仍需现场触摸验收，
+  不能把无人触摸的零计数表述为“触摸已板测通过”。
+
+## 2026-09-02 SVG 图标 A8/Vector 像素 A/B 与描边边界修复
+
+- 增加运行时诊断命令 `feather_ui_icon_renderer vector|a8|status`。它只切换同一批 50 个
+  SVG 图标的绘制表示，字体、页面对象、颜色和布局保持不变；`a8` 使用构建时预生成的
+  24/32/48 px 栅格参考，切换后整屏失效。每种模式先运行 60 帧全屏基准，使两张 direct
+  scanout framebuffer 都被当前模式覆盖，再由 OpenOCD 回读两张 512×800 RGB565 缓冲。
+- 首轮 A/B 证实不是 SVG 源错误。A8 中完整的 Media 圆环、Settings 滑杆、Gallery 外框和
+  Files 文件夹，在 Vector 中都沿中心线路径自己的矩形边界被削掉。VG-Lite 后端调用
+  `vg_lite_update_stroke()` 得到外扩轮廓后，又把最终 stroke path 的 bounding box 覆盖成
+  原中心线 bounding box，因此外侧半个线宽被 path 自身裁剪；这发生在对象 scissor 之前。
+- 最终 stroke bounding box 现按 `centerline bounds ± (stroke_width / 2 + 1 AA guard)` 设置，
+  LVGL 对象/图层 scissor 仍是矩阵变换后的最终逻辑裁剪。修复前 8 个稳定图标 ROI 中，A8
+  与 Vector 有 1,458 个强差异像素，去除 1 px 抗锯齿邻域后仍有 413 个拓扑缺失像素；修复
+  后分别降为 704 和 **0**。原先最大的 40×32、34×30、16×22 连续缺失块消失，剩余区域
+  均在 A8 预采样与 VG-Lite 实时 AA 的 1 px 边缘邻域内。
+- 修复后的 Vector 基准为 60 render / 60 submit、26.04 FPS、collect 9.300 ms、encode
+  9.458 ms、finish 10.898 ms、GPU busy 27.77%，没有引入额外 submit、软件回退或停滞；
+  板上最终状态已恢复为 `vector`。显存原图、五倍差分、连通区域和 ROI 报告位于
+  `projects/FeatherTalk_M55/build/icon-ab/`，最终日志为
+  `tools/freather/logs/COM17-icon-vector-bbox-final.log`。
+
+## 2026-09-02 Tile 矩阵直绘、Layer 同步归因与产品边界
+
+- 编辑动画旧实现把整个 Tile 先画到临时 Layer，再切回主 framebuffer 缩放合成。旧基准
+  12.58 FPS、约 10 submits/frame，并把 14.738 ms 记到 Layer、13.786 ms 记到 Border。
+  调用级跟踪证明 Border 是 render-target 切换后的首个任务，统计吸收了前一 Layer 的
+  `vg_lite_finish()`；边框本身已经由 GPU 绘制，并不是 13 ms 的 CPU 几何热点。
+- 打开 `LV_DRAW_TRANSFORM_USE_MATRIX` 后，满足全不透明、普通 blend、无复杂裁剪的纯缩放
+  Tile 直接把任务矩阵交给 VG-Lite，在主 framebuffer 上依次执行 fill、border、label、SVG
+  和四角 Chevron。首轮实板编辑态提升到 23.92 FPS、1 submit/frame，Layer=0、
+  Border=0.187 ms/frame。两张 512-stride RGB565 scanout framebuffer 回读只有 686 像素
+  差异（0.18%），包围盒完全位于动画 Tile；状态栏、导航栏和交界处逐像素不变。
+- 尝试过“GPU 写中间 Layer -> 不等待切换 render target -> 立即用该 Layer 作纹理源”的
+  单 command-buffer read-after-write 链，PSE84/GC265 实板会停滞。故通用 opacity/filter/
+  complex-clip Layer 保留安全完成边界；本次只消除根本不需要离屏表面的纯矩阵 Layer。
+- VG-Lite contiguous heap 增加 256 KiB path-upload 预留，`.cy_gpu_buf` 从 `0x2ae000`
+  增至 `0x2ee000`，3 MiB `gfx_mem` 尚余 72 KiB。全关上传不会 OOM，但相同固件压力状态下
+  可降至约 17.36 FPS；然而把全部运行时转换路径自动上传仍会在页面生命周期压力中停滞。
+  产品最终只允许离线 native 字体/SVG fill 通过 `attach_native()` 使用 CALL；运行时路径
+  内联，stroke upload 保持关闭。
+- 安全构型的全量自动测试完成 351 PASS / 1 FAIL / 163 actions、100,520 ms，未出现
+  `VG_LITE_OUT_OF_MEMORY`、GPU hang、对象泄漏或路由泄漏；唯一失败是当前 M33 无线驱动
+  未提供测试能力。日志为
+  `tools/freather/logs/COM17-direct-matrix-autotest-native-upload-only.log`。
+- 关闭测试模式后的最终实板固件：静态桌面 25.78 FPS，collect/encode/finish 为
+  13.009/11.061/10.921 ms；Tile 编辑态 23.21 FPS，为
+  14.118/12.256/11.146 ms。两轮都是 60 render / 60 submit、Layer=0、GPU 路由 100%、
+  software/resource/explicit boundary=0。日志为
+  `COM17-direct-matrix-release-wallpaper-static.log`、
+  `COM17-direct-matrix-release-edit-bench.log` 与
+  `COM17-direct-matrix-release-status.log`。
+- 最终 M55 构建 text=7,521,596、data=91,172、bss=4,876,924 字节；
+  `.app_code_itcm=0x36138`（余 40,648 字节），`.cy_gpu_buf=0x2ee000`（余 73,728 字节）。
+  HEX 21,412,985 字节，SHA-256
+  `5D31492013759DB1A5840EE9730F63BEBE1F054F9A0F6FD7D94B1BF38B37FD4E`。已用 Infineon
+  Customized OpenOCD 5.19.0.4782 写入并校验 M55 7,612,768 字节及签名 M33 镜像；正式板上
+  `test=0`、IPC err=0。验证后已执行 `feather_ui_tile_preview off`，设备留在普通桌面状态。
+
+## 2026-09-02 GPU/CPU 双槽跨帧流水线
+
+- 旧流程在每帧唯一 submit 后立刻 `vg_lite_finish()`，CPU 约有 11 ms 被 GPU 同步等待。
+  当前改为双 command buffer + 双帧资源槽：帧 N 异步提交后，CPU 立即收集和编码帧 N+1；
+  到下一提交边界才等待、回收并复用帧 N 的 decoder/gradient/transient/framebuffer 资源。
+- GFX END 和 DC DISP0 都改为 RT-Thread semaphore 驱动。M55 等待时进入阻塞态，不再 1 us
+  忙轮询；GPU 完成由高优先级 worker 延迟提交给 DC，确保 scanout 永远不会看到尚未完成的
+  framebuffer。最后一帧由 `lv_gpu_batch_wait_idle()` 显式 drain，页面/基准退出不会遗留引用。
+- 统计新增 GPU residual wait、scanout residual wait、流水线阶段与 active/inflight slot。
+  `feather_ui_bench` 在开始和结束各排空一次，正式数据严格为 60 render / 60 submit /
+  60 completed jobs，不再把动画场景已有的飞行帧误计入基准。
+- 重新构建、OpenOCD 写入并显式 reboot 后，静态桌面连续三轮为 50.84--51.32 FPS，
+  collect 约 7.33 ms、encode 6.54--6.74 ms、GPU 残余等待 0.217--0.220 ms、scanout 残余
+  4.70--4.95 ms、GPU busy 54.2--54.7%。旧同步流程为 25.78 FPS，提升约 97%。
+- Tile 编辑动画连续 8 轮、共 480 个全屏帧为 50.50--51.59 FPS；每轮均为 60 submit /
+  60 job，collect 8.04--8.06 ms、encode 7.55--7.78 ms、GPU 残余等待 0.220--0.223 ms、
+  scanout 残余 2.73--3.30 ms、GPU busy 55.1--56.3%。旧同步流程为 23.21 FPS，提升约
+  118%；GPU 路由 100%，software/resource/explicit boundary 与 scanout timeout 均为 0。
+- 当前硬件仍是“一帧一条有序 GPU command chain、一次 submit”；并行发生在 CPU 准备
+  N+1 与 GPU 执行 N 之间。已证实不安全的跨 render-target read-after-write 仍保留完成边界，
+  不会为了合链破坏正确性。
+- 一次调查中出现 GPU core 已 idle、软件未完成尾帧回收。等待现限定 100 ms，并在超时后
+  检查 core interrupt/idle，以恢复已经完成但 wrapper IRQ 丢失的序列；阶段诊断加入后 8 轮
+  压力均正常结束于 `stage=0`。日志为
+  `tools/freather/logs/COM17-gpu-pipeline-final-static-3x.log` 与
+  `tools/freather/logs/COM17-gpu-pipeline-stage-stress.log`。
+- 当前构建 text=7,525,100、data=91,172、bss=4,878,292 字节；`.app_code_itcm=0x36480`
+  （222,336 B，余 39,808 B），`.cy_gpu_buf=0x2ee000`（3,072,000 B，余 73,728 B）。其中
+  双 transient arena 各 192 KiB、持久 glyph arena 192 KiB，`lv_gpu_batch.o` 共 576 KiB。
+  HEX 21,422,840 字节，SHA-256
+  `BCC4942A7CF0094F3694D0A1CAA8D14FC01E2709FCA0A80F8545B81BD643740D`。
+
+## 2026-09-02 全场景 GPU/CPU 压力回归
+
+- 新增 `feather_ui_scene <id|list>`，覆盖 Home、Search、System、Settings、Media、Recorder、
+  Gallery、Files、About、7 个 Settings 子页，以及 All Apps、通知栏展开/半拖动、两个键盘、
+  Tile 编辑、相册查看器、文件菜单、播放态和 Alert，共 27 个可重复视觉状态。
+- 新增 `tools/freather/benchmark-ui-scenes.py/.cmd`。脚本在一个 COM17 会话内逐场景建立状态、
+  等待稳定、执行 60 帧全屏基准、解析完整/primitive/Label 三组记录、输出 CSV 并在最后恢复
+  Home。多 submit 现在作为 batching warning 单独报告；只有 render/batch/job 未完成才判失败。
+- 基准帧泵保留 LVGL 一次性 async timer 的调度边界。曾尝试从 `RENDER_READY`/`REFR_READY`
+  直接失效或复用 1 ms timer，实板分别暴露无效区被清零、同一 handler 内连续重入和 UI 线程
+  饥饿；这些方案已撤销。独立 4 KiB 看门狗只在连续 1 秒无新帧时读取无锁标量快照，不参与
+  正常帧路径。首次用 RT-Thread soft timer 执行大结构统计曾使 timer 线程栈溢出并在
+  `rt_tick_increase()` 触发精确 BusFault，现已改为独立线程。
+- 基准开始到结束期间暂停 M55 IPC 的 10 秒周期报告，防止它插入 `[UI-BENCH]` 数据行；IPC
+  通信本身继续运行，基准结束立即恢复日志。连续下载后曾出现 M55/LVGL 未干净重启和 Home
+  仅约 41 FPS；执行 Infineon OpenOCD `feathertalk_prepare_cm33` +
+  `feathertalk_restart_cm33_ns` 并等待 UI 完成启动后恢复为 51 FPS，因此正式基线均在显式
+  reset/run 后采集。
+- 最终 27 场景、1,620 个全屏帧全部完成，均为 60 render / 60 batch，job 与 submit 相等，
+  无看门狗停帧、无 scanout timeout；算术平均 40.30 FPS。14 个场景 >=48 FPS，6 个为
+  30--48 FPS，7 个低于 30 FPS。最快 Media playing 51.81 FPS；最慢 Settings+keyboard
+  16.03 FPS，CPU collect/encode 为 22.99/38.07 ms、GPU busy 仅 26.07%，确定为 CPU 准备瓶颈。
+- 其余主要热点：System 24.84 FPS（379 glyph/frame、Label 20.51 ms）；Search+keyboard
+  24.27 FPS（CPU 40.21 ms）；USB/Audio 设置为 31.00/32.39 FPS，仍由大量文字主导；
+  Gallery viewer 25.92 FPS 是例外，CPU 仅 13.26 ms，但 GPU/scanout 残余等待 23.97 ms。
+  Recorder、Files action、Alert 分别仍有 3、14、13 submit/frame，后两者各有约 11.8/11.4 ms
+  Layer 编码，是下一轮批次合并重点。
+- 完整逐场景表写入 `docs/board/PSOC-Edge-E84/PSE84_SOC_GPU2D_zh.md`；原始证据为
+  `tools/freather/logs/COM17-ui-scene-benchmark-clean-final-20260902.log/.csv`。测试结束已恢复
+  Home、route depth 1、Tile edit off、通知栏关闭，IPC err=0。
+- 当前 M55 构建 text=7,528,068、data=91,176、bss=4,878,296 字节；HEX=21,431,189 字节，
+  SHA-256 `3CCFC57D675BB6AC437C913746C3A38AFD4C3AF17B3F23072D603E3EF5AB8779`。Infineon
+  Customized OpenOCD 写入 7,622,656 字节、校验 7,619,244 字节。

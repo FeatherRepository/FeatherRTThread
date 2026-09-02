@@ -25,6 +25,12 @@ static volatile rt_bool_t g_quick_command_pending = RT_FALSE;
 static volatile rt_uint8_t g_quick_command_control;
 static volatile rt_uint8_t g_quick_command_value;
 static volatile rt_uint32_t g_quick_command_sequence;
+static volatile rt_bool_t g_periodic_report_enabled = RT_TRUE;
+
+void feathertalk_ipc_set_periodic_report_enabled(bool enabled)
+{
+    g_periodic_report_enabled = enabled ? RT_TRUE : RT_FALSE;
+}
 
 static void feathertalk_system_write_begin(void)
 {
@@ -215,7 +221,8 @@ static void feathertalk_ipc_thread_entry(void *parameter)
             (void)feathertalk_ipc_send_quick_command(sequence, control, value);
         }
 
-        if ((now - last_report_ms) >= FEATHERTALK_REPORT_INTERVAL_MS)
+        if (g_periodic_report_enabled &&
+            (now - last_report_ms) >= FEATHERTALK_REPORT_INTERVAL_MS)
         {
             rt_kprintf("[FeatherTalk M55] tx=%lu rx=%lu err=%lu local=0x%08lx peer=0x%08lx\n",
                        (unsigned long)g_tx_count,

@@ -48,6 +48,7 @@
 #include "lv_vg_lite_pending.h"
 #include "lv_vg_lite_stroke.h"
 #include "lv_draw_runtime_stats.h"
+#include "lv_gpu_batch.h"
 
 /*********************
 * Macros
@@ -83,6 +84,7 @@ void LV_ATTRIBUTE_FAST_MEM lv_draw_vg_lite_init(void)
     unit->base_unit.dispatch_cb = draw_dispatch;
     unit->base_unit.evaluate_cb = draw_evaluate;
     unit->base_unit.delete_cb = draw_delete;
+    lv_gpu_batch_register_unit(unit);
 
     lv_vg_lite_image_dsc_init(unit);
 #if LV_USE_VECTOR_GRAPHIC
@@ -124,6 +126,7 @@ static void LV_ATTRIBUTE_FAST_MEM draw_execute(lv_draw_vg_lite_unit_t * u)
 {
     lv_draw_task_t * t = u->task_act;
     lv_draw_unit_t * draw_unit = (lv_draw_unit_t *)u;
+    uint32_t encode_start_cycles = lv_draw_runtime_stats_gpu_task_begin();
 
     lv_draw_runtime_stats_note_gpu_task(t->type);
 
@@ -149,6 +152,10 @@ static void LV_ATTRIBUTE_FAST_MEM draw_execute(lv_draw_vg_lite_unit_t * u)
         lv_vg_lite_set_scissor_area(&scissor_area);
     }
 #endif
+
+    /* Mark the command stream before entering a backend. Layer, gradient, and
+     * future resource backends are allowed to force a finish internally. */
+    lv_gpu_batch_note_gpu_command();
 
     switch(t->type) {
         case LV_DRAW_TASK_TYPE_LABEL:
@@ -190,6 +197,8 @@ static void LV_ATTRIBUTE_FAST_MEM draw_execute(lv_draw_vg_lite_unit_t * u)
             break;
     }
 
+    lv_draw_runtime_stats_gpu_task_end((uint32_t)t->type, encode_start_cycles);
+
     lv_vg_lite_flush(u);
 }
 
@@ -207,7 +216,9 @@ int32_t LV_ATTRIBUTE_FAST_MEM draw_dispatch(lv_draw_unit_t * draw_unit, lv_layer
 
     /* Return 0 is no selection, some tasks can be supported by other units. */
     if(!t || t->preferred_draw_unit_id != VG_LITE_DRAW_UNIT_ID) {
-        lv_vg_lite_finish(u);
+        if(!lv_gpu_batch_is_active()) {
+            lv_vg_lite_finish(u);
+        }
         return LV_DRAW_UNIT_IDLE;
     }
 
@@ -248,6 +259,7 @@ int32_t LV_ATTRIBUTE_FAST_MEM draw_evaluate(lv_draw_unit_t * draw_unit, lv_draw_
     }
 
     switch(task->type) {
+        case LV_DRAW_TASK_TYPE_LABEL:
         case LV_DRAW_TASK_TYPE_FILL:
         case LV_DRAW_TASK_TYPE_BORDER:
 #if LV_VG_LITE_USE_BOX_SHADOW

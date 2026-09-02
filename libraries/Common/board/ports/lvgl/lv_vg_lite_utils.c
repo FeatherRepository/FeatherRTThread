@@ -46,6 +46,7 @@
 #include "lv_vg_lite_grad.h"
 #include "lv_draw_vg_lite_type.h"
 #include "lv_draw_runtime_stats.h"
+#include "lv_gpu_batch.h"
 #include <string.h>
 #include <math.h>
 
@@ -504,7 +505,7 @@ vg_lite_buffer_format_t lv_vg_lite_vg_fmt(lv_color_format_t cf)
         default:
             LV_LOG_ERROR("unsupported color format: %d", cf);
             LV_ASSERT(false);
-            break;
+            return VG_LITE_RGB565;
     }
 }
 
@@ -773,14 +774,43 @@ bool lv_vg_lite_buffer_open_image(vg_lite_buffer_t * buffer, lv_image_decoder_ds
 
 void lv_vg_lite_image_dsc_init(struct lv_draw_vg_lite_unit_t * unit)
 {
-    unit->image_dsc_pending = lv_vg_lite_pending_create(sizeof(lv_image_decoder_dsc_t), 4);
-    lv_vg_lite_pending_set_free_cb(unit->image_dsc_pending, image_dsc_free_cb, NULL);
+    unit->pending_slot = 0U;
+    for(uint32_t i = 0; i < LV_VG_LITE_PIPELINE_SLOTS; i++) {
+        unit->image_dsc_pending_slots[i] =
+            lv_vg_lite_pending_create(sizeof(lv_image_decoder_dsc_t), 4);
+        lv_vg_lite_pending_set_free_cb(unit->image_dsc_pending_slots[i],
+                                       image_dsc_free_cb, NULL);
+    }
+    unit->image_dsc_pending = unit->image_dsc_pending_slots[0];
 }
 
 void lv_vg_lite_image_dsc_deinit(struct lv_draw_vg_lite_unit_t * unit)
 {
-    lv_vg_lite_pending_destroy(unit->image_dsc_pending);
+    for(uint32_t i = 0; i < LV_VG_LITE_PIPELINE_SLOTS; i++) {
+        lv_vg_lite_pending_destroy(unit->image_dsc_pending_slots[i]);
+        unit->image_dsc_pending_slots[i] = NULL;
+    }
     unit->image_dsc_pending = NULL;
+}
+
+void lv_vg_lite_pending_select(struct lv_draw_vg_lite_unit_t * u, uint8_t slot)
+{
+    LV_ASSERT_NULL(u);
+    LV_ASSERT(slot < LV_VG_LITE_PIPELINE_SLOTS);
+    u->pending_slot = slot;
+    u->image_dsc_pending = u->image_dsc_pending_slots[slot];
+    if(u->grad_cache)
+        u->grad_pending = u->grad_pending_slots[slot];
+}
+
+void lv_vg_lite_pending_release(struct lv_draw_vg_lite_unit_t * u, uint8_t slot)
+{
+    LV_ASSERT_NULL(u);
+    LV_ASSERT(slot < LV_VG_LITE_PIPELINE_SLOTS);
+    if(u->grad_pending_slots[slot])
+        lv_vg_lite_pending_remove_all(u->grad_pending_slots[slot]);
+    if(u->image_dsc_pending_slots[slot])
+        lv_vg_lite_pending_remove_all(u->image_dsc_pending_slots[slot]);
 }
 
 void lv_vg_lite_rect(vg_lite_rectangle_t * rect, const lv_area_t * area)
@@ -930,8 +960,14 @@ bool lv_vg_lite_buffer_check(const vg_lite_buffer_t * buffer, bool is_src)
     lv_vg_lite_buffer_format_bytes(buffer->format, &mul, &div, &align);
     stride = LV_VG_LITE_ALIGN((buffer->width * mul / div), align);
 
-    if(buffer->stride != stride) {
-        LV_LOG_ERROR("buffer stride(%d) != %d", (int)buffer->stride, (int)stride);
+    /* A destination owned by a display controller can legitimately have a
+     * wider physical pitch than its visible width.  PSE84 scans a 480-pixel
+     * surface with a 512-pixel RGB565 stride.  VG-Lite accepts that layout;
+     * reject only undersized or format-misaligned rows instead of requiring a
+     * tightly packed LVGL buffer. */
+    if(buffer->stride < stride || (buffer->stride % (int32_t)align) != 0) {
+        LV_LOG_ERROR("buffer stride(%d) < %d or is not aligned to %d",
+                     (int)buffer->stride, (int)stride, (int)align);
         return false;
     }
 
@@ -1193,6 +1229,14 @@ void lv_vg_lite_flush(struct lv_draw_vg_lite_unit_t * u)
 
     u->flush_count++;
 
+    /* During a product frame, command-buffer capacity is the only permitted
+     * implicit split. Normal LVGL task-count flushes would fragment one frame
+     * into dozens of tiny GPU jobs. */
+    if(lv_gpu_batch_suppress_flush()) {
+        LV_PROFILER_END;
+        return;
+    }
+
 #if LV_VG_LITE_FLUSH_MAX_COUNT
     if(u->flush_count < LV_VG_LITE_FLUSH_MAX_COUNT) {
         /* Do not flush too often */
@@ -1225,6 +1269,7 @@ void lv_vg_lite_finish(struct lv_draw_vg_lite_unit_t * u)
     start_ms = lv_tick_get();
     LV_VG_LITE_CHECK_ERROR(vg_lite_finish());
     lv_draw_runtime_stats_note_gpu_finish(lv_tick_get() - start_ms);
+    lv_gpu_batch_note_finish_complete();
 
     /* Clear all gradient caches reference */
     if(u->grad_pending) {
@@ -1234,6 +1279,40 @@ void lv_vg_lite_finish(struct lv_draw_vg_lite_unit_t * u)
     /* Clear image decoder dsc reference */
     lv_vg_lite_pending_remove_all(u->image_dsc_pending);
     u->flush_count = 0;
+    LV_PROFILER_END;
+}
+
+void lv_vg_lite_submit_frame(struct lv_draw_vg_lite_unit_t * u)
+{
+    LV_ASSERT_NULL(u);
+    LV_PROFILER_BEGIN;
+
+    /* Submit the completed frame and immediately switch VG-Lite to its other
+     * command buffer.  Completion and resource retirement are deliberately
+     * postponed so the CPU can encode the following frame in parallel. */
+    LV_VG_LITE_CHECK_ERROR(vg_lite_flush());
+    lv_draw_runtime_stats_note_gpu_flush();
+    u->flush_count = 0;
+
+    LV_PROFILER_END;
+}
+
+void lv_vg_lite_wait_frame(struct lv_draw_vg_lite_unit_t * u, uint8_t pending_slot)
+{
+    uint32_t start_ms;
+
+    LV_ASSERT_NULL(u);
+    LV_ASSERT(pending_slot < LV_VG_LITE_PIPELINE_SLOTS);
+    LV_PROFILER_BEGIN;
+
+    /* Wait only for the command buffer already owned by hardware. Commands
+     * for the next frame can already exist in the alternate buffer and must
+     * not be submitted by this retirement operation. */
+    start_ms = lv_tick_get();
+    LV_VG_LITE_CHECK_ERROR(vg_lite_wait());
+    lv_draw_runtime_stats_note_gpu_finish(lv_tick_get() - start_ms);
+    lv_vg_lite_pending_release(u, pending_slot);
+
     LV_PROFILER_END;
 }
 

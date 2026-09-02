@@ -544,6 +544,23 @@ void __attribute__((weak)) vg_lite_hardware_complete_perf_hook(void)
 {
 }
 
+void __attribute__((weak)) vg_lite_hardware_complete_platform_hook(uint32_t flags)
+{
+    (void)flags;
+}
+
+/* Return -1 when a platform has no scheduler-aware interrupt wait.  A
+ * platform implementation returns 0 for timeout or 1 for completion. */
+int32_t __attribute__((weak)) vg_lite_platform_wait_interrupt(uint32_t timeout,
+                                                               uint32_t mask,
+                                                               uint32_t *value)
+{
+    (void)timeout;
+    (void)mask;
+    (void)value;
+    return -1;
+}
+
 void vg_lite_IRQHandler(void)
 {
 #if VG_LITE_USE_FREERTOS
@@ -573,22 +590,64 @@ void vg_lite_IRQHandler(void)
         (*callback)();
     }
 #endif
+#else
+    uint32_t flags = vg_lite_hal_peek(VG_LITE_INTR_STATUS);
+    if (flags) {
+        vg_lite_hardware_complete_perf_hook();
+        vg_lite_hardware_complete_platform_hook(flags);
+    }
 #endif
 }
 
 int32_t vg_lite_hal_wait_interrupt(uint32_t timeout, uint32_t mask, uint32_t *value)
 {
 #if !VG_LITE_USE_FREERTOS
-    uint32_t int_status=0;
-    int_status = vg_lite_hal_peek(VG_LITE_INTR_STATUS);
-    (void)value;
+    uint32_t int_status = 0;
+    uint64_t elapsed_us = 0;
+    uint64_t timeout_us = (uint64_t)timeout * 1000ULL;
+    const bool finite_timeout = timeout != 0U && timeout != UINT32_MAX;
+    int32_t platform_result;
 
-    while (int_status==0){
-        int_status = vg_lite_hal_peek(VG_LITE_INTR_STATUS);
-        Cy_SysLib_DelayUs(1);
+    platform_result = vg_lite_platform_wait_interrupt(timeout, mask, value);
+    if (platform_result >= 0) {
+        if (platform_result == 0) {
+            /* A completed GC355 job can very rarely lose the wrapper IRQ while
+             * its core status/idle bits are already final. Do not strand the
+             * render thread forever on that lost edge: after the bounded RTOS
+             * wait, recover the completion from the hardware state and publish
+             * the same hooks an ordinary ISR would have published. */
+            int_status = vg_lite_hal_peek(VG_LITE_INTR_STATUS);
+            if (int_status == 0U &&
+                (vg_lite_hal_peek(VG_LITE_HW_IDLE) & VG_LITE_HW_IDLE_STATE) ==
+                    VG_LITE_HW_IDLE_STATE) {
+                int_status = VGLITE_EVENT_FRAME_END;
+            }
+            if (int_status != 0U) {
+                vg_lite_hardware_complete_perf_hook();
+                vg_lite_hardware_complete_platform_hook(int_status);
+                if (value != NULL)
+                    *value = int_status & mask;
+                if (IS_AXI_BUS_ERR(int_status))
+                    vg_lite_bus_error_handler();
+                return 1;
+            }
+        }
+        return platform_result;
     }
 
-    if (IS_AXI_BUS_ERR(*value))
+    int_status = vg_lite_hal_peek(VG_LITE_INTR_STATUS);
+    while (int_status == 0U) {
+        if (finite_timeout && elapsed_us >= timeout_us)
+            return 0;
+        int_status = vg_lite_hal_peek(VG_LITE_INTR_STATUS);
+        if (int_status != 0U) break;
+        Cy_SysLib_DelayUs(1);
+        elapsed_us++;
+    }
+
+    if (value != NULL)
+        *value = int_status & mask;
+    if (IS_AXI_BUS_ERR(int_status))
     {
         vg_lite_bus_error_handler();
     }

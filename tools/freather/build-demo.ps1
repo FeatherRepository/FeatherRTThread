@@ -37,6 +37,32 @@ if (-not (Test-Path -LiteralPath (Join-Path $toolchainBin 'arm-none-eabi-gcc.exe
     throw "External Arm GNU toolchain is missing: $toolchainBin"
 }
 
+if ($Project -eq 'FeatherTalk_M55') {
+    $projectConfig = Get-Content -LiteralPath (Join-Path $projectPath '.config') -Raw
+    $fontGeneratorName = if ($projectConfig -match '(?m)^CONFIG_FEATHERTALK_USING_UI_SHELL=y$') {
+        'build-lvgl-vector-font.js'
+    }
+    else {
+        'build-featherui-font.js'
+    }
+    $fontGenerator = Join-Path $toolsRoot (Join-Path 'fonts' $fontGeneratorName)
+    $fontSource = Join-Path $toolsRoot 'fonts\cache\NotoSansSC-wght.ttf'
+    $fontConverter = Join-Path $toolsRoot 'fonts\cache\node_modules\lv_font_conv\lv_font_conv.js'
+    $node = Get-Command node -ErrorAction SilentlyContinue
+    if ($node -and
+        (Test-Path -LiteralPath $fontGenerator -PathType Leaf) -and
+        (Test-Path -LiteralPath $fontSource -PathType Leaf) -and
+        (Test-Path -LiteralPath $fontConverter -PathType Leaf)) {
+        & $node.Source $fontGenerator
+        if ($LASTEXITCODE -ne 0) {
+            throw "UI font generation failed with exit code $LASTEXITCODE"
+        }
+    }
+    else {
+        Write-Warning 'UI font tools are not provisioned; using the checked-in generated font assets.'
+    }
+}
+
 $oldRttExecPath = [Environment]::GetEnvironmentVariable('RTT_EXEC_PATH', 'Process')
 $oldPythonIoEncoding = [Environment]::GetEnvironmentVariable('PYTHONIOENCODING', 'Process')
 $oldPythonUtf8 = [Environment]::GetEnvironmentVariable('PYTHONUTF8', 'Process')

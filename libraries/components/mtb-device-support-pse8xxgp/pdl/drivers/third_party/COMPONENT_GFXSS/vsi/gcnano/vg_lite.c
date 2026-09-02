@@ -28,6 +28,16 @@
 #include "vg_lite_context.h"
 #include "cy_pdl.h"
 
+/* Keep production behaviour unchanged unless the explicit path-CALL
+ * diagnostic asks for an A/B variant.  The PSE84 validation command runs on
+ * the sole VG-Lite owner thread, so this control does not require locking. */
+static int32_t s_call_stall_diagnostic = -1;
+
+void vg_lite_set_call_stall_for_diagnostics(vg_lite_int32_t enabled)
+{
+    s_call_stall_diagnostic = enabled < 0 ? -1 : (enabled != 0 ? 1 : 0);
+}
+
 static float offsetTable[7] = {0, 0.000575f, -0.000575f, 0.0001f, -0.0001f, 0.0000375f, -0.0000375f};
 
 #if VG_SW_BLIT_PRECISION_OPT
@@ -2270,6 +2280,10 @@ void __attribute__((weak)) vg_lite_submit_perf_hook(uint32_t command_bytes)
     (void)command_bytes;
 }
 
+void __attribute__((weak)) vg_lite_before_submit_hook(void)
+{
+}
+
 /* Push a state array into current command buffer. */
 vg_lite_error_t push_clut(vg_lite_context_t * context, uint32_t address, uint32_t count, uint32_t *data)
 {
@@ -2517,7 +2531,11 @@ vg_lite_error_t push_call(vg_lite_context_t * context, uint32_t address, uint32_
     CMDBUF_OFFSET(*context) += 8;
 
 #if !gcFEATURE_VG_CMD_CALL_FIX
-    VG_LITE_RETURN_ERROR(push_stall(&s_context, 0x10));
+    if (s_call_stall_diagnostic != 0)
+        VG_LITE_RETURN_ERROR(push_stall(&s_context, 0x10));
+#else
+    if (s_call_stall_diagnostic > 0)
+        VG_LITE_RETURN_ERROR(push_stall(&s_context, 0x10));
 #endif
 
     return VG_LITE_SUCCESS;
@@ -2878,6 +2896,7 @@ static vg_lite_error_t submit(vg_lite_context_t *context)
     {
         VG_LITE_RETURN_ERROR(stall(&s_context, 0, (uint32_t)~0));
     }
+    vg_lite_before_submit_hook();
     VG_LITE_RETURN_ERROR(vg_lite_kernel(VG_LITE_SUBMIT, &submit));
     vg_lite_submit_perf_hook(submit.command_size);
 
@@ -3052,10 +3071,19 @@ uint32_t transform(vg_lite_point_t * result, vg_lite_float_t x, vg_lite_float_t 
 }
 
 /* Flush specific VG module. */
+/* Applications that own the complete frame transaction may override this
+ * weak hook and perform one cache clean immediately before the sole submit.
+ * The default preserves the vendor behaviour for every other VG-Lite user. */
+__attribute__((weak)) int vg_lite_defer_cache_maintenance_hook(void)
+{
+    return 0;
+}
+
 static vg_lite_error_t flush_target(void)
 {
     #if (((CY_CPU_CORTEX_M7) && defined (ENABLE_CM7_DATA_CACHE)) || CY_CPU_CORTEX_M55)
-    SCB_CleanInvalidateDCache();
+    if (!vg_lite_defer_cache_maintenance_hook())
+        SCB_CleanInvalidateDCache();
     #endif
     vg_lite_error_t error = VG_LITE_SUCCESS;
     vg_lite_context_t *context = GET_CONTEXT();
@@ -3094,6 +3122,28 @@ vg_lite_error_t set_render_target(vg_lite_buffer_t *target)
     }
     /* Simply return if render target, scissor, mirror, gamma, flexa states are not changed. */
     if (!rt_changed && !s_context.scissor_dirty && !s_context.mirror_dirty && !s_context.gamma_dirty && !s_context.flexa_dirty) {
+        return VG_LITE_SUCCESS;
+    }
+
+    /* A scissor update is an ordered GPU register write, not a render-target
+     * ownership transition.  The upstream implementation falls through to
+     * vg_lite_flush() even when scissor is the only dirty state, fragmenting
+     * one LVGL frame every time a clipped SVG path is encountered.  Preserve
+     * exact clipping while appending the new 0x0A13 state to the current
+     * command chain.  Real target/mirror/gamma/flexa changes retain the
+     * original synchronization path below. */
+    if (!rt_changed && s_context.scissor_dirty && !s_context.mirror_dirty &&
+        !s_context.gamma_dirty && !s_context.flexa_dirty) {
+        if (s_context.scissor_set) {
+            VG_LITE_RETURN_ERROR(push_state(&s_context, 0x0A13,
+                MIN(s_context.scissor[2], target->width) |
+                (MIN(s_context.scissor[3], target->height) << 16)));
+        }
+        else {
+            VG_LITE_RETURN_ERROR(push_state(&s_context, 0x0A13,
+                target->width | (target->height << 16)));
+        }
+        s_context.scissor_dirty = 0;
         return VG_LITE_SUCCESS;
     }
 
@@ -5406,6 +5456,15 @@ vg_lite_error_t vg_lite_set_command_buffer_size(vg_lite_uint32_t size)
     return VG_LITE_SUCCESS;
 }
 
+void vg_lite_get_command_buffer_usage(vg_lite_uint32_t *used,
+                                      vg_lite_uint32_t *capacity)
+{
+    if (used != NULL)
+        *used = has_valid_command_buffer(&s_context) ? CMDBUF_OFFSET(s_context) : 0U;
+    if (capacity != NULL)
+        *capacity = CMDBUF_SIZE(s_context);
+}
+
 vg_lite_error_t vg_lite_set_command_buffer(vg_lite_uint32_t physical, vg_lite_uint32_t size)
 {
     vg_lite_error_t error = VG_LITE_SUCCESS;
@@ -6177,6 +6236,22 @@ vg_lite_error_t vg_lite_finish()
     /* Reset command buffer. */
     CMDBUF_OFFSET(s_context) = 0;
 #endif
+
+    return VG_LITE_SUCCESS;
+}
+
+vg_lite_error_t vg_lite_wait(void)
+{
+    vg_lite_error_t error;
+
+#if gcFEATURE_VG_TRACE_API
+    VGLITE_LOG("vg_lite_wait\n");
+#endif
+
+    /* Unlike vg_lite_finish(), do not submit the command buffer which the CPU
+     * may already be preparing for the following frame. */
+    if (submit_flag)
+        VG_LITE_RETURN_ERROR(stall(&s_context, 100, (uint32_t)~0));
 
     return VG_LITE_SUCCESS;
 }
