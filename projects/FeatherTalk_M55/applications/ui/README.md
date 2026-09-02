@@ -202,6 +202,60 @@ interpret the application's children. Media currently creates and cycles track t
 while System receives external M33 status. Gallery is a normal routed application;
 its Start Tile does not need desktop-specific image-decoder logic.
 
+## Music Cover Flow
+
+The Music page uses five virtual album cells around the selected track. Horizontal
+dragging has momentum, scroll-one containment, and center snapping; tapping a side
+cover scrolls it into selection. After a snap, the cells are rebound around the new
+track so browsing remains circular without allocating an unbounded list. This is a
+classic Cover Flow transition rather than a flat carousel: the selected cover faces
+forward, covers on either side turn inward around the visual Y axis, compress in
+width, recede in height, and darken at the far edge. All values are continuously
+interpolated from scroll distance and reverse as a cover crosses the center. The
+previous/next controls use the same animated scroll-and-snap path as touch dragging.
+Track, artist, album, play/pause, and volume state stay synchronized.
+
+Music is backed by a real folder playlist rather than demonstration labels. The
+source row opens a directory picker rooted at `/sdcard` and `/flash`; the direct
+WAV/MP3 children of the selected directory become the playlist (up to 24 validated
+files). Scanning is deliberately non-recursive, so choosing a folder also defines
+the album/loop boundary. The default is `/sdcard/Music`; choosing
+`/sdcard/Recordings` exposes Recorder output without turning the Music app into a
+second Files browser. Folder loop advances to the next entry and wraps to index 0.
+
+RIFF chunks are parsed instead of assuming a fixed 44-byte payload offset. PCM WAV
+formats accepted by `sound0` are streamed directly. MP3 Layer III is decoded by the
+vendored official `lieff/minimp3` single-header decoder (CC0-1.0; source and license
+live in `applications/third_party/minimp3`). The common 44.1 kHz MP3 case is
+converted to the board's supported 48 kHz PCM output before RT-Thread Audio updates
+TDM0 and ES8388. The selected file's source format, elapsed time, duration, and
+play/pause state are reflected in the details panel. Playback continues when the
+Music page is closed.
+
+`sound0` is a single physical output. Local Music and USB Audio claim it through
+the shared audio-owner arbiter; a second client receives `-RT_EBUSY` instead of
+opening the codec concurrently. The commands `feather_player dir [path]`, `scan`,
+`list`, `loop <0|1>`, `play <index>`, `pause`, `resume`, `stop`, and `status`
+expose the same backend for board diagnosis. AAC and FLAC are not currently listed
+or decoded.
+
+The stage is responsive: portrait builds stack Cover Flow above transport controls,
+while 90/270-degree landscape builds use a wide two-column player. Display rotation
+is currently selected by the board build because the LCD scanout geometry and touch
+transform are compile-time settings; opening Music does not silently rotate the
+entire device at runtime.
+
+The cover face stays on LVGL's ordinary GPU rectangle object path. The earlier
+two-triangle face produced an antialiased diagonal seam, while both a dynamic closed
+path and custom per-frame rectangle injection eventually stalled the PSE84 draw-task
+lifecycle under repeated animated turns. The cover still compresses horizontally,
+recedes vertically, fades, and gains a far-edge shade to preserve the Cover Flow
+depth cue without runtime path construction. Side-cover typography is culled once it turns away;
+the selected cover and the details panel retain the readable title. Cover fading is
+applied to individual primitives. Parent-group opacity is deliberately forbidden
+because it creates off-screen LVGL layers and multiple GPU submissions. The current
+implementation remains one GPU command chain and one submit per full frame.
+
 ## Gallery and wallpaper
 
 The Messages application was removed because this board has no cellular/SMS receive

@@ -16,6 +16,8 @@ typedef struct
 } ft_vector_font_glyph_asset_t;
 
 extern const uint16_t ft_vector_font_units_per_em;
+extern const int16_t ft_vector_font_typo_ascender;
+extern const int16_t ft_vector_font_typo_descender;
 extern const uint32_t ft_vector_font_glyph_count;
 extern const ft_vector_font_glyph_asset_t ft_vector_font_glyphs[];
 extern const int16_t ft_vector_font_path_data[];

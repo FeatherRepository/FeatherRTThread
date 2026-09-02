@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #include <sys/unistd.h>
 #include "feathertalk_audio.h"
+#include "feathertalk_player.h"
 #include "feathertalk_storage.h"
 #include "feathertalk_ui.h"
 #include "feathertalk_ui_gallery.h"
@@ -590,28 +591,46 @@ static void run_settings_test(void)
 static void run_media_test(void)
 {
     const char *label;
+    size_t track_count = ft_pages_test_media_track_count();
     switch (s_control_index)
     {
     case 0U:
-        (void)test_click(ft_pages_test_get_media_prev_button(), "media.prev", "track 0 -> 2");
-        test_record(ft_pages_test_media_track() == 2, "media.track", "previous wraps");
+        test_record(ft_pages_test_media_cover_ready(), "media.cover-flow",
+                    "five covers, front center and inward Y-perspective sides");
+        test_record(track_count >= 1U, "media.library", "selected-folder WAV/MP3 collection or visual fallback");
+        test_record(ft_pages_test_get_media_directory_label() != RT_NULL,
+                    "media.folder", "selected folder is visible and selectable");
+        (void)test_click(ft_pages_test_get_media_prev_button(), "media.prev", "wrap to last track");
+        test_record(ft_pages_test_media_track() == (int32_t)track_count - 1,
+                    "media.track", "previous wraps");
         break;
     case 1U:
-        (void)test_click(ft_pages_test_get_media_button(), "media.play", RT_NULL);
-        label = ft_pages_test_get_media_label();
-        test_record(ft_pages_test_media_is_playing() && label != RT_NULL &&
-                    (strstr(label, "Pause") != RT_NULL || strstr(label, "暂停") != RT_NULL),
-                    "media.state", "playing/Pause");
+        if (ft_player_get_track_count() != 0U)
+        {
+            (void)test_click(ft_pages_test_get_media_button(), "media.play", RT_NULL);
+            label = ft_pages_test_get_media_label();
+            test_record(ft_pages_test_media_is_playing() && label != RT_NULL &&
+                        (strstr(label, "Pause") != RT_NULL || strstr(label, "暂停") != RT_NULL),
+                        "media.state", "real local WAV/MP3 starting/Pause");
+        }
+        else
+            test_record(!ft_pages_test_media_is_playing(), "media.empty",
+                        "demo covers never pretend to produce audio");
         break;
     case 2U:
-        (void)test_click(ft_pages_test_get_media_button(), "media.pause", RT_NULL);
-        label = ft_pages_test_get_media_label();
-        test_record(!ft_pages_test_media_is_playing() && label != RT_NULL &&
-                    (strstr(label, "Play") != RT_NULL || strstr(label, "播放") != RT_NULL),
-                    "media.state", "paused/Play");
+        if (ft_player_get_track_count() != 0U)
+        {
+            (void)test_click(ft_pages_test_get_media_button(), "media.pause", RT_NULL);
+            label = ft_pages_test_get_media_label();
+            test_record(!ft_pages_test_media_is_playing() && label != RT_NULL &&
+                        (strstr(label, "Play") != RT_NULL || strstr(label, "播放") != RT_NULL),
+                        "media.state", "paused/Play");
+        }
+        else
+            test_record(true, "media.pause.skip", "no local track");
         break;
     case 3U:
-        (void)test_click(ft_pages_test_get_media_next_button(), "media.next", "track 2 -> 0");
+        (void)test_click(ft_pages_test_get_media_next_button(), "media.next", "last track -> 0");
         test_record(ft_pages_test_media_track() == 0, "media.track", "next wraps");
         break;
     case 4U:
@@ -620,6 +639,19 @@ static void run_media_test(void)
                          "media.volume", "35");
         test_record(ft_pages_test_media_volume() == 35, "media.volume.state", "35");
         break;
+    case 5U:
+    {
+        ft_player_status_t before;
+        ft_player_status_t after;
+        (void)ft_player_get_status(&before);
+        (void)test_click(ft_pages_test_get_media_loop_button(),
+                         "media.folder-loop", "toggle folder wrap");
+        (void)ft_player_get_status(&after);
+        test_record(before.folder_loop != after.folder_loop,
+                    "media.folder-loop.state", "backend follows UI toggle");
+        (void)ft_player_set_folder_loop(before.folder_loop);
+        break;
+    }
     default:
         finish_page_controls();
         return;
@@ -1121,6 +1153,8 @@ static void ui_test_timer_cb(lv_timer_t *timer)
                     "apps/settings/cards use distinct semantic icons");
         test_record(ft_layout_profiles_self_test(), "layout.profiles",
                     "240x320 through 720x1280 + landscape");
+        test_record(ft_vector_font_metrics_self_test(), "font.metrics.all",
+                    "7586 glyphs x 8..48 px share exact pixel bounds");
         test_record(layout->tile_column_width > 0 &&
                     layout->status_bar_height + layout->nav_bar_height < layout->screen_height,
                     "layout.current", detail);

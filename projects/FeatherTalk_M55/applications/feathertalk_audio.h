@@ -8,6 +8,13 @@
 #define FT_AUDIO_MAX_SAMPLE_BITS  2U
 #define FT_AUDIO_MAX_CHANNELS     2U
 
+typedef enum
+{
+    FT_AUDIO_OUTPUT_OWNER_NONE = 0,
+    FT_AUDIO_OUTPUT_OWNER_LOCAL_PLAYER,
+    FT_AUDIO_OUTPUT_OWNER_USB_UAC
+} ft_audio_output_owner_t;
+
 typedef struct
 {
     bool output_registered;
@@ -42,5 +49,10 @@ bool ft_audio_output_format_supported(uint32_t sample_rate,
                                       uint8_t channels);
 int ft_audio_set_output_format(uint32_t sample_rate, uint8_t sample_bits,
                                uint8_t channels);
+/* sound0 has one physical TDM/codec path.  Streaming clients must claim it
+ * before changing its format or opening the replay device. */
+int ft_audio_claim_output(ft_audio_output_owner_t owner);
+void ft_audio_release_output(ft_audio_output_owner_t owner);
+ft_audio_output_owner_t ft_audio_get_output_owner(void);
 
 #endif /* FEATHERTALK_AUDIO_H */

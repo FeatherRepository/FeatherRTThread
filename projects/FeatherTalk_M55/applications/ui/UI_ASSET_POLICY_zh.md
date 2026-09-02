@@ -38,6 +38,12 @@ Stroke path 的中心线 bounds 不能直接作为最终轮廓 bounds。调用 `
 scissor，必须使用同一固件的 `feather_ui_icon_renderer a8/vector` 双模式回读 framebuffer，
 并检查 A8/Vector 二值拓扑在 1 px AA 容差外的差异为 0。
 
+SVG 描边中心线还可能合法地落在 24×24 viewBox 的 `x/y=23` 附近；圆头、线宽及 AA fringe
+随后会跨过 LVGL 图标对象边界。公共图标渲染器因此对含 stroke 的图标固定保留 2 个**物理
+像素**内边距：一个容纳真实轮廓，一个容纳 VG-Lite 保守的 AA path bounds。这样路径仍处于
+对象 clip 内，不会在 160 行局部缓冲边界触发易泄漏的逐图标硬件 scissor。该边距不能按 SVG
+源坐标缩放，否则大图标会得到成倍空白。页面不得通过逐个扩大对象或修改 clip 掩盖缺边。
+
 VG-Lite 原生 stroke 的转换结果可以跨帧缓存，但 `vg_lite_update_stroke()` 产生的展平点链表、分段链表和临时轮廓只服务于一次转换。最终 `stroke_path` 命令流生成后必须立即释放这些工作数据，缓存中只保留中心线路径、最终命令流和上传状态；否则 32 个默认缓存条目会耗尽 UI 堆。
 
 一般 PNG 资源使用另一条转换链路。工具只使用 Python 标准库，支持非交错 8-bit 灰度、RGB、索引色、灰度透明和 RGBA PNG，输出可直接参与 LVGL 9.2 编译的 `lv_image_dsc_t`：
@@ -47,15 +53,18 @@ python .\tools\freather\ui-asset-convert.py icon.png icon.c --name ft_icon --for
 python .\tools\freather\ui-asset-convert.py background.png background.c --name ft_background --format rgb565
 ```
 
-中文界面使用 Noto Sans SC 的 7,586 个离线轮廓字形。`build-lvgl-vector-font.js` 将字体轮廓一次性编译为 canonical 1000 UPM、`VG_LITE_S16` 原生命令流；12/14/16/22 px 共用同一轮廓，仅在运行时改变矩阵，不再生成四份中文字形位图，也不在设备端调用 FreeType/TTF 解析。字形度量和原生路径包装均跨帧缓存。旧 `feathertalk_noto_sans_sc_*.c` 只保留为迁移产物，产品 `SConscript` 明确不编译，页面不得重新引用。
+中文界面使用官方 Noto Sans SC Medium 500 的 7,586 个离线轮廓字形。`build-lvgl-vector-font.js` 将字体轮廓一次性编译为 canonical 1000 UPM、`VG_LITE_S16` 原生命令流；8–48 px 的任意整数尺寸共用同一轮廓，仅在运行时按实际字号改变 GPU 矩阵。advance、glyph offset、line height 和 baseline 必须由 UPM、typographic ascender/descender 动态换算，禁止再用字号分档或手写基线常数。这样既不生成多份中文字形位图，也不在设备端调用 FreeType/TTF 解析。字形度量和原生路径包装均跨帧缓存。旧 `feathertalk_noto_sans_sc_*.c` 只保留为迁移产物，产品 `SConscript` 明确不编译，页面不得重新引用。
 
-普通 `tools\freather\build-demo.ps1 -Project FeatherTalk_M55` 会先校验/更新矢量字体。修改字库来源或生成规则时可单独执行对应字体生成脚本；GB2312 基础字形、源码实际使用的 CJK 标点、Unicode 通用标点、全角字符和间隔号 `·` 必须继续进入同一 canonical 轮廓集合。新增弯引号 `“ ”` 等字符不得依赖 Montserrat fallback 猜测非 ASCII 是否存在。
+普通 `tools\freather\build-demo.ps1 -Project FeatherTalk_M55` 会先校验/更新矢量字体，并验证静态字体字重为 500；任一产品请求字符在字体中缺失都会直接终止构建。修改字库来源或生成规则时可单独执行对应字体生成脚本；GB2312 基础字形、源码实际使用的 CJK 标点、Unicode 通用标点、全角字符和间隔号 `·` 必须继续进入同一 canonical 轮廓集合。新增弯引号 `“ ”` 等字符不得依赖 Montserrat fallback 猜测非 ASCII 是否存在。
 
-PSE84 当前启用 `LV_VG_LITE_USE_PATH_UPLOAD=1`，但明确保持
-`LV_VG_LITE_USE_STROKE_UPLOAD=0`。这里的 path upload 是显式 opt-in，不是“所有 immutable
-path 自动上传”：只有通过 `lv_draw_vg_lite_vector_path_attach_native()` 绑定的离线字体/SVG
-fill 原生流使用 CALL，LVGL 运行时转换路径保持内联。离线 fill/字体已通过 CALL 的完成中断、
-像素校验和、真实复杂 SVG、同帧多次调用与跨帧复用验证。上传器会在 8 字节
+PSE84 当前保留 `LV_VG_LITE_USE_PATH_UPLOAD=1` 供专项诊断，但产品字体和 SVG 均通过
+`lv_draw_vg_lite_vector_path_attach_native(path, add_end, upload, ...)` 使用预编译原生命令流。
+其中 fill/字体传 `(true, false)`，stroke 传 `(false, false)`：`add_end` 只选择 fill/stroke
+路径槽，`upload` 才决定是否生成独立上传路径。产品配置的 `upload=false` 会把命令流内联，不再
+发出跨帧 `CALL/RETURN`。离线 fill/字体的 CALL 曾通过完成中断、像素校验和、真实复杂 SVG、
+同帧多次调用与短期跨帧复用验证；混合字体、图标和矩形的 Cover Flow 长循环仍能复现绘制锁
+停滞，因此这些孤立测试不足以证明产品混合流安全。内联方案不重新解析路径、不退回 CPU
+光栅化，仍由 GPU 在同一整帧 command buffer 中执行并保持一次 submit。上传器会在 8 字节
 对齐、末尾为 `CLOSE` 的路径后补 32 位 `END`，再追加 `RETURN` 并 clean 完整上传区
 D-Cache。曾给 256 KiB 预留并让所有运行时路径自动上传的压力测试仍会在页面/通知生命周期
 切换中停滞，因此不得把全局宏误当成通用安全许可。Stroke 则必须先由

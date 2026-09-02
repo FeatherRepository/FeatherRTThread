@@ -576,6 +576,7 @@ static void output_worker(void *parameter)
                 device = RT_NULL;
                 s_output_device_open = false;
             }
+            ft_audio_release_output(FT_AUDIO_OUTPUT_OWNER_USB_UAC);
             continue;
         }
         if (applied_generation != s_requested_generation)
@@ -588,22 +589,39 @@ static void output_worker(void *parameter)
                 device = RT_NULL;
                 s_output_device_open = false;
             }
+            ft_audio_release_output(FT_AUDIO_OUTPUT_OWNER_USB_UAC);
+            result = ft_audio_claim_output(FT_AUDIO_OUTPUT_OWNER_USB_UAC);
+            if (result != RT_EOK)
+            {
+                s_status.last_error = result;
+                continue;
+            }
             result = ft_audio_set_output_format(
                 s_status.output_sample_rate, s_status.output_sample_bits,
                 s_status.output_channels);
             s_status.last_error = result;
             s_status.format_pending = result != RT_EOK;
-            if (result != RT_EOK) continue;
+            if (result != RT_EOK)
+            {
+                ft_audio_release_output(FT_AUDIO_OUTPUT_OWNER_USB_UAC);
+                continue;
+            }
             applied_generation = s_requested_generation;
         }
         if (device == RT_NULL)
         {
             s_status.output_worker_state = 4U;
+            if (ft_audio_claim_output(FT_AUDIO_OUTPUT_OWNER_USB_UAC) != RT_EOK)
+            {
+                s_status.last_error = -RT_EBUSY;
+                continue;
+            }
             device = rt_device_find("sound0");
             if (device == RT_NULL ||
                 rt_device_open(device, RT_DEVICE_OFLAG_WRONLY) != RT_EOK)
             {
                 device = RT_NULL;
+                ft_audio_release_output(FT_AUDIO_OUTPUT_OWNER_USB_UAC);
                 s_status.last_error = -RT_EIO;
                 continue;
             }

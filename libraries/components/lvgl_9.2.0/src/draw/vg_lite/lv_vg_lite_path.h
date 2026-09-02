@@ -145,6 +145,7 @@ lv_vg_lite_path_t * lv_draw_vg_lite_vector_path_prepare(const lv_vector_path_t *
 /** Bind an offline-generated native path to an immutable LVGL vector path. */
 bool lv_draw_vg_lite_vector_path_attach_native(lv_vector_path_t * path,
                                                bool add_end,
+                                               bool upload,
                                                lv_vg_lite_path_t * native_path,
                                                const float bounds[4]);
 

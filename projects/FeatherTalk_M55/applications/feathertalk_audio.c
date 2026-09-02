@@ -18,6 +18,36 @@
 static const uint32_t s_output_sample_rates[] = {16000U, 24000U, 48000U, 96000U};
 static const uint8_t s_output_sample_bits[] = {16U, 24U};
 static const uint8_t s_output_channels[] = {1U, 2U};
+static volatile ft_audio_output_owner_t s_output_owner =
+    FT_AUDIO_OUTPUT_OWNER_NONE;
+
+int ft_audio_claim_output(ft_audio_output_owner_t owner)
+{
+    rt_base_t level;
+    int result = RT_EOK;
+    if (owner == FT_AUDIO_OUTPUT_OWNER_NONE) return -RT_EINVAL;
+    level = rt_hw_interrupt_disable();
+    if (s_output_owner != FT_AUDIO_OUTPUT_OWNER_NONE &&
+        s_output_owner != owner)
+        result = -RT_EBUSY;
+    else
+        s_output_owner = owner;
+    rt_hw_interrupt_enable(level);
+    return result;
+}
+
+void ft_audio_release_output(ft_audio_output_owner_t owner)
+{
+    rt_base_t level;
+    level = rt_hw_interrupt_disable();
+    if (s_output_owner == owner) s_output_owner = FT_AUDIO_OUTPUT_OWNER_NONE;
+    rt_hw_interrupt_enable(level);
+}
+
+ft_audio_output_owner_t ft_audio_get_output_owner(void)
+{
+    return s_output_owner;
+}
 
 static void audio_fill_output_capabilities(ft_audio_status_t *status)
 {
@@ -283,6 +313,22 @@ int ft_audio_set_output_format(uint32_t sample_rate, uint8_t sample_bits,
     RT_UNUSED(sample_bits);
     RT_UNUSED(channels);
     return -RT_ENOSYS;
+}
+
+int ft_audio_claim_output(ft_audio_output_owner_t owner)
+{
+    RT_UNUSED(owner);
+    return -RT_ENOSYS;
+}
+
+void ft_audio_release_output(ft_audio_output_owner_t owner)
+{
+    RT_UNUSED(owner);
+}
+
+ft_audio_output_owner_t ft_audio_get_output_owner(void)
+{
+    return FT_AUDIO_OUTPUT_OWNER_NONE;
 }
 
 #endif /* RT_USING_AUDIO */

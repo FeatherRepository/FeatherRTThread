@@ -2175,6 +2175,7 @@ typedef enum
     FT_BENCH_SCENE_GALLERY_VIEWER,
     FT_BENCH_SCENE_FILES_ACTION,
     FT_BENCH_SCENE_MEDIA_PLAYING,
+    FT_BENCH_SCENE_MEDIA_FOLDER,
     FT_BENCH_SCENE_ALERT,
     FT_BENCH_SCENE_COUNT
 } ft_bench_scene_t;
@@ -2186,7 +2187,8 @@ static const char *const s_bench_scene_names[FT_BENCH_SCENE_COUNT] =
     "settings-wifi", "settings-bluetooth", "settings-storage", "settings-usb",
     "settings-time-language", "settings-personalization", "all-apps",
     "shade-open", "shade-drag", "search-keyboard", "settings-keyboard",
-    "tile-edit", "gallery-viewer", "files-action", "media-playing", "alert"
+    "tile-edit", "gallery-viewer", "files-action", "media-playing",
+    "media-folder", "alert"
 };
 
 static void benchmark_scene_reset(void)
@@ -2229,7 +2231,11 @@ static void benchmark_scene_async_cb(void *user_data)
     if ((unsigned)scene >= FT_BENCH_SCENE_COUNT) return;
     benchmark_scene_reset();
     if (scene <= FT_BENCH_SCENE_SETTINGS_PERSONALIZATION)
+    {
         result = benchmark_scene_open_page((ft_page_id_t)scene);
+        if (scene == FT_BENCH_SCENE_MEDIA && result == RT_EOK)
+            scene_result = ft_pages_media_cover_ready();
+    }
     else
     {
         switch (scene)
@@ -2281,6 +2287,13 @@ static void benchmark_scene_async_cb(void *user_data)
             result = benchmark_scene_open_page(FT_PAGE_MEDIA);
             if (result == RT_EOK)
                 scene_result = ft_pages_benchmark_set_media_playing(true);
+            if (scene_result)
+                scene_result = ft_pages_media_cover_ready();
+            break;
+        case FT_BENCH_SCENE_MEDIA_FOLDER:
+            result = benchmark_scene_open_page(FT_PAGE_MEDIA);
+            if (result == RT_EOK)
+                scene_result = ft_pages_benchmark_open_media_folder();
             break;
         case FT_BENCH_SCENE_ALERT:
             feathertalk_ui_alert("FeatherTalk", "GPU/CPU pipeline performance scene");
@@ -2367,6 +2380,39 @@ static int feather_ui_tile_preview(int argc, char **argv)
 }
 MSH_CMD_EXPORT(feather_ui_tile_preview,
                Preview or close Tile edit animation without synthetic storage tests.);
+
+static void media_cover_stress_async_cb(void *user_data)
+{
+    uint32_t steps = (uint32_t)(uintptr_t)user_data;
+    if (ft_pages_media_cover_stress_start(steps))
+        rt_kprintf("[UI-MEDIA-STRESS] started steps=%lu\n", (unsigned long)steps);
+    else
+        rt_kprintf("[UI-MEDIA-STRESS] rejected; open the Music page first\n");
+}
+
+static int feather_ui_media_stress(int argc, char **argv)
+{
+    unsigned long steps = 20U;
+    char *end = RT_NULL;
+    lv_result_t result;
+
+    if (!s_ui_initialized) return -RT_ERROR;
+    if (argc > 1)
+    {
+        steps = strtoul(argv[1], &end, 10);
+        if (end == argv[1] || *end != '\0' || steps < 1U || steps > 100U)
+            return -RT_EINVAL;
+    }
+    lv_lock();
+    result = lv_async_call(media_cover_stress_async_cb,
+                           (void *)(uintptr_t)steps);
+    lv_unlock();
+    if (result != LV_RESULT_OK) return -RT_ENOMEM;
+    rt_kprintf("FeatherTalk UI: queued %lu animated Cover Flow turns\n", steps);
+    return RT_EOK;
+}
+MSH_CMD_EXPORT(feather_ui_media_stress,
+               Stress animated Music Cover Flow turns from 1 to 100.);
 
 static int feather_ui_status(void)
 {

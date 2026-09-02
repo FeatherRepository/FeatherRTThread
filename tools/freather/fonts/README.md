@@ -21,13 +21,25 @@ atlas，不会联网下载或在目标固件中解析 TTF。
 ## LVGL + VG-Lite 矢量字体
 
 当 `FeatherTalk_M55` 选择 `FEATHERTALK_USING_UI_SHELL` 时，构建入口自动运行
-`build-lvgl-vector-font.js`。它从同一份官方 Noto Sans SC 提取完整 GB2312、可打印
-ASCII 和项目源码中的额外字符，生成一份规范化轮廓。12/14/16/22 px 四档字体共享
-轮廓，只保留各自字号度量和 GPU 缩放矩阵。
+`build-lvgl-vector-font.js`。它从 SDK 已跟踪的官方 Noto Sans SC Medium 500 静态
+字体提取完整 GB2312、可打印 ASCII 和项目源码中的额外字符，生成一份规范化轮廓。
+脚本会验证字重，并在任一请求字符缺失时让构建失败，避免方框占位被带进固件。
 
-目标端第一次遇到字形时把紧凑的离线命令展开成不可变 `lv_vector_path_t`，VG-Lite
-后端再生成一次原生路径并上传 GPU 可寻址内存；后续帧仅提交颜色、平移、缩放和
-`CALL`，不再栅格化 TTF、拷贝 A8 位图或重复翻译路径。
+目标端保留一份 canonical 1000 UPM 轮廓，8–48 px 的每个整数尺寸按需建立持久
+`lv_font_t`。advance、glyph offset、line height 和 baseline 都从同一字体的 UPM、
+ascender、descender 动态换算；GPU 矩阵负责缩放轮廓。因此布局可使用 18、30 等任意
+实际尺寸，不再被偷偷折算到 16 或 22 px，也不需要为每个字号复制轮廓。
+
+字形描述符不能把轮廓高度与偏移分别取整。目标端统一用绝对字体边界计算像素框：
+`xMin/yMin` 向下取整，`xMax/yMax` 向上取整，再由两端之差得到 `box_w/box_h`。
+换算使用有符号整数除法，保证所有字号下 `offset + box size == max bound`，避免同一行
+的拉丁字母、数字和汉字因舍入组合不同而上下跳动或被边缘裁掉。板端命令
+`feather_font_metrics_test` 会遍历全部 7,586 个字形和 8--48 px 的每个整数尺寸；产品
+自动测试也执行同一检查。
+
+目标端第一次遇到字形时把紧凑的离线命令包装成不可变 `lv_vector_path_t`；后续帧
+仅提交颜色、平移和缩放，不再栅格化 TTF、拷贝 A8 位图或重复翻译路径。当前 PSE84
+产品配置把原生命令内联到整帧 command buffer，不启用已知不稳定的跨帧 CALL。
 
 ## 旧 LVGL 字体流程（保留供历史工程使用）
 

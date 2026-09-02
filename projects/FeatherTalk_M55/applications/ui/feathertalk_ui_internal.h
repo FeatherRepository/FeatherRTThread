@@ -187,7 +187,10 @@ void ft_pages_live_tile_update(const char *line);
  * sweep. They never persist preferences or modify files. */
 bool ft_pages_benchmark_set_keyboard_visible(bool visible);
 bool ft_pages_benchmark_set_media_playing(bool playing);
+bool ft_pages_benchmark_open_media_folder(void);
 bool ft_pages_benchmark_open_file_action(void);
+bool ft_pages_media_cover_ready(void);
+bool ft_pages_media_cover_stress_start(uint32_t steps);
 
 int ft_tiles_create(lv_obj_t *container, const ft_app_descriptor_t *apps, size_t count);
 void ft_tiles_exit_edit(void);
@@ -369,8 +372,12 @@ size_t ft_pages_test_search_visible_count(void);
 lv_obj_t *ft_pages_test_get_media_prev_button(void);
 lv_obj_t *ft_pages_test_get_media_next_button(void);
 lv_obj_t *ft_pages_test_get_media_volume(void);
+lv_obj_t *ft_pages_test_get_media_directory_label(void);
+lv_obj_t *ft_pages_test_get_media_loop_button(void);
 int32_t ft_pages_test_media_track(void);
+size_t ft_pages_test_media_track_count(void);
 int32_t ft_pages_test_media_volume(void);
+bool ft_pages_test_media_cover_ready(void);
 lv_obj_t *ft_pages_test_get_files_refresh_button(void);
 lv_obj_t *ft_pages_test_get_files_up_button(void);
 lv_obj_t *ft_pages_test_get_files_first_entry(void);

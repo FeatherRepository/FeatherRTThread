@@ -4,6 +4,7 @@
 #include <string.h>
 #include <feathertalk/version.h>
 #include "feathertalk_audio.h"
+#include "feathertalk_player.h"
 #include "feathertalk_storage.h"
 #include "feathertalk_usb.h"
 #include "ipc/feathertalk_ipc.h"
@@ -30,6 +31,11 @@
 #define FT_AUDIO_RATE_COUNT        4U
 #define FT_AUDIO_BITS_COUNT        2U
 #define FT_AUDIO_CHANNEL_COUNT     2U
+#define FT_MEDIA_FLOW_CELL_COUNT   5U
+#define FT_MEDIA_FLOW_CENTER       (FT_MEDIA_FLOW_CELL_COUNT / 2U)
+#define FT_MEDIA_FLOW_CONTROL_PERIOD_MS 10U
+#define FT_MEDIA_FLOW_SETTLE_MS         20U
+#define FT_MEDIA_FLOW_ANIM_MS           260U
 
 typedef enum
 {
@@ -37,6 +43,15 @@ typedef enum
     FT_STORAGE_DEVICE_SD,
     FT_STORAGE_DEVICE_INVALID
 } ft_storage_device_t;
+
+typedef enum
+{
+    FT_MEDIA_COVER_IDLE = 0,
+    FT_MEDIA_COVER_DRAGGING,
+    FT_MEDIA_COVER_ANIMATING,
+    FT_MEDIA_COVER_COMMIT_PENDING,
+    FT_MEDIA_COVER_SETTLING
+} ft_media_cover_state_t;
 
 typedef enum
 {
@@ -96,6 +111,11 @@ static void settings_storage_page_leave(void);
 static void language_refresh_async_cb(void *user_data);
 static void media_tile_live_content(lv_obj_t *content_host,
                                     uint32_t frame, void *context);
+static void update_media_labels(void);
+static void media_cover_control_timer_cb(lv_timer_t *timer);
+static void media_page_enter(void);
+static void media_page_leave(void);
+static void media_refresh_directory_label(void);
 
 static const ft_app_descriptor_t s_apps[] =
 {
@@ -204,13 +224,35 @@ static const char *s_tracks_en[] = {"Feather Intro", "PSoC Skyline", "Metro Puls
  * "Feather" is a product-family term here, not the noun "羽翼". */
 static const char *s_tracks_zh[] = {"Feather 序曲", "PSoC 天际线", "都市脉冲"};
 
+typedef struct
+{
+    const char *artist_en;
+    const char *artist_zh;
+    const char *album_en;
+    const char *album_zh;
+    uint32_t cover_rgb;
+    uint32_t accent_rgb;
+    uint32_t disc_rgb;
+} ft_media_album_t;
+
+static const ft_media_album_t s_media_albums[] =
+{
+    {"Feather Audio Lab", "Feather 音频实验室", "First Light", "初光",
+     0x0B5CADUL, 0x43B7FFUL, 0x062744UL},
+    {"PSoC Ensemble", "PSoC 合奏组", "Edge Skyline", "Edge 天际线",
+     0x5A2A91UL, 0xBE7BFFUL, 0x25103DUL},
+    {"Metro Signal", "都市信号", "Night Transit", "夜间轨道",
+     0xB43B20UL, 0xFFB04AUL, 0x4A160EUL},
+};
+
 static const ft_page_definition_t s_pages[] =
 {
     {FT_PAGE_HOME, "Start", create_home_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SEARCH, "Search", create_search_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SYSTEM, "System information", create_system_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS, "Settings", create_settings_page, RT_NULL, RT_NULL, RT_NULL},
-    {FT_PAGE_MEDIA, "Media", create_media_page, RT_NULL, RT_NULL, RT_NULL},
+    {FT_PAGE_MEDIA, "Media", create_media_page, media_page_enter, RT_NULL,
+     media_page_leave},
     {FT_PAGE_RECORDER, "Recorder", ft_recorder_page_create,
      ft_recorder_page_enter, RT_NULL, ft_recorder_page_leave},
     {FT_PAGE_GALLERY, "Gallery", ft_gallery_create_page, ft_gallery_page_enter,
@@ -321,7 +363,50 @@ static lv_obj_t *s_media_next_button;
 static lv_obj_t *s_media_label;
 static lv_obj_t *s_media_state_icon;
 static lv_obj_t *s_media_track_label;
+static lv_obj_t *s_media_artist_label;
+static lv_obj_t *s_media_album_label;
+static lv_obj_t *s_media_progress_label;
+static lv_obj_t *s_media_progress_bar;
 static lv_obj_t *s_media_volume;
+static lv_obj_t *s_media_directory_label;
+static lv_obj_t *s_media_loop_button;
+static lv_obj_t *s_media_loop_label;
+static lv_obj_t *s_media_folder_box;
+static lv_obj_t *s_media_folder_list;
+static char s_media_picker_path[FT_PLAYER_PATH_MAX];
+static char s_media_picker_entries[16][FT_PLAYER_PATH_MAX];
+static size_t s_media_picker_entry_count;
+static lv_obj_t *s_media_cover_flow;
+static lv_obj_t *s_media_cover_cells[FT_MEDIA_FLOW_CELL_COUNT];
+static lv_obj_t *s_media_cover_cards[FT_MEDIA_FLOW_CELL_COUNT];
+static lv_obj_t *s_media_cover_bands[FT_MEDIA_FLOW_CELL_COUNT];
+static lv_obj_t *s_media_cover_shades[FT_MEDIA_FLOW_CELL_COUNT];
+static lv_obj_t *s_media_cover_discs[FT_MEDIA_FLOW_CELL_COUNT];
+static lv_obj_t *s_media_cover_dots[FT_MEDIA_FLOW_CELL_COUNT];
+static lv_obj_t *s_media_cover_titles[FT_MEDIA_FLOW_CELL_COUNT];
+static size_t s_media_cover_tracks[FT_MEDIA_FLOW_CELL_COUNT];
+static int16_t s_media_cover_perspective[FT_MEDIA_FLOW_CELL_COUNT];
+static uint8_t s_media_cover_opacity[FT_MEDIA_FLOW_CELL_COUNT];
+static int32_t s_media_cover_cell_width;
+static int32_t s_media_cover_max_size;
+static int32_t s_media_cover_min_width;
+static int32_t s_media_cover_min_height;
+static bool s_media_cover_recentering;
+static bool s_media_cover_visual_dirty;
+static ft_media_cover_state_t s_media_cover_state;
+static int32_t s_media_cover_pending_offset;
+static int32_t s_media_cover_visual_offset;
+static int32_t s_media_cover_anim_start_offset;
+static int32_t s_media_cover_anim_target_offset;
+static int32_t s_media_cover_drag_start_x;
+static uint32_t s_media_cover_state_tick;
+static lv_timer_t *s_media_cover_control_timer;
+static lv_timer_t *s_media_monitor_timer;
+static uint32_t s_media_player_generation;
+static uint32_t s_media_position_second;
+static bool s_media_cover_stress_active;
+static uint32_t s_media_cover_stress_remaining;
+static uint32_t s_media_cover_stress_completed;
 static bool s_media_playing;
 static int32_t s_media_track;
 static lv_obj_t *s_files_refresh_button;
@@ -385,6 +470,30 @@ static const char *track_display_name(size_t index)
     return ft_preferences_text(s_tracks_zh[index], s_tracks_en[index]);
 }
 
+static size_t media_track_count(void)
+{
+    size_t count = ft_player_get_track_count();
+    return count != 0U ? count : sizeof(s_tracks_en) / sizeof(s_tracks_en[0]);
+}
+
+static bool media_has_local_tracks(void)
+{
+    return ft_player_get_track_count() != 0U;
+}
+
+static void media_track_name(size_t index, char *text, size_t text_size)
+{
+    ft_player_track_t track;
+    const char *name;
+    if (text == RT_NULL || text_size == 0U) return;
+    if (ft_player_get_track(index, &track) == RT_EOK)
+        name = track.name;
+    else
+        name = track_display_name(index);
+    rt_strncpy(text, name, text_size - 1U);
+    text[text_size - 1U] = '\0';
+}
+
 static lv_obj_t *tile_live_text_label(lv_obj_t *content_host)
 {
     lv_obj_t *label;
@@ -407,12 +516,16 @@ static lv_obj_t *tile_live_text_label(lv_obj_t *content_host)
 static void media_tile_live_content(lv_obj_t *content_host,
                                     uint32_t frame, void *context)
 {
-    size_t track_count = sizeof(s_tracks_en) / sizeof(s_tracks_en[0]);
+    size_t track_count = media_track_count();
     lv_obj_t *label = tile_live_text_label(content_host);
+    char name[FT_PLAYER_NAME_MAX];
     LV_UNUSED(context);
     if (label != RT_NULL)
-        lv_label_set_text(label,
-                          track_display_name(((uint32_t)s_media_track + frame) % track_count));
+    {
+        media_track_name(((uint32_t)s_media_track + frame) % track_count,
+                         name, sizeof(name));
+        lv_label_set_text(label, name);
+    }
 }
 
 static void tracked_object_deleted_cb(lv_event_t *event)
@@ -828,6 +941,75 @@ static lv_obj_t *create_search_page(lv_obj_t *parent)
     return root;
 }
 
+static int32_t label_text_height(lv_obj_t *label, int32_t max_width)
+{
+    lv_point_t size;
+    const lv_font_t *font;
+    const char *text;
+    if (label == RT_NULL || !lv_obj_is_valid(label) || max_width <= 0)
+        return 0;
+    font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+    text = lv_label_get_text(label);
+    lv_text_get_size(&size, text != RT_NULL ? text : "", font,
+                     lv_obj_get_style_text_letter_space(label, LV_PART_MAIN),
+                     lv_obj_get_style_text_line_space(label, LV_PART_MAIN),
+                     max_width, LV_TEXT_FLAG_NONE);
+    return size.y;
+}
+
+static bool s_system_value_row_reflowing;
+
+static void system_value_row_reflow(lv_obj_t *value)
+{
+    lv_obj_t *row;
+    lv_obj_t *key;
+    int32_t content_width;
+    int32_t key_width;
+    int32_t value_width;
+    int32_t key_height;
+    int32_t value_height;
+    int32_t content_height;
+    if (s_system_value_row_reflowing || value == RT_NULL ||
+        !lv_obj_is_valid(value)) return;
+    row = lv_obj_get_parent(value);
+    if (row == RT_NULL || !lv_obj_is_valid(row) ||
+        !lv_obj_has_flag(row, LV_OBJ_FLAG_USER_1) ||
+        lv_obj_get_child_count(row) < 2U) return;
+
+    /* LV_SIZE_CONTENT on a flex row does not reliably include the wrapped
+     * height of a flex-grow child: its cross size can be evaluated before its
+     * final width is known.  Measure with the actual post-layout width and
+     * publish the content height explicitly.  No font size or line count is
+     * assumed here. */
+    s_system_value_row_reflowing = true;
+    lv_obj_update_layout(row);
+    key = lv_obj_get_child(row, 0U);
+    content_width = lv_obj_get_content_width(row);
+    key_width = lv_obj_get_width(key);
+    value_width = content_width - key_width -
+                  lv_obj_get_style_pad_column(row, LV_PART_MAIN);
+    if (value_width < 1) value_width = 1;
+    key_height = label_text_height(key, key_width);
+    value_height = label_text_height(value, value_width);
+    content_height = LV_MAX(key_height, value_height);
+    if (content_height > 0 && lv_obj_get_content_height(row) != content_height)
+        lv_obj_set_content_height(row, content_height);
+    s_system_value_row_reflowing = false;
+}
+
+static void system_value_row_layout_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    lv_obj_t *row;
+    lv_obj_t *value;
+    if (code != LV_EVENT_SIZE_CHANGED && code != LV_EVENT_LAYOUT_CHANGED)
+        return;
+    row = lv_event_get_current_target(event);
+    if (row == RT_NULL || lv_obj_get_child_count(row) < 2U) return;
+    value = lv_obj_get_child(row, 1U);
+    system_value_row_reflow(value);
+}
+
 static void system_label_set_text(lv_obj_t **slot, const char *text)
 {
     if (tracked_object_is_type(slot, &lv_label_class))
@@ -835,6 +1017,7 @@ static void system_label_set_text(lv_obj_t **slot, const char *text)
         const char *current = lv_label_get_text(*slot);
         if (current == RT_NULL || strcmp(current, text != RT_NULL ? text : "") != 0)
             lv_label_set_text(*slot, text != RT_NULL ? text : "");
+        system_value_row_reflow(*slot);
     }
 }
 
@@ -942,6 +1125,8 @@ static lv_obj_t *create_system_value_row(lv_obj_t *content, const char *key,
     style_layout_container(row);
     lv_obj_set_width(row, lv_pct(100));
     lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_USER_1);
+    lv_obj_add_event_cb(row, system_value_row_layout_cb, LV_EVENT_ALL, RT_NULL);
     lv_obj_set_style_pad_bottom(row, ft_layout_px(5), LV_PART_MAIN);
     lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
     lv_obj_set_style_border_width(row, 1, LV_PART_MAIN);
@@ -3701,10 +3886,150 @@ void ft_pages_apply_language(void)
                                     app_display_name(i));
     ft_recorder_page_apply_language();
     ft_gallery_apply_language();
+    update_media_labels();
+}
+
+static int32_t media_clamp_i32(int32_t value, int32_t minimum, int32_t maximum)
+{
+    if (value < minimum) return minimum;
+    if (value > maximum) return maximum;
+    return value;
+}
+
+static size_t media_track_wrap(int32_t track)
+{
+    const int32_t count = (int32_t)media_track_count();
+    while (track < 0) track += count;
+    return (size_t)(track % count);
+}
+
+static void media_cover_bind_tracks(void)
+{
+    size_t i;
+    for (i = 0U; i < FT_MEDIA_FLOW_CELL_COUNT; i++)
+    {
+        size_t track = media_track_wrap(s_media_track + (int32_t)i -
+                                       (int32_t)FT_MEDIA_FLOW_CENTER);
+        const ft_media_album_t *album =
+            &s_media_albums[track % (sizeof(s_media_albums) /
+                                     sizeof(s_media_albums[0]))];
+        char name[FT_PLAYER_NAME_MAX];
+        s_media_cover_tracks[i] = track;
+        if (s_media_cover_cards[i] == RT_NULL ||
+            !lv_obj_is_valid(s_media_cover_cards[i])) continue;
+        lv_obj_set_style_bg_color(s_media_cover_cards[i],
+                                  lv_color_hex(album->cover_rgb), LV_PART_MAIN);
+        lv_obj_set_style_border_color(s_media_cover_cards[i],
+                                      lv_color_hex(album->accent_rgb), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(s_media_cover_bands[i],
+                                  lv_color_hex(album->accent_rgb), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(s_media_cover_discs[i],
+                                  lv_color_hex(album->disc_rgb), LV_PART_MAIN);
+        lv_obj_set_style_border_color(s_media_cover_discs[i],
+                                      lv_color_hex(album->accent_rgb), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(s_media_cover_dots[i],
+                                  lv_color_hex(album->accent_rgb), LV_PART_MAIN);
+        media_track_name(track, name, sizeof(name));
+        lv_label_set_text(s_media_cover_titles[i], name);
+    }
+}
+
+static void media_cover_refresh_visuals(void)
+{
+    int32_t flow_width;
+    int32_t range;
+    size_t i;
+    if (s_media_cover_flow == RT_NULL || !lv_obj_is_valid(s_media_cover_flow) ||
+        s_media_cover_cell_width <= 0 || s_media_cover_max_size <= 0) return;
+    flow_width = lv_obj_get_content_width(s_media_cover_flow);
+    range = s_media_cover_cell_width + s_media_cover_cell_width / 2;
+    for (i = 0U; i < FT_MEDIA_FLOW_CELL_COUNT; i++)
+    {
+        int32_t signed_distance;
+        int32_t distance;
+        int32_t depth;
+        int32_t width;
+        int32_t height;
+        int32_t opacity;
+        int32_t y_offset;
+        int32_t old_depth;
+        int32_t old_perspective;
+        if (s_media_cover_cells[i] == RT_NULL || s_media_cover_cards[i] == RT_NULL ||
+            !lv_obj_is_valid(s_media_cover_cells[i]) ||
+            !lv_obj_is_valid(s_media_cover_cards[i])) continue;
+        signed_distance = ((int32_t)i - (int32_t)FT_MEDIA_FLOW_CENTER) *
+                          s_media_cover_cell_width + s_media_cover_visual_offset;
+        if (lv_obj_get_x(s_media_cover_cells[i]) !=
+            (flow_width - s_media_cover_cell_width) / 2 + signed_distance)
+            lv_obj_set_x(s_media_cover_cells[i],
+                         (flow_width - s_media_cover_cell_width) / 2 +
+                         signed_distance);
+        distance = signed_distance < 0 ? -signed_distance : signed_distance;
+        if (distance > range) distance = range;
+        depth = distance * 256 / range;
+        width = s_media_cover_max_size -
+                (s_media_cover_max_size - s_media_cover_min_width) * depth / 256;
+        height = s_media_cover_max_size -
+                 (s_media_cover_max_size - s_media_cover_min_height) * depth / 256;
+        opacity = LV_OPA_COVER - (LV_OPA_COVER - LV_OPA_50) * distance / range;
+        width = media_clamp_i32(width, s_media_cover_min_width,
+                                s_media_cover_max_size);
+        height = media_clamp_i32(height, s_media_cover_min_height,
+                                 s_media_cover_max_size);
+        y_offset = (s_media_cover_max_size - height) / 4;
+        old_perspective = s_media_cover_perspective[i];
+        old_depth = old_perspective < 0 ? -old_perspective : old_perspective;
+        if (lv_obj_get_width(s_media_cover_cards[i]) != width ||
+            lv_obj_get_height(s_media_cover_cards[i]) != height)
+        {
+            lv_obj_set_size(s_media_cover_cards[i], width, height);
+            lv_obj_align(s_media_cover_cards[i], LV_ALIGN_CENTER, 0, y_offset);
+        }
+        /* Child alignment is defined once when the card is created.  Rewriting
+         * text and artwork coordinates for every scroll sample needlessly
+         * dirties the font layout cache and was the source of visible glyph
+         * reordering while the cover animation was active. */
+        /* Never fade the parent as a group.  A transformed/faded parent makes
+         * LVGL allocate one off-screen layer per album and breaks the
+         * one-submit frame chain.  Fade each primitive directly instead. */
+        if (s_media_cover_opacity[i] != (uint8_t)opacity)
+        {
+            lv_obj_set_style_bg_opa(s_media_cover_cards[i], (lv_opa_t)opacity, LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(s_media_cover_bands[i], (lv_opa_t)opacity, LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(s_media_cover_discs[i], (lv_opa_t)opacity, LV_PART_MAIN);
+            lv_obj_set_style_border_opa(s_media_cover_discs[i], (lv_opa_t)opacity, LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(s_media_cover_dots[i], (lv_opa_t)opacity, LV_PART_MAIN);
+        }
+        if (old_depth != depth)
+            lv_obj_set_style_bg_opa(s_media_cover_shades[i],
+                                    (lv_opa_t)(depth * 3 / 5), LV_PART_MAIN);
+        if ((old_perspective < 0) != (signed_distance < 0))
+            lv_obj_align(s_media_cover_shades[i],
+                         signed_distance < 0 ? LV_ALIGN_LEFT_MID : LV_ALIGN_RIGHT_MID,
+                         0, 0);
+        /* Track text lives in the fixed details panel.  Keeping labels inside
+         * a continuously resized cover would rebuild glyph geometry in the
+         * moving object tree on every animation frame. */
+        if (!lv_obj_has_flag(s_media_cover_titles[i], LV_OBJ_FLAG_HIDDEN))
+            lv_obj_add_flag(s_media_cover_titles[i], LV_OBJ_FLAG_HIDDEN);
+        s_media_cover_perspective[i] =
+            (int16_t)(signed_distance < 0 ? -depth : depth);
+        s_media_cover_opacity[i] = (uint8_t)opacity;
+    }
 }
 
 static void update_media_labels(void)
 {
+    size_t track = media_track_wrap(s_media_track);
+    const ft_media_album_t *album =
+        &s_media_albums[track % (sizeof(s_media_albums) /
+                                 sizeof(s_media_albums[0]))];
+    ft_player_track_t local_track;
+    bool local = ft_player_get_track(track, &local_track) == RT_EOK;
+    char name[FT_PLAYER_NAME_MAX];
+    char details[96];
+    ft_player_status_t status;
+    (void)ft_player_get_status(&status);
     if (s_media_label != RT_NULL && lv_obj_is_valid(s_media_label))
         lv_label_set_text(s_media_label,
                           s_media_playing ? ft_preferences_text("暂停", "Pause") :
@@ -3713,46 +4038,888 @@ static void update_media_labels(void)
         ft_icon_set(s_media_state_icon, s_media_playing ? FT_ICON_PAUSE : FT_ICON_PLAY,
                     ft_layout_icon_size(24U));
     if (s_media_track_label != RT_NULL && lv_obj_is_valid(s_media_track_label))
-        lv_label_set_text(s_media_track_label,
-                          track_display_name((size_t)s_media_track));
+    {
+        media_track_name(track, name, sizeof(name));
+        lv_label_set_text(s_media_track_label, name);
+    }
+    if (s_media_artist_label != RT_NULL && lv_obj_is_valid(s_media_artist_label))
+        lv_label_set_text(s_media_artist_label, local ?
+            (local_track.recording ?
+                ft_preferences_text("本地录音", "Local recording") :
+                ft_preferences_text("本地音乐", "Local music")) :
+            ft_preferences_text(album->artist_zh, album->artist_en));
+    if (s_media_album_label != RT_NULL && lv_obj_is_valid(s_media_album_label))
+    {
+        if (local)
+        {
+            lv_snprintf(details, sizeof(details), "%lu Hz · %u bit · %u ch",
+                        (unsigned long)local_track.sample_rate,
+                        local_track.sample_bits, local_track.channels);
+            lv_label_set_text(s_media_album_label, details);
+        }
+        else
+            lv_label_set_text(s_media_album_label,
+                              ft_preferences_text(album->album_zh,
+                                                  album->album_en));
+    }
+    if (s_media_loop_label != RT_NULL && lv_obj_is_valid(s_media_loop_label))
+        lv_label_set_text(s_media_loop_label, status.folder_loop ?
+            ft_preferences_text("循环开", "Loop on") :
+            ft_preferences_text("循环关", "Loop off"));
+    media_refresh_directory_label();
+    media_cover_bind_tracks();
 }
-static void media_clicked_cb(lv_event_t *event)
+
+static void media_cover_recenter(void)
+{
+    if (s_media_cover_flow == RT_NULL || !lv_obj_is_valid(s_media_cover_flow) ||
+        s_media_cover_cells[FT_MEDIA_FLOW_CENTER] == RT_NULL ||
+        !lv_obj_is_valid(s_media_cover_cells[FT_MEDIA_FLOW_CENTER])) return;
+    s_media_cover_recentering = true;
+    s_media_cover_visual_offset = 0;
+    media_cover_refresh_visuals();
+    s_media_cover_visual_dirty = false;
+    s_media_cover_recentering = false;
+}
+
+static void media_cover_commit_offset(int32_t offset)
+{
+    ft_player_status_t player;
+    bool restart;
+    if (offset == 0) return;
+    (void)ft_player_get_status(&player);
+    restart = media_has_local_tracks() &&
+              (player.state == FT_PLAYER_PLAYING ||
+               player.state == FT_PLAYER_STARTING);
+    s_media_track = (int32_t)media_track_wrap(s_media_track + offset);
+    if (restart) (void)ft_player_play((size_t)s_media_track);
+    update_media_labels();
+}
+
+static void media_cover_wake_controller(void)
+{
+    if (s_media_cover_control_timer == RT_NULL) return;
+    lv_timer_resume(s_media_cover_control_timer);
+}
+
+static bool media_cover_start_turn(int32_t offset)
+{
+    if (offset == 0 || s_media_cover_state != FT_MEDIA_COVER_IDLE ||
+        s_media_cover_flow == RT_NULL || !lv_obj_is_valid(s_media_cover_flow) ||
+        offset < -(int32_t)FT_MEDIA_FLOW_CENTER ||
+        offset > (int32_t)FT_MEDIA_FLOW_CENTER) return false;
+
+    s_media_cover_pending_offset = offset;
+    s_media_cover_anim_start_offset = s_media_cover_visual_offset;
+    s_media_cover_anim_target_offset = -offset * s_media_cover_cell_width;
+    s_media_cover_state = FT_MEDIA_COVER_ANIMATING;
+    s_media_cover_state_tick = lv_tick_get();
+    media_cover_wake_controller();
+    return true;
+}
+
+static void media_cover_event_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_PRESSED && s_media_cover_state == FT_MEDIA_COVER_IDLE)
+    {
+        lv_indev_t *indev = lv_indev_active();
+        lv_point_t point;
+        if (indev == RT_NULL) return;
+        lv_indev_get_point(indev, &point);
+        s_media_cover_drag_start_x = point.x;
+        s_media_cover_state = FT_MEDIA_COVER_DRAGGING;
+        s_media_cover_state_tick = lv_tick_get();
+        media_cover_wake_controller();
+    }
+    else if (code == LV_EVENT_PRESSING &&
+             s_media_cover_state == FT_MEDIA_COVER_DRAGGING)
+    {
+        lv_indev_t *indev = lv_indev_active();
+        lv_point_t point;
+        if (indev == RT_NULL) return;
+        lv_indev_get_point(indev, &point);
+        s_media_cover_visual_offset = media_clamp_i32(
+            point.x - s_media_cover_drag_start_x,
+            -s_media_cover_cell_width, s_media_cover_cell_width);
+        s_media_cover_visual_dirty = true;
+    }
+    else if ((code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) &&
+             s_media_cover_state == FT_MEDIA_COVER_DRAGGING)
+    {
+        int32_t distance = s_media_cover_visual_offset < 0 ?
+                           -s_media_cover_visual_offset :
+                           s_media_cover_visual_offset;
+        if (distance == 0)
+        {
+            s_media_cover_state = FT_MEDIA_COVER_IDLE;
+            return;
+        }
+        s_media_cover_pending_offset =
+            distance >= s_media_cover_cell_width / 4 ?
+            (s_media_cover_visual_offset < 0 ? 1 : -1) : 0;
+        s_media_cover_anim_start_offset = s_media_cover_visual_offset;
+        s_media_cover_anim_target_offset =
+            -s_media_cover_pending_offset * s_media_cover_cell_width;
+        s_media_cover_state = FT_MEDIA_COVER_ANIMATING;
+        s_media_cover_state_tick = lv_tick_get();
+        media_cover_wake_controller();
+    }
+    else if (code == LV_EVENT_SHORT_CLICKED)
+    {
+        lv_indev_t *indev = lv_indev_active();
+        lv_point_t point;
+        int32_t best = (int32_t)FT_MEDIA_FLOW_CENTER;
+        int32_t best_distance = INT32_MAX;
+        size_t i;
+        if (indev == RT_NULL || s_media_cover_state != FT_MEDIA_COVER_IDLE) return;
+        lv_indev_get_point(indev, &point);
+        for (i = 0U; i < FT_MEDIA_FLOW_CELL_COUNT; i++)
+        {
+            lv_area_t area;
+            int32_t distance;
+            if (s_media_cover_cells[i] == RT_NULL ||
+                !lv_obj_is_valid(s_media_cover_cells[i])) continue;
+            lv_obj_get_coords(s_media_cover_cells[i], &area);
+            distance = (area.x1 + area.x2) / 2 - point.x;
+            if (distance < 0) distance = -distance;
+            if (distance < best_distance)
+            {
+                best_distance = distance;
+                best = (int32_t)i;
+            }
+        }
+        if (best != (int32_t)FT_MEDIA_FLOW_CENTER)
+            (void)media_cover_start_turn(best - (int32_t)FT_MEDIA_FLOW_CENTER);
+    }
+    else if (code == LV_EVENT_SIZE_CHANGED && !s_media_cover_recentering)
+    {
+        s_media_cover_visual_dirty = true;
+        media_cover_wake_controller();
+    }
+}
+
+static lv_obj_t *media_cover_create_cell(lv_obj_t *flow, size_t index,
+                                         int32_t flow_height)
+{
+    lv_obj_t *cell = lv_obj_create(flow);
+    lv_obj_t *cover = lv_obj_create(cell);
+    lv_obj_t *band = lv_obj_create(cover);
+    lv_obj_t *shade = lv_obj_create(cover);
+    lv_obj_t *disc = lv_obj_create(cover);
+    lv_obj_t *dot = lv_obj_create(disc);
+    lv_obj_t *title = lv_label_create(cover);
+    style_layout_container(cell);
+    lv_obj_set_size(cell, s_media_cover_cell_width, flow_height);
+    lv_obj_add_flag(cell, LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_FLOATING);
+    lv_obj_remove_flag(cell, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_set_size(cover, s_media_cover_min_width, s_media_cover_min_height);
+    lv_obj_set_style_bg_opa(cover, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(cover, 0, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(cover, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(cover, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(cover, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_set_size(band, s_media_cover_max_size * 86 / 100,
+                    media_clamp_i32(s_media_cover_max_size / 20, 3, 12));
+    lv_obj_align(band, LV_ALIGN_TOP_MID, 0, ft_layout_px(8));
+    lv_obj_set_style_border_width(band, 0, LV_PART_MAIN);
+    /* These decorations are resized continuously while Cover Flow moves.
+     * Keep them on the proven rectangle fast path: runtime rounded geometry
+     * allocates/rebuilds temporary VG-Lite paths and eventually stalls after
+     * repeated animated page turns on PSE84. */
+    lv_obj_set_style_radius(band, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(band, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_set_size(shade, s_media_cover_max_size * 12 / 100,
+                    s_media_cover_max_size * 88 / 100);
+    lv_obj_align(shade, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_bg_color(shade, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(shade, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(shade, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(shade, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(shade, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_set_size(disc, s_media_cover_max_size * 48 / 100,
+                    s_media_cover_max_size * 48 / 100);
+    lv_obj_align(disc, LV_ALIGN_CENTER, 0, -ft_layout_px(8));
+    lv_obj_set_style_radius(disc, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(disc, ft_layout_px(3), LV_PART_MAIN);
+    lv_obj_remove_flag(disc, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(dot, s_media_cover_max_size * 12 / 100,
+                    s_media_cover_max_size * 12 / 100);
+    lv_obj_center(dot);
+    lv_obj_set_style_radius(dot, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(dot, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_set_width(title, lv_pct(84));
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_font(title, ft_layout_font(14), LV_PART_MAIN);
+    lv_obj_set_style_text_color(title, lv_color_white(), LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_BOTTOM_MID, 0, -ft_layout_px(10));
+    lv_obj_add_flag(title, LV_OBJ_FLAG_HIDDEN);
+
+    s_media_cover_cells[index] = cell;
+    s_media_cover_cards[index] = cover;
+    s_media_cover_bands[index] = band;
+    s_media_cover_shades[index] = shade;
+    s_media_cover_discs[index] = disc;
+    s_media_cover_dots[index] = dot;
+    s_media_cover_titles[index] = title;
+    return cell;
+}
+
+static void media_refresh_directory_label(void)
+{
+    char path[FT_PLAYER_PATH_MAX];
+    char text[FT_PLAYER_PATH_MAX + 32U];
+    if (s_media_directory_label == RT_NULL ||
+        !lv_obj_is_valid(s_media_directory_label) ||
+        ft_player_get_directory(path, sizeof(path)) != RT_EOK)
+        return;
+    lv_snprintf(text, sizeof(text), "%s: %s",
+                ft_preferences_text("播放文件夹", "Playback folder"), path);
+    lv_label_set_text(s_media_directory_label, text);
+}
+
+static void media_folder_close(void)
+{
+    if (s_media_folder_box != RT_NULL && lv_obj_is_valid(s_media_folder_box))
+        lv_msgbox_close(s_media_folder_box);
+    s_media_folder_box = RT_NULL;
+    s_media_folder_list = RT_NULL;
+    s_media_picker_entry_count = 0U;
+}
+
+static void media_folder_rebuild(void);
+
+static void media_folder_entry_cb(lv_event_t *event)
+{
+    const char *path = (const char *)lv_event_get_user_data(event);
+    if (path == RT_NULL) return;
+    rt_strncpy(s_media_picker_path, path, sizeof(s_media_picker_path) - 1U);
+    s_media_picker_path[sizeof(s_media_picker_path) - 1U] = '\0';
+    media_folder_rebuild();
+}
+
+static void media_folder_root_cb(lv_event_t *event)
+{
+    const char *path = (const char *)lv_event_get_user_data(event);
+    if (path == RT_NULL) return;
+    rt_strncpy(s_media_picker_path, path, sizeof(s_media_picker_path) - 1U);
+    s_media_picker_path[sizeof(s_media_picker_path) - 1U] = '\0';
+    media_folder_rebuild();
+}
+
+static void media_folder_up_cb(lv_event_t *event)
+{
+    const char *mount;
+    LV_UNUSED(event);
+    mount = strncmp(s_media_picker_path, FT_STORAGE_SD_MOUNT_PATH,
+                    strlen(FT_STORAGE_SD_MOUNT_PATH)) == 0 ?
+            FT_STORAGE_SD_MOUNT_PATH : FT_STORAGE_FLASH_MOUNT_PATH;
+    (void)ft_storage_parent_path(s_media_picker_path, mount);
+    media_folder_rebuild();
+}
+
+static bool media_folder_list_cb(const ft_storage_entry_t *entry,
+                                 void *context)
+{
+    lv_obj_t *button;
+    lv_obj_t *label;
+    char caption[FT_STORAGE_NAME_MAX + 8U];
+    LV_UNUSED(context);
+    if (entry == RT_NULL || entry->type != FT_STORAGE_ENTRY_DIRECTORY ||
+        s_media_picker_entry_count >=
+            sizeof(s_media_picker_entries) / sizeof(s_media_picker_entries[0]))
+        return true;
+    if (ft_storage_join_path(s_media_picker_path, entry->name,
+            s_media_picker_entries[s_media_picker_entry_count],
+            sizeof(s_media_picker_entries[0])) != RT_EOK)
+        return true;
+    button = lv_button_create(s_media_folder_list);
+    lv_obj_set_size(button, lv_pct(100), ft_layout_px(44));
+    lv_obj_set_style_radius(button, ft_layout_px(4), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x242424), LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
+    label = lv_label_create(button);
+    lv_snprintf(caption, sizeof(caption), "%s  >", entry->name);
+    lv_label_set_text(label, caption);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_obj_set_style_text_font(label, ft_layout_font(14), LV_PART_MAIN);
+    lv_obj_center(label);
+    lv_obj_add_event_cb(button, media_folder_entry_cb, LV_EVENT_CLICKED,
+                        s_media_picker_entries[s_media_picker_entry_count]);
+    s_media_picker_entry_count++;
+    return true;
+}
+
+static void media_folder_select_cb(lv_event_t *event)
+{
+    int result;
+    LV_UNUSED(event);
+    result = ft_player_set_directory(s_media_picker_path);
+    if (result != RT_EOK)
+    {
+        media_folder_close();
+        feathertalk_ui_alert(
+            ft_preferences_text("无法切换播放文件夹", "Unable to switch playback folder"),
+            ft_preferences_text("文件夹当前不可读，或存储介质已交给 USB 主机。",
+                                "The folder is unavailable or exported to the USB host."));
+        return;
+    }
+    s_media_track = 0;
+    s_media_player_generation = UINT32_MAX;
+    media_folder_close();
+    media_refresh_directory_label();
+    update_media_labels();
+}
+
+static void media_folder_cancel_cb(lv_event_t *event)
 {
     LV_UNUSED(event);
-    s_media_playing = !s_media_playing;
+    media_folder_close();
+}
+
+static lv_obj_t *media_folder_nav_button(lv_obj_t *parent, const char *text,
+                                         lv_event_cb_t callback,
+                                         const char *path)
+{
+    lv_obj_t *button = lv_button_create(parent);
+    lv_obj_t *label = lv_label_create(button);
+    lv_obj_set_height(button, ft_layout_px(38));
+    lv_obj_set_width(button, 0);
+    lv_obj_set_flex_grow(button, 1);
+    lv_obj_set_style_radius(button, ft_layout_px(4), LV_PART_MAIN);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_center(label);
+    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, (void *)path);
+    return button;
+}
+
+static void media_folder_rebuild(void)
+{
+    lv_obj_t *content;
+    lv_obj_t *path_label;
+    lv_obj_t *hint;
+    lv_obj_t *nav;
+    lv_obj_t *title;
+    lv_obj_t *button;
+    int listed;
+    media_folder_close();
+    s_media_folder_box = lv_msgbox_create(RT_NULL);
+    lv_obj_set_width(s_media_folder_box, lv_pct(90));
+    lv_obj_set_height(s_media_folder_box, lv_pct(78));
+    lv_obj_set_style_text_font(s_media_folder_box, ft_layout_font(14),
+                               LV_PART_MAIN);
+    title = lv_msgbox_add_title(s_media_folder_box,
+        ft_preferences_text("音乐文件夹", "Music folder"));
+    lv_obj_set_style_text_font(title, ft_layout_font(18), LV_PART_MAIN);
+    content = lv_msgbox_get_content(s_media_folder_box);
+    lv_obj_set_style_text_font(content, ft_layout_font(14), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(content, ft_layout_px(6), LV_PART_MAIN);
+    lv_obj_set_style_pad_row(content, ft_layout_px(6), LV_PART_MAIN);
+    hint = lv_label_create(content);
+    lv_label_set_text(hint, ft_preferences_text(
+        "选择后立即停止当前曲目，并把该文件夹切换为播放列表。",
+        "Selecting immediately stops the current track and uses this folder as the playlist."));
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xB8B8B8), LV_PART_MAIN);
+    path_label = lv_label_create(content);
+    lv_label_set_text(path_label, s_media_picker_path);
+    lv_label_set_long_mode(path_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(path_label, lv_pct(100));
+    lv_obj_set_style_text_font(path_label, ft_layout_font(12), LV_PART_MAIN);
+    ft_ui_register_accent(path_label, FT_ACCENT_TEXT);
+
+    nav = lv_obj_create(content);
+    style_layout_container(nav);
+    lv_obj_set_size(nav, lv_pct(100), ft_layout_px(38));
+    lv_obj_set_flex_flow(nav, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(nav, ft_layout_px(4), LV_PART_MAIN);
+    button = media_folder_nav_button(nav,
+        ft_preferences_text("SD 卡", "SD card"), media_folder_root_cb,
+        FT_STORAGE_SD_MOUNT_PATH);
+    LV_UNUSED(button);
+    (void)media_folder_nav_button(nav,
+        ft_preferences_text("内置 Flash", "Internal Flash"),
+        media_folder_root_cb, FT_STORAGE_FLASH_MOUNT_PATH);
+    (void)media_folder_nav_button(nav,
+        ft_preferences_text("上一级", "Up"), media_folder_up_cb, RT_NULL);
+
+    s_media_folder_list = lv_obj_create(content);
+    lv_obj_set_width(s_media_folder_list, lv_pct(100));
+    lv_obj_set_height(s_media_folder_list, 0);
+    lv_obj_set_flex_grow(s_media_folder_list, 1);
+    lv_obj_set_style_bg_opa(s_media_folder_list, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_media_folder_list, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_media_folder_list, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(s_media_folder_list, ft_layout_px(4), LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_media_folder_list, LV_FLEX_FLOW_COLUMN);
+    s_media_picker_entry_count = 0U;
+    listed = ft_storage_list(s_media_picker_path, FT_STORAGE_ENTRY_DIRECTORY,
+                             media_folder_list_cb, RT_NULL);
+    if (listed == 0)
+    {
+        lv_obj_t *empty = lv_label_create(s_media_folder_list);
+        lv_label_set_text(empty, ft_preferences_text(
+            "没有子文件夹；仍可切换到此文件夹。",
+            "No subfolders; you can still switch to this folder."));
+        lv_obj_set_style_text_font(empty, ft_layout_font(12), LV_PART_MAIN);
+    }
+    button = lv_msgbox_add_footer_button(s_media_folder_box,
+        ft_preferences_text("切换到此文件夹", "Switch to this folder"));
+    lv_obj_set_style_text_font(button, ft_layout_font(14), LV_PART_MAIN);
+    if (lv_obj_get_child_count(button) > 0U)
+        lv_obj_set_style_text_font(lv_obj_get_child(button, 0U),
+                                   ft_layout_font(14), LV_PART_MAIN);
+    lv_obj_add_event_cb(button, media_folder_select_cb, LV_EVENT_CLICKED, RT_NULL);
+    button = lv_msgbox_add_footer_button(s_media_folder_box,
+        ft_preferences_text("取消", "Cancel"));
+    lv_obj_set_style_text_font(button, ft_layout_font(14), LV_PART_MAIN);
+    if (lv_obj_get_child_count(button) > 0U)
+        lv_obj_set_style_text_font(lv_obj_get_child(button, 0U),
+                                   ft_layout_font(14), LV_PART_MAIN);
+    lv_obj_add_event_cb(button, media_folder_cancel_cb, LV_EVENT_CLICKED, RT_NULL);
+    lv_obj_update_layout(s_media_folder_box);
+}
+
+static void media_folder_open_cb(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    if (ft_player_get_directory(s_media_picker_path,
+                                sizeof(s_media_picker_path)) != RT_EOK)
+        rt_strncpy(s_media_picker_path, FT_STORAGE_SD_MOUNT_PATH,
+                   sizeof(s_media_picker_path) - 1U);
+    s_media_picker_path[sizeof(s_media_picker_path) - 1U] = '\0';
+    media_folder_rebuild();
+}
+
+static void media_loop_cb(lv_event_t *event)
+{
+    ft_player_status_t status;
+    LV_UNUSED(event);
+    if (ft_player_get_status(&status) != RT_EOK) return;
+    (void)ft_player_set_folder_loop(!status.folder_loop);
+    if (s_media_loop_label != RT_NULL && lv_obj_is_valid(s_media_loop_label))
+        lv_label_set_text(s_media_loop_label, !status.folder_loop ?
+            ft_preferences_text("循环开", "Loop on") :
+            ft_preferences_text("循环关", "Loop off"));
+}
+
+static void media_page_deleted_cb(lv_event_t *event)
+{
+    size_t i;
+    LV_UNUSED(event);
+    if (s_media_cover_control_timer != RT_NULL)
+    {
+        lv_timer_delete(s_media_cover_control_timer);
+        s_media_cover_control_timer = RT_NULL;
+    }
+    if (s_media_monitor_timer != RT_NULL)
+    {
+        lv_timer_delete(s_media_monitor_timer);
+        s_media_monitor_timer = RT_NULL;
+    }
+    s_media_cover_stress_active = false;
+    s_media_cover_stress_remaining = 0U;
+    s_media_cover_stress_completed = 0U;
+    s_media_cover_flow = RT_NULL;
+    s_media_cover_recentering = false;
+    s_media_cover_visual_dirty = false;
+    s_media_cover_state = FT_MEDIA_COVER_IDLE;
+    s_media_cover_pending_offset = 0;
+    s_media_cover_visual_offset = 0;
+    s_media_cover_anim_start_offset = 0;
+    s_media_cover_anim_target_offset = 0;
+    s_media_cover_drag_start_x = 0;
+    s_media_cover_state_tick = 0U;
+    s_media_cover_cell_width = 0;
+    s_media_cover_max_size = 0;
+    s_media_cover_min_width = 0;
+    s_media_cover_min_height = 0;
+    s_media_player_generation = 0U;
+    s_media_position_second = UINT32_MAX;
+    media_folder_close();
+    s_media_directory_label = RT_NULL;
+    s_media_loop_button = RT_NULL;
+    s_media_loop_label = RT_NULL;
+    for (i = 0U; i < FT_MEDIA_FLOW_CELL_COUNT; i++)
+    {
+        s_media_cover_cells[i] = RT_NULL;
+        s_media_cover_cards[i] = RT_NULL;
+        s_media_cover_bands[i] = RT_NULL;
+        s_media_cover_shades[i] = RT_NULL;
+        s_media_cover_discs[i] = RT_NULL;
+        s_media_cover_dots[i] = RT_NULL;
+        s_media_cover_titles[i] = RT_NULL;
+        s_media_cover_tracks[i] = 0U;
+        s_media_cover_perspective[i] = 0;
+        s_media_cover_opacity[i] = LV_OPA_TRANSP;
+    }
+}
+
+static void media_format_time(uint32_t milliseconds, char *text,
+                              size_t text_size)
+{
+    uint32_t seconds = milliseconds / 1000U;
+    lv_snprintf(text, text_size, "%lu:%02lu",
+                (unsigned long)(seconds / 60U),
+                (unsigned long)(seconds % 60U));
+}
+
+static void media_refresh_progress(const ft_player_status_t *status)
+{
+    char position[16];
+    char duration[16];
+    char line[40];
+    uint32_t value = 0U;
+    if (status == RT_NULL) return;
+    if (status->duration_ms != 0U)
+        value = (uint32_t)((uint64_t)status->position_ms * 1000U /
+                           status->duration_ms);
+    if (value > 1000U) value = 1000U;
+    if (s_media_progress_bar != RT_NULL &&
+        lv_obj_is_valid(s_media_progress_bar))
+        lv_bar_set_value(s_media_progress_bar, (int32_t)value, LV_ANIM_OFF);
+    if (s_media_progress_label != RT_NULL &&
+        lv_obj_is_valid(s_media_progress_label))
+    {
+        media_format_time(status->position_ms, position, sizeof(position));
+        media_format_time(status->duration_ms, duration, sizeof(duration));
+        lv_snprintf(line, sizeof(line), "%s / %s", position, duration);
+        lv_label_set_text(s_media_progress_label, line);
+    }
+}
+
+static void media_monitor_cb(lv_timer_t *timer)
+{
+    ft_player_status_t status;
+    bool playing;
+    LV_UNUSED(timer);
+    if (ft_player_get_status(&status) != RT_EOK) return;
+    playing = status.state == FT_PLAYER_PLAYING ||
+              status.state == FT_PLAYER_STARTING;
+    if (status.generation != s_media_player_generation)
+    {
+        s_media_player_generation = status.generation;
+        s_media_playing = playing;
+        if (media_has_local_tracks() &&
+            status.current_track < status.track_count &&
+            (playing || status.state == FT_PLAYER_PAUSED))
+            s_media_track = (int32_t)status.current_track;
+        ft_tiles_set_live_loop(FT_PAGE_MEDIA, playing);
+        update_media_labels();
+        if (status.state == FT_PLAYER_ERROR)
+            feathertalk_ui_alert(
+                ft_preferences_text("播放失败", "Playback failed"),
+                status.last_error == -RT_EBUSY ?
+                    ft_preferences_text("扬声器正在被 USB Audio 使用。",
+                                        "The speaker is in use by USB Audio.") :
+                    ft_preferences_text("无法打开或解码这个 WAV / MP3 文件。",
+                                        "Unable to open or decode this WAV / MP3 file."));
+    }
+    if (status.position_ms / 1000U != s_media_position_second ||
+        status.generation != s_media_player_generation)
+    {
+        s_media_position_second = status.position_ms / 1000U;
+        media_refresh_progress(&status);
+    }
+}
+
+static void media_page_enter(void)
+{
+    ft_player_status_t status;
+    (void)ft_player_scan();
+    (void)ft_player_get_status(&status);
+    if (status.track_count != 0U && status.current_track < status.track_count)
+        s_media_track = (int32_t)status.current_track;
+    else
+        s_media_track = 0;
+    s_media_player_generation = UINT32_MAX;
+    s_media_position_second = UINT32_MAX;
+    media_monitor_cb(s_media_monitor_timer);
+}
+
+static void media_page_leave(void)
+{
+    /* Local playback deliberately continues when the page is closed. */
+}
+
+static void media_clicked_cb(lv_event_t *event)
+{
+    ft_player_status_t status;
+    int result = RT_EOK;
+    LV_UNUSED(event);
+    if (media_has_local_tracks())
+    {
+        (void)ft_player_get_status(&status);
+        if (status.state == FT_PLAYER_PLAYING)
+            result = ft_player_pause();
+        else if (status.state == FT_PLAYER_PAUSED &&
+                 status.current_track == (size_t)s_media_track)
+            result = ft_player_resume();
+        else
+            result = ft_player_play((size_t)s_media_track);
+        if (result != RT_EOK)
+        {
+            feathertalk_ui_alert(
+                ft_preferences_text("无法播放", "Unable to play"),
+                ft_preferences_text("音频输出当前不可用。",
+                                    "The audio output is currently unavailable."));
+            return;
+        }
+        s_media_playing = status.state != FT_PLAYER_PLAYING;
+    }
+    else
+    {
+        feathertalk_ui_alert(
+            ft_preferences_text("没有本地音频", "No local audio"),
+            ft_preferences_text(
+                "请选择包含 WAV 或 MP3 的文件夹。播放列表只包含该文件夹直属的音频文件。",
+                "Choose a folder containing WAV or MP3 files. Its direct audio children become the playlist."));
+        return;
+    }
     ft_tiles_set_live_loop(FT_PAGE_MEDIA, s_media_playing);
     update_media_labels();
 }
+
+static void media_volume_cb(lv_event_t *event)
+{
+    lv_obj_t *slider = lv_event_get_target(event);
+    (void)ft_audio_set_output_volume((uint8_t)lv_slider_get_value(slider));
+}
+
 static void media_prev_cb(lv_event_t *event)
 {
     LV_UNUSED(event);
-    s_media_track = (s_media_track +
-                     (int32_t)(sizeof(s_tracks_en) / sizeof(s_tracks_en[0])) - 1) %
-                    (int32_t)(sizeof(s_tracks_en) / sizeof(s_tracks_en[0]));
-    update_media_labels();
+    if (!media_cover_start_turn(-1) && s_media_cover_flow == RT_NULL)
+        media_cover_commit_offset(-1);
 }
+
 static void media_next_cb(lv_event_t *event)
 {
     LV_UNUSED(event);
-    s_media_track = (s_media_track + 1) %
-                    (int32_t)(sizeof(s_tracks_en) / sizeof(s_tracks_en[0]));
-    update_media_labels();
+    if (!media_cover_start_turn(1) && s_media_cover_flow == RT_NULL)
+        media_cover_commit_offset(1);
 }
 
 static lv_obj_t *create_media_page(lv_obj_t *parent)
 {
     const ft_ui_layout_t *layout = ft_layout_get();
-    lv_obj_t *page = create_text_page(parent,
-                                      ft_preferences_text("媒体", "Media"), FT_ICON_MEDIA,
-                                      ft_preferences_text("内存中的播放控制器",
-                                                          "In-memory playback controller"));
-    lv_obj_t *row = lv_obj_create(page);
+    int32_t page_width = layout->screen_width - 2 * layout->page_padding;
+    int32_t flow_width;
+    int32_t flow_height;
+    int32_t stage_height;
+    lv_obj_t *page = lv_obj_create(parent);
+    lv_obj_t *header = lv_obj_create(page);
+    lv_obj_t *heading = lv_obj_create(header);
+    lv_obj_t *title;
+    lv_obj_t *subtitle;
+    lv_obj_t *source_row;
+    lv_obj_t *stage;
+    lv_obj_t *details;
+    lv_obj_t *row;
     lv_obj_t *volume_caption;
-    s_media_playing = false;
-    s_media_track = 0;
-    track_object(&s_media_track_label, lv_label_create(page));
+    ft_player_status_t player_status;
+    size_t i;
+
+    ft_ui_style_page(page);
+    lv_obj_set_size(page, lv_pct(100), lv_pct(100));
+    lv_obj_set_style_pad_all(page, layout->page_padding, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(page, layout->section_gap, LV_PART_MAIN);
+    lv_obj_set_flex_flow(page, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(page, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_add_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(page, LV_DIR_VER);
+    lv_obj_add_event_cb(page, media_page_deleted_cb, LV_EVENT_DELETE, RT_NULL);
+
+    style_layout_container(header);
+    lv_obj_set_size(header, lv_pct(100), layout->control_height);
+    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(header, ft_layout_px(12), LV_PART_MAIN);
+    (void)ft_icon_create(header, FT_ICON_MEDIA, ft_layout_icon_size(32U), true);
+    style_layout_container(heading);
+    lv_obj_set_height(heading, lv_pct(100));
+    lv_obj_set_width(heading, 0);
+    lv_obj_set_flex_grow(heading, 1);
+    lv_obj_set_flex_flow(heading, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(heading, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    title = lv_label_create(heading);
+    lv_label_set_text(title, ft_preferences_text("音乐", "Music"));
+    lv_obj_set_style_text_font(title, ft_layout_font(22), LV_PART_MAIN);
+    ft_ui_register_accent(title, FT_ACCENT_TEXT);
+    subtitle = lv_label_create(heading);
+    lv_label_set_text(subtitle, ft_preferences_text(
+        "文件夹播放列表 · WAV / MP3 · 3D 专辑流",
+        "Folder playlist · WAV / MP3 · 3D Cover Flow"));
+    lv_obj_set_style_text_font(subtitle, ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_set_style_text_color(subtitle, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+
+    source_row = lv_obj_create(page);
+    style_layout_container(source_row);
+    lv_obj_set_size(source_row, lv_pct(100), ft_layout_px(44));
+    lv_obj_set_flex_flow(source_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(source_row, ft_layout_px(6), LV_PART_MAIN);
+    {
+        lv_obj_t *folder_button = lv_button_create(source_row);
+        track_object(&s_media_directory_label, lv_label_create(folder_button));
+        lv_obj_set_height(folder_button, lv_pct(100));
+        lv_obj_set_width(folder_button, 0);
+        lv_obj_set_flex_grow(folder_button, 3);
+        lv_obj_set_style_radius(folder_button, ft_layout_px(4), LV_PART_MAIN);
+        lv_label_set_long_mode(s_media_directory_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(s_media_directory_label, lv_pct(94));
+        lv_obj_set_style_text_font(s_media_directory_label,
+                                   ft_layout_font(12), LV_PART_MAIN);
+        lv_obj_center(s_media_directory_label);
+        lv_obj_add_event_cb(folder_button, media_folder_open_cb,
+                            LV_EVENT_CLICKED, RT_NULL);
+    }
+    track_object(&s_media_loop_button, lv_button_create(source_row));
+    track_object(&s_media_loop_label, lv_label_create(s_media_loop_button));
+    lv_obj_set_height(s_media_loop_button, lv_pct(100));
+    lv_obj_set_width(s_media_loop_button, 0);
+    lv_obj_set_flex_grow(s_media_loop_button, 1);
+    lv_obj_set_style_radius(s_media_loop_button, ft_layout_px(4), LV_PART_MAIN);
+    (void)ft_player_get_status(&player_status);
+    lv_label_set_text(s_media_loop_label, player_status.folder_loop ?
+        ft_preferences_text("循环开", "Loop on") :
+        ft_preferences_text("循环关", "Loop off"));
+    lv_obj_set_style_text_font(s_media_loop_label, ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_center(s_media_loop_label);
+    lv_obj_add_event_cb(s_media_loop_button, media_loop_cb,
+                        LV_EVENT_CLICKED, RT_NULL);
+    media_refresh_directory_label();
+
+    stage = lv_obj_create(page);
+
+    stage_height = layout->landscape ?
+                   media_clamp_i32(layout->screen_height - layout->status_bar_height -
+                                   layout->nav_bar_height - 2 * layout->page_padding -
+                                   layout->control_height - ft_layout_px(44) -
+                                   2 * layout->section_gap,
+                                   ft_layout_px(260), ft_layout_px(410)) :
+                   media_clamp_i32(ft_layout_px(470), ft_layout_px(390),
+                                   layout->screen_height - layout->status_bar_height -
+                                   layout->nav_bar_height - layout->control_height);
+    style_layout_container(stage);
+    lv_obj_set_width(stage, lv_pct(100));
+    lv_obj_set_height(stage, layout->landscape ? stage_height : LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_column(stage, layout->section_gap, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(stage, layout->section_gap, LV_PART_MAIN);
+    lv_obj_set_flex_flow(stage, layout->landscape ? LV_FLEX_FLOW_ROW :
+                                                   LV_FLEX_FLOW_COLUMN);
+
+    flow_width = layout->landscape ? page_width * 3 / 5 : page_width;
+    flow_height = layout->landscape ? stage_height :
+                  media_clamp_i32(stage_height * 3 / 5,
+                                  ft_layout_px(220), ft_layout_px(290));
+    track_object(&s_media_cover_flow, lv_obj_create(stage));
+    style_layout_container(s_media_cover_flow);
+    lv_obj_set_size(s_media_cover_flow, flow_width, flow_height);
+    lv_obj_add_flag(s_media_cover_flow, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(s_media_cover_flow, LV_OBJ_FLAG_SCROLLABLE |
+                                           LV_OBJ_FLAG_SCROLL_ONE |
+                                           LV_OBJ_FLAG_SCROLL_CHAIN |
+                                           LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_set_scrollbar_mode(s_media_cover_flow, LV_SCROLLBAR_MODE_OFF);
+    s_media_cover_max_size = media_clamp_i32(flow_width * 11 / 20,
+                                             ft_layout_px(150), flow_height -
+                                             ft_layout_px(24));
+    s_media_cover_min_width = s_media_cover_max_size * 46 / 100;
+    s_media_cover_min_height = s_media_cover_max_size * 78 / 100;
+    s_media_cover_cell_width = s_media_cover_max_size + ft_layout_px(10);
+    lv_obj_add_event_cb(s_media_cover_flow, media_cover_event_cb,
+                        LV_EVENT_ALL, RT_NULL);
+    for (i = 0U; i < FT_MEDIA_FLOW_CELL_COUNT; i++)
+        (void)media_cover_create_cell(s_media_cover_flow, i, flow_height);
+    s_media_cover_state = FT_MEDIA_COVER_IDLE;
+    s_media_cover_visual_dirty = false;
+    s_media_cover_pending_offset = 0;
+    s_media_cover_visual_offset = 0;
+    s_media_cover_anim_start_offset = 0;
+    s_media_cover_anim_target_offset = 0;
+    s_media_cover_drag_start_x = 0;
+    s_media_cover_state_tick = lv_tick_get();
+    s_media_cover_stress_active = false;
+    s_media_cover_stress_remaining = 0U;
+    s_media_cover_stress_completed = 0U;
+    s_media_cover_control_timer = lv_timer_create(media_cover_control_timer_cb,
+                                                   FT_MEDIA_FLOW_CONTROL_PERIOD_MS,
+                                                   RT_NULL);
+    if (s_media_cover_control_timer != RT_NULL)
+        lv_timer_pause(s_media_cover_control_timer);
+
+    /* Child creation order is the visual/flex order.  Build Cover Flow first,
+     * then its metadata so portrait and landscape both put artwork before the
+     * text/controls. */
+    details = lv_obj_create(stage);
+    style_layout_container(details);
+    if (layout->landscape)
+    {
+        lv_obj_set_height(details, lv_pct(100));
+        lv_obj_set_width(details, 0);
+        lv_obj_set_flex_grow(details, 1);
+    }
+    else
+    {
+        /* The metadata block is content-sized.  Its former fixed remainder
+         * assumed a specific set of font line heights and made long filenames
+         * overlap the artist, controls and volume slider after a font/scale
+         * change.  The page itself scrolls, so the measured content is the
+         * correct constraint. */
+        lv_obj_set_width(details, lv_pct(100));
+        lv_obj_set_height(details, LV_SIZE_CONTENT);
+    }
+    lv_obj_set_flex_flow(details, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(details, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(details, ft_layout_px(6), LV_PART_MAIN);
+    track_object(&s_media_track_label, lv_label_create(details));
+    lv_obj_set_width(s_media_track_label, lv_pct(100));
+    lv_label_set_long_mode(s_media_track_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_font(s_media_track_label, ft_layout_font(22), LV_PART_MAIN);
+    lv_obj_set_height(s_media_track_label,
+                      lv_font_get_line_height(ft_layout_font(22)));
     ft_ui_register_accent(s_media_track_label, FT_ACCENT_TEXT);
+    track_object(&s_media_artist_label, lv_label_create(details));
+    lv_obj_set_width(s_media_artist_label, lv_pct(100));
+    lv_label_set_long_mode(s_media_artist_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(s_media_artist_label, ft_layout_font(14), LV_PART_MAIN);
+    lv_obj_set_height(s_media_artist_label,
+                      lv_font_get_line_height(ft_layout_font(14)));
+    lv_obj_set_style_text_color(s_media_artist_label, lv_color_hex(0xD0D0D0), LV_PART_MAIN);
+    track_object(&s_media_album_label, lv_label_create(details));
+    lv_obj_set_width(s_media_album_label, lv_pct(100));
+    lv_label_set_long_mode(s_media_album_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(s_media_album_label, ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_set_height(s_media_album_label,
+                      lv_font_get_line_height(ft_layout_font(12)));
+    lv_obj_set_style_text_color(s_media_album_label, lv_color_hex(0x909090), LV_PART_MAIN);
+
+    track_object(&s_media_progress_bar, lv_bar_create(details));
+    lv_obj_set_size(s_media_progress_bar, lv_pct(100), ft_layout_px(6));
+    lv_bar_set_range(s_media_progress_bar, 0, 1000);
+    lv_bar_set_value(s_media_progress_bar, 0, LV_ANIM_OFF);
+    track_object(&s_media_progress_label, lv_label_create(details));
+    lv_label_set_text(s_media_progress_label, "0:00 / 0:00");
+    lv_obj_set_style_text_font(s_media_progress_label, ft_layout_font(11), LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_media_progress_label,
+                                lv_color_hex(0x909090), LV_PART_MAIN);
+
+    row = lv_obj_create(details);
     style_layout_container(row);
     lv_obj_set_size(row, lv_pct(100), layout->control_height);
     lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
@@ -3776,13 +4943,26 @@ static lv_obj_t *create_media_page(lv_obj_t *parent)
     lv_obj_set_flex_grow(s_media_button, 2);
     lv_obj_set_width(s_media_next_button, 0);
     lv_obj_set_flex_grow(s_media_next_button, 1);
-    volume_caption = lv_label_create(page);
+    volume_caption = lv_label_create(details);
     lv_label_set_text(volume_caption, ft_preferences_text("音量", "Volume"));
-    track_object(&s_media_volume, lv_slider_create(page));
+    lv_obj_set_style_text_font(volume_caption, ft_layout_font(12), LV_PART_MAIN);
+    track_object(&s_media_volume, lv_slider_create(details));
     lv_obj_set_size(s_media_volume, lv_pct(100), ft_layout_px(20));
     lv_slider_set_range(s_media_volume, 0, 100);
-    lv_slider_set_value(s_media_volume, 60, LV_ANIM_OFF);
+    lv_slider_set_value(s_media_volume,
+                        ft_preferences_get()->audio_output_volume,
+                        LV_ANIM_OFF);
+    lv_obj_add_event_cb(s_media_volume, media_volume_cb,
+                        LV_EVENT_VALUE_CHANGED, RT_NULL);
+
+    s_media_playing = false;
+    s_media_track = 0;
+    s_media_player_generation = UINT32_MAX;
+    s_media_position_second = UINT32_MAX;
+    s_media_monitor_timer = lv_timer_create(media_monitor_cb, 200U, RT_NULL);
     update_media_labels();
+    lv_obj_update_layout(page);
+    media_cover_recenter();
     return page;
 }
 
@@ -4937,6 +6117,154 @@ static lv_obj_t *create_about_page(lv_obj_t *parent)
                             FT_ICON_ABOUT, text);
 }
 
+bool ft_pages_media_cover_ready(void)
+{
+    size_t i;
+    if (s_media_cover_flow == RT_NULL || !lv_obj_is_valid(s_media_cover_flow) ||
+        s_media_cover_state != FT_MEDIA_COVER_IDLE ||
+        s_media_cover_visual_offset != 0 || s_media_cover_visual_dirty ||
+        s_media_cover_cell_width <= 0 || s_media_cover_max_size <= 0 ||
+        s_media_cover_min_width <= 0 || s_media_cover_min_height <= 0 ||
+        s_media_cover_tracks[FT_MEDIA_FLOW_CENTER] !=
+        media_track_wrap(s_media_track)) return false;
+    lv_obj_update_layout(s_media_cover_flow);
+    for (i = 0U; i < FT_MEDIA_FLOW_CELL_COUNT; i++)
+        if (s_media_cover_cells[i] == RT_NULL ||
+            s_media_cover_cards[i] == RT_NULL ||
+            s_media_cover_titles[i] == RT_NULL ||
+            !lv_obj_is_valid(s_media_cover_cells[i]) ||
+            !lv_obj_is_valid(s_media_cover_cards[i]) ||
+            !lv_obj_is_valid(s_media_cover_titles[i])) return false;
+    return lv_obj_get_width(s_media_cover_cards[FT_MEDIA_FLOW_CENTER]) ==
+               s_media_cover_max_size &&
+           lv_obj_get_width(s_media_cover_cards[FT_MEDIA_FLOW_CENTER - 1U]) <
+               s_media_cover_max_size &&
+           lv_obj_get_width(s_media_cover_cards[FT_MEDIA_FLOW_CENTER + 1U]) <
+               s_media_cover_max_size &&
+           s_media_cover_perspective[FT_MEDIA_FLOW_CENTER] == 0 &&
+           s_media_cover_perspective[FT_MEDIA_FLOW_CENTER - 1U] < 0 &&
+           s_media_cover_perspective[FT_MEDIA_FLOW_CENTER + 1U] > 0;
+}
+
+static void media_cover_control_timer_cb(lv_timer_t *timer)
+{
+    if (timer != s_media_cover_control_timer) return;
+    if (s_media_cover_flow == RT_NULL || !lv_obj_is_valid(s_media_cover_flow) ||
+        ft_router_current_page() != FT_PAGE_MEDIA)
+    {
+        if (s_media_cover_stress_active)
+            rt_kprintf("[UI-MEDIA-STRESS] aborted completed=%lu\n",
+                       (unsigned long)s_media_cover_stress_completed);
+        s_media_cover_stress_active = false;
+        lv_timer_pause(timer);
+        return;
+    }
+
+    if (s_media_cover_state == FT_MEDIA_COVER_DRAGGING)
+    {
+        if (s_media_cover_visual_dirty)
+        {
+            s_media_cover_visual_dirty = false;
+            media_cover_refresh_visuals();
+        }
+        return;
+    }
+
+    if (s_media_cover_state == FT_MEDIA_COVER_ANIMATING)
+    {
+        uint32_t elapsed = lv_tick_elaps(s_media_cover_state_tick);
+        uint32_t progress = elapsed >= FT_MEDIA_FLOW_ANIM_MS ?
+                            256U : elapsed * 256U / FT_MEDIA_FLOW_ANIM_MS;
+        uint32_t remaining = 256U - progress;
+        uint32_t eased = 256U - remaining * remaining / 256U;
+        int32_t next_offset = s_media_cover_anim_start_offset +
+            (int32_t)(((int64_t)(s_media_cover_anim_target_offset -
+                                s_media_cover_anim_start_offset) * eased) / 256);
+        if (next_offset != s_media_cover_visual_offset ||
+            s_media_cover_visual_dirty)
+        {
+            s_media_cover_visual_offset = next_offset;
+            s_media_cover_visual_dirty = false;
+            media_cover_refresh_visuals();
+        }
+        if (progress == 256U)
+        {
+            s_media_cover_visual_offset = s_media_cover_anim_target_offset;
+            s_media_cover_state = FT_MEDIA_COVER_COMMIT_PENDING;
+            s_media_cover_state_tick = lv_tick_get();
+        }
+        return;
+    }
+
+    if (s_media_cover_state == FT_MEDIA_COVER_COMMIT_PENDING)
+    {
+        int32_t offset = s_media_cover_pending_offset;
+        s_media_cover_pending_offset = 0;
+        if (offset != 0)
+            media_cover_commit_offset(offset);
+        media_cover_recenter();
+        s_media_cover_visual_dirty = false;
+        s_media_cover_state = FT_MEDIA_COVER_SETTLING;
+        s_media_cover_state_tick = lv_tick_get();
+        return;
+    }
+
+    if (s_media_cover_state == FT_MEDIA_COVER_SETTLING)
+    {
+        if (lv_tick_elaps(s_media_cover_state_tick) < FT_MEDIA_FLOW_SETTLE_MS)
+            return;
+        s_media_cover_state = FT_MEDIA_COVER_IDLE;
+        s_media_cover_state_tick = lv_tick_get();
+    }
+
+    if (s_media_cover_visual_dirty)
+    {
+        s_media_cover_visual_dirty = false;
+        media_cover_refresh_visuals();
+    }
+
+    if (s_media_cover_stress_active)
+    {
+        if (s_media_cover_stress_remaining != 0U)
+        {
+            if (media_cover_start_turn(1))
+            {
+                s_media_cover_stress_remaining--;
+                s_media_cover_stress_completed++;
+                if ((s_media_cover_stress_completed % 10U) == 0U)
+                    rt_kprintf("[UI-MEDIA-STRESS] progress=%lu remaining=%lu\n",
+                               (unsigned long)s_media_cover_stress_completed,
+                               (unsigned long)s_media_cover_stress_remaining);
+            }
+            return;
+        }
+
+        {
+            bool ready = ft_pages_media_cover_ready();
+            s_media_cover_stress_active = false;
+            rt_kprintf("[UI-MEDIA-STRESS] complete steps=%lu track=%ld ready=%d\n",
+                       (unsigned long)s_media_cover_stress_completed,
+                       (long)s_media_track, ready ? 1 : 0);
+        }
+    }
+
+    lv_timer_pause(timer);
+}
+
+bool ft_pages_media_cover_stress_start(uint32_t steps)
+{
+    if (steps == 0U || s_media_cover_flow == RT_NULL ||
+        !lv_obj_is_valid(s_media_cover_flow) ||
+        ft_router_current_page() != FT_PAGE_MEDIA ||
+        s_media_cover_control_timer == RT_NULL) return false;
+    s_media_cover_stress_active = true;
+    s_media_cover_stress_remaining = steps;
+    s_media_cover_stress_completed = 0U;
+    media_cover_wake_controller();
+    lv_timer_ready(s_media_cover_control_timer);
+    return true;
+}
+
 bool ft_pages_benchmark_set_keyboard_visible(bool visible)
 {
     ft_page_id_t page = ft_router_current_page();
@@ -4963,6 +6291,15 @@ bool ft_pages_benchmark_set_media_playing(bool playing)
     if (s_media_playing != playing)
         (void)lv_obj_send_event(s_media_button, LV_EVENT_CLICKED, RT_NULL);
     return s_media_playing == playing;
+}
+
+bool ft_pages_benchmark_open_media_folder(void)
+{
+    if (ft_router_current_page() != FT_PAGE_MEDIA ||
+        s_media_directory_label == RT_NULL ||
+        !lv_obj_is_valid(s_media_directory_label)) return false;
+    media_folder_open_cb(RT_NULL);
+    return s_media_folder_box != RT_NULL && lv_obj_is_valid(s_media_folder_box);
 }
 
 bool ft_pages_benchmark_open_file_action(void)
@@ -5365,12 +6702,25 @@ lv_obj_t *ft_pages_test_get_media_button(void) { return s_media_button; }
 lv_obj_t *ft_pages_test_get_media_prev_button(void) { return s_media_prev_button; }
 lv_obj_t *ft_pages_test_get_media_next_button(void) { return s_media_next_button; }
 lv_obj_t *ft_pages_test_get_media_volume(void) { return s_media_volume; }
+lv_obj_t *ft_pages_test_get_media_directory_label(void)
+{
+    return s_media_directory_label;
+}
+lv_obj_t *ft_pages_test_get_media_loop_button(void)
+{
+    return s_media_loop_button;
+}
 const char *ft_pages_test_get_media_label(void)
 { return s_media_label != RT_NULL && lv_obj_is_valid(s_media_label) ? lv_label_get_text(s_media_label) : RT_NULL; }
 bool ft_pages_test_media_is_playing(void) { return s_media_playing; }
 int32_t ft_pages_test_media_track(void) { return s_media_track; }
+size_t ft_pages_test_media_track_count(void) { return media_track_count(); }
 int32_t ft_pages_test_media_volume(void)
 { return s_media_volume != RT_NULL && lv_obj_is_valid(s_media_volume) ? lv_slider_get_value(s_media_volume) : -1; }
+bool ft_pages_test_media_cover_ready(void)
+{
+    return ft_pages_media_cover_ready();
+}
 lv_obj_t *ft_pages_test_get_files_refresh_button(void) { return s_files_refresh_button; }
 lv_obj_t *ft_pages_test_get_files_up_button(void) { return s_files_up_button; }
 lv_obj_t *ft_pages_test_get_files_first_entry(void)
@@ -5615,7 +6965,11 @@ bool ft_pages_test_transient_slots_clear(void)
         s_media_prev_button != RT_NULL || s_media_button != RT_NULL ||
         s_media_next_button != RT_NULL || s_media_label != RT_NULL ||
         s_media_state_icon != RT_NULL || s_media_track_label != RT_NULL ||
-        s_media_volume != RT_NULL || s_files_refresh_button != RT_NULL ||
+        s_media_artist_label != RT_NULL || s_media_album_label != RT_NULL ||
+        s_media_progress_label != RT_NULL || s_media_progress_bar != RT_NULL ||
+        s_media_volume != RT_NULL || s_media_cover_flow != RT_NULL ||
+        s_media_cover_control_timer != RT_NULL || s_media_monitor_timer != RT_NULL ||
+        s_files_refresh_button != RT_NULL ||
         s_files_status_label != RT_NULL || s_files_path_label != RT_NULL ||
         s_files_up_button != RT_NULL || s_files_list != RT_NULL ||
         s_files_action_box != RT_NULL || s_files_action_view != RT_NULL ||
@@ -5631,6 +6985,14 @@ bool ft_pages_test_transient_slots_clear(void)
         s_files_name_cancel != RT_NULL || s_files_name_confirm != RT_NULL ||
         s_files_monitor_timer != RT_NULL ||
         !ft_recorder_page_test_slots_clear()) return false;
+    for (i = 0U; i < FT_MEDIA_FLOW_CELL_COUNT; i++)
+        if (s_media_cover_cells[i] != RT_NULL ||
+            s_media_cover_cards[i] != RT_NULL ||
+            s_media_cover_bands[i] != RT_NULL ||
+            s_media_cover_shades[i] != RT_NULL ||
+            s_media_cover_discs[i] != RT_NULL ||
+            s_media_cover_dots[i] != RT_NULL ||
+            s_media_cover_titles[i] != RT_NULL) return false;
     for (i = 0U; i < FT_SYSTEM_SUMMARY_COUNT; i++)
         if (s_system_summary_values[i] != RT_NULL ||
             s_system_summary_notes[i] != RT_NULL) return false;

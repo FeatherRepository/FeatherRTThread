@@ -46,7 +46,12 @@ if ($Project -eq 'FeatherTalk_M55') {
         'build-featherui-font.js'
     }
     $fontGenerator = Join-Path $toolsRoot (Join-Path 'fonts' $fontGeneratorName)
-    $fontSource = Join-Path $toolsRoot 'fonts\cache\NotoSansSC-wght.ttf'
+    $fontSource = if ($fontGeneratorName -eq 'build-lvgl-vector-font.js') {
+        Join-Path $sdkRoot 'libraries\components\lvgl_9.2.0\demos\multilang\assets\fonts\NotoSansSC-Medium.otf'
+    }
+    else {
+        Join-Path $toolsRoot 'fonts\cache\NotoSansSC-wght.ttf'
+    }
     $fontConverter = Join-Path $toolsRoot 'fonts\cache\node_modules\lv_font_conv\lv_font_conv.js'
     $node = Get-Command node -ErrorAction SilentlyContinue
     if ($node -and

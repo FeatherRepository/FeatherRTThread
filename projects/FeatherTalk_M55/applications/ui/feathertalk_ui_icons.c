@@ -166,7 +166,7 @@ static ft_icon_vector_cache_t *vector_cache_get(ft_icon_id_t icon_id)
             VG_LITE_FP32, VG_LITE_MEDIUM, asset->fill_path,
             asset->fill_path_bytes, bounds);
         if (cache->fill == RT_NULL || native_path == RT_NULL ||
-            !lv_draw_vg_lite_vector_path_attach_native(cache->fill, true,
+            !lv_draw_vg_lite_vector_path_attach_native(cache->fill, true, false,
                                                        native_path, bounds))
         {
             if (native_path != RT_NULL) lv_vg_lite_path_destroy(native_path);
@@ -189,7 +189,7 @@ static ft_icon_vector_cache_t *vector_cache_get(ft_icon_id_t icon_id)
             VG_LITE_FP32, VG_LITE_MEDIUM, asset->stroke_path,
             asset->stroke_path_bytes, bounds);
         if (cache->stroke == RT_NULL || native_path == RT_NULL ||
-            !lv_draw_vg_lite_vector_path_attach_native(cache->stroke, false,
+            !lv_draw_vg_lite_vector_path_attach_native(cache->stroke, false, false,
                                                        native_path, bounds))
         {
             if (native_path != RT_NULL) lv_vg_lite_path_destroy(native_path);
@@ -214,6 +214,10 @@ static bool draw_vector_icon(lv_layer_t *layer, lv_obj_t *obj, ft_icon_id_t icon
     lv_area_t coords;
     float scale_x;
     float scale_y;
+    float inset_x = 0.0f;
+    float inset_y = 0.0f;
+    float draw_width;
+    float draw_height;
 
     cache = vector_cache_get(icon_id);
     if (cache == RT_NULL ||
@@ -226,12 +230,36 @@ static bool draw_vector_icon(lv_layer_t *layer, lv_obj_t *obj, ft_icon_id_t icon
     lv_obj_init_draw_image_dsc(obj, LV_PART_MAIN, &style);
     lv_obj_get_coords(obj, &coords);
     vector = lv_vector_dsc_create(layer);
-    scale_x = (float)lv_obj_get_width(obj) / asset->view_w;
-    scale_y = (float)lv_obj_get_height(obj) / asset->view_h;
+    if (vector == RT_NULL) return false;
+
+    /* SVG stroke coordinates describe the centre line.  Several intentional
+     * edge details (for example media_pattern x=23 with a 2 px round stroke,
+     * and rotation x=23 with a 1.8 px stroke) therefore extend to or beyond
+     * the 24 px viewBox.  LVGL clips a custom-drawn icon to its object, so a
+     * viewBox-to-object scale used all 24 pixels and cut off the stroke/AA
+     * fringe.  Keep two *device* pixels inside each edge for stroked assets:
+     * one for the actual contour and one for VG-Lite's conservative AA path
+     * bounds.  This also keeps the path inside the object scissor, avoiding a
+     * per-icon hardware-scissor transition at a 160-line partial-buffer
+     * boundary.  The inset is independent of the requested icon size. */
+    if (cache->stroke != RT_NULL)
+    {
+        inset_x = 2.0f;
+        inset_y = 2.0f;
+    }
+    draw_width = (float)lv_obj_get_width(obj) - 2.0f * inset_x;
+    draw_height = (float)lv_obj_get_height(obj) - 2.0f * inset_y;
+    if (draw_width <= 0.0f || draw_height <= 0.0f)
+    {
+        lv_vector_dsc_delete(vector);
+        return false;
+    }
+    scale_x = draw_width / asset->view_w;
+    scale_y = draw_height / asset->view_h;
     lv_vector_dsc_identity(vector);
     lv_vector_dsc_translate(vector,
-                            (float)coords.x1 - asset->view_x * scale_x,
-                            (float)coords.y1 - asset->view_y * scale_y);
+                            (float)coords.x1 + inset_x - asset->view_x * scale_x,
+                            (float)coords.y1 + inset_y - asset->view_y * scale_y);
     lv_vector_dsc_scale(vector, scale_x, scale_y);
 
     if (cache->fill != RT_NULL)

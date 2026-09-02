@@ -898,3 +898,239 @@
 - 当前 M55 构建 text=7,528,068、data=91,176、bss=4,878,296 字节；HEX=21,431,189 字节，
   SHA-256 `3CCFC57D675BB6AC437C913746C3A38AFD4C3AF17B3F23072D603E3EF5AB8779`。Infineon
   Customized OpenOCD 写入 7,622,656 字节、校验 7,619,244 字节。
+
+## 2026-09-02 音乐播放器 Cover Flow
+
+- Media 页面升级为 Music 播放器：用 5 个循环虚拟槽承载 3 个当前示例专辑，中心封面放大，
+  两侧封面按距中心的距离缩小并渐隐。横向拖动使用 LVGL 惯性、单项滚动和中心吸附；点击
+  侧边封面会滚入中心。完成吸附后围绕新曲目重绑 5 个槽，因此连续浏览不需要无限对象列表。
+- 曲目、艺人、专辑、播放/暂停、上一首/下一首和音量位于同一状态模型；中英文切换会同步
+  刷新封面标题与详情，`Feather`、`PSoC` 等产品关键词保持不翻译。自动测试新增 Cover Flow
+  五槽有效性、中心/侧边尺寸关系及中心曲目绑定检查；性能场景 4/25 也把该检查作为 ready 条件。
+- 布局按实际显示尺寸动态计算。480×800 竖屏采用“Cover Flow 在上、信息和控制在下”；
+  90/270 度构建会自动切换为宽屏双栏。当前 LCD scanout 与触摸坐标旋转仍由板级编译配置
+  决定，所以进入 Music 不会在运行时偷偷改变整个系统方向；后续若需要单应用自动横屏，
+  必须先实现显示 buffer、DC scanout 和触摸矩阵的原子运行时切换。
+- 首版对封面父对象设置整体透明度，实板立即暴露 25 submit/frame、Layer 10.33 ms/frame、
+  约 27.5 FPS。现改为直接调整各 fill/border/text primitive 的透明度并取消复杂圆角裁剪；
+  最终 Media/Media playing 均为 60 render / 60 batch / 60 submit、Layer=0、software=0，
+  分别达到 51.23/51.41 FPS，GPU busy 56.97%/57.14%；两个场景的 Cover Flow ready 校验
+  均为 `result=0`。最终构建 text=7,533,124、data=91,176、bss=4,878,464 字节，HEX
+  21,445,422 字节，SHA-256
+  `F94BB170F9FCE5A48CCA5528BD9F3E84909A7ACF00B3F78221CD586854AEC988`。证据日志为
+  `tools/freather/logs/COM17-cover-flow-ready-media-final-20260902.log` 和
+  `COM17-cover-flow-ready-final-20260902.log`。
+- 随后按经典 Cover Flow 补齐 2.5D 翻页：中心封面正对屏幕；左右封面绕视觉 Y 轴向内翻，
+  宽度压缩、纵向轻微后退、远侧角内收并叠加暗边。角度、尺寸、透明度和内容偏移都由封面
+  中心到视口中心的有符号距离连续计算，穿过中心时自动反转方向；上一首/下一首与触摸拖动
+  共用同一条惯性滚动、中心吸附和曲目提交路径。首轮两个三角形拼面在显存回读中暴露对角
+  AA 接缝；动态闭合 path 与持续缩放的圆角装饰则会在长循环中触发 VG-Lite path 生命周期
+  停滞；在 `DRAW_MAIN` 回调中逐帧追加矩形斜边任务也会在长循环后占住 UI 绘制锁。当前封面
+  主体回到 LVGL 普通 GPU 矩形对象，保留宽度压缩、纵向后退、透明度和远侧暗边表达 2.5D
+  深度，圆盘装饰保持矩形快路径，不再生成或临时插入逐帧几何任务；侧面透明标题改为真正
+  停止绘制。
+- 3D 版本实板场景 4/25 的 ready 校验均为 `result=0`，60 帧均保持 60 batch / 60 submit、
+  Layer=0、software=0；两场景均为 37.26 FPS，GPU busy 40.74%/40.71%。相较平面版约
+  51 FPS 的差额来自 CPU 对动态矢量面和字形的收集/编码，不是额外提交或离屏图层。
+  最终构建 text=7,535,412、data=91,176、bss=4,878,504 字节，HEX=21,451,857 字节，
+  SHA-256 `6B8D8022FB38032D32C67BE7BD6874727F91F4DB4DCDADAE7A1305631ADB8A84`；日志为
+  `tools/freather/logs/COM17-cover-flow-3d-title-cull-final-20260902.log/.csv`。
+
+## 2026-09-02 描边图标分块裁剪修复
+
+- 下拉面板“自动旋转”和桌面 Media Tile 波形的 SVG 源文件、24×24 viewBox 与生成路径均完整；
+  缺块不是 SVG 路径少点，而是描边中心线靠近 viewBox 边缘后，真实半线宽与 VG-Lite 的 AA
+  保守边界越出图标对象 clip。逐图标 scissor 随后在 160 行局部 framebuffer 边界泄漏，导致
+  跨边界的下半个快捷卡片或 Tile 看起来被矩形切掉。
+- 公共矢量图标渲染器现在只对含 stroke 的资源保留固定 2 个物理像素内边距，再按剩余区域
+  计算矩阵。1 像素 A/B 仍会触发边界问题；2 像素同时覆盖实际轮廓和保守 AA guard，路径不再
+  需要比对象更窄的硬件 scissor。fill-only 图标不缩小。
+- 同一固件完成 A8/Vector 显存对照；最终 Vector 双 buffer 回读中四个快捷卡片均完整，自动
+  旋转图标完整；Home 双 buffer 中 Media Tile 本体及右侧波形完整。证据位于
+  `projects/FeatherTalk_M55/build/vector-clip-ab/`。两个 buffer 上位置不同的单条水平线来自
+  OpenOCD 停住 M33 而 M55 仍换帧时的抓取撕裂，不是稳定在同一位置的裁剪缺块。
+- 新增 `tools/freather/framebuffer-rgb565-to-png.ps1`，按 480×800、512 像素 stride 把板端
+  RGB565 显存转换为 PNG，后续边界问题必须先对双 buffer 做像素检查。
+- 为避免产品混合流继续依赖跨帧跳转，离线字体和 SVG fill/stroke 都改为预编译 VG-Lite
+  原生命令流内联：仍由 GPU 光栅化并进入整帧单链，只取消 `CALL/RETURN`。当时 Cover Flow
+  的 100 次连续程序化翻页仍未输出完成标志；后续已通过 M55 线程栈抓取确认它与 SVG/GPU
+  无关，并按下节所述修复触摸采样优先级死锁。
+
+## 2026-09-02 Cover Flow 长循环卡死根因与修复
+
+- 卡死现场中 DC frame IRQ、M33/M55 IPC 和 shell 都继续运行，但 LVGL render/present 计数
+  停止，全局 LVGL mutex 一直由 `LVGL` 线程持有；GPU 为 `stage=0 active=0 pending=0`，无
+  timeout，排除了 GPU command chain、scanout 和 Cover Flow path 生命周期停滞。
+- 通过 M33 system AP 的 M55 DTCM remap (`0x48040000`) 读取 `LVGL` TCB 保存的 PSP，并按
+  Cortex-M55/RT-Thread 异常栈格式还原 PC/LR。真实 PC 为 `touch_sample_snapshot()` 的
+  `if (sequence & 1) continue`，LR 为 `touchpad_read()`，证明 LVGL 在输入读取阶段无界自旋。
+- 旧触摸缓存使用 sequence lock。低优先级 `touch` 线程先把 sequence 改成奇数，尚未写完
+  就被优先级更高的 `LVGL` 抢占；LVGL 随后等待 sequence 变回偶数，却又阻止发布线程恢复，
+  形成确定性的优先级反转死锁。Cover Flow 连续动画只是提高了在这个极短窗口命中的概率，
+  不是根因。
+- `touch_sample_publish()` 和 `touch_sample_snapshot()` 现改为仅覆盖三个缓存字段的短中断临界
+  区，删除 sequence 与所有无界重试。I2C 采样、坐标换算和 LVGL 事件处理均不在临界区内，
+  因而不会把慢操作带入关中断区，也不存在等待低优先级线程完成的路径。
+- Cover Flow 同时收敛为一个持久控制 timer 的显式状态机：drag、animate、commit、settle
+  顺序推进，触摸拖动和按键翻页共用相同曲目提交路径；不再叠加 LVGL scroll/snap/async
+  生命周期。动画仍实时改变封面位置、宽高、明暗和远侧遮光，松手后再提交中心专辑。
+- 实板不重启连续执行三轮 `feather_ui_media_stress 100`，共 300 次完整动画，每轮均输出
+  `complete steps=100 ... ready=1`。结束后 `LVGL` 与 `touch` 线程均为 ready，全局 mutex
+  owner 为 NULL，scanout timeout 为 0。
+- 随后运行全部 27 个视觉场景、共 1,620 个强制全屏帧，脚本退出码 0；每个场景均完成
+  60 render / 60 batch 且 job=submit，最终自动恢复 Home。Media 为 41.03 FPS，
+  Media playing 为 36.05 FPS；全局统计 `stage=0`、scanout timeout=0。原始证据为
+  `tools/freather/logs/COM17-cover-flow-seqlock-fix-20260902.log` 与
+  `tools/freather/logs/ui-scene-benchmark-seqlock-fix-20260902.log/.csv`。
+- 最终 M55 构建 text=7,535,732、data=91,176、bss=4,878,552 字节；HEX=21,452,744 字节，
+  SHA-256 `FB07605FB829A3527EC7B7F644F763A7DEBB61C8C1EFAEDF08AC5098D509CA62`。
+  已用 Infineon Customized OpenOCD 写入并校验 M55 7,630,848/7,626,908 字节及签名 M33
+  镜像；验证结束设备留在普通 Home、route depth 1。
+
+## 2026-09-02 原生矢量字体消失回归修复
+
+- Cover Flow 修复后的首个实板帧缓冲回读确认：壁纸、Tile、SVG 图标和导航栏仍在，但所有
+  中英文字形都没有产生像素，因而排除了 LCD scanout、颜色转换和字库缺失。
+- 根因是 `lv_draw_vg_lite_vector_path_attach_native()` 原有的单个布尔参数同时被误解为
+  “是否使用 upload/CALL”。该参数实际是 `add_end`，用于选择 LVGL vector path 的 fill 或
+  stroke 缓存槽；字体调用把它改成 `false` 后，字形轮廓进入 stroke 槽，而字体绘制继续请求
+  fill，最终得到空路径。
+- API 现拆为两个独立参数：`add_end` 明确选择 fill/stroke，`upload` 独立控制上传/CALL。
+  字体和 SVG fill 使用 `(true, false)`，SVG stroke 使用 `(false, false)`；因此字形重新进入
+  fill 槽，同时仍保持产品要求的原生命令流内联和整帧一次 submit。关闭 CALL 不再能改变
+  路径语义。
+- 重新构建烧录后，直接从板上读取双 framebuffer 并转换为 480×800 PNG，设置页标题、说明、
+  搜索框、全部设置项及状态栏中英文均恢复。60 帧全屏基准实际绘制 182 glyph/frame，
+  `glyph-draw=30.517 ms`、`layout/font=3.945 ms`，证明字体路径已进入真实 GPU 绘制链。
+- 回归执行 `feather_ui_media_stress 100`，输出 `complete steps=100 track=1 ready=1`，字体修复
+  未重新引入 Cover Flow/LVGL 锁死。当前 M55 构建 text=7,535,756、data=91,176、
+  bss=4,878,552 字节；HEX=21,452,818 字节，SHA-256
+  `D78CD7DF15B554F1709923E083C33FA2401FDDEDCE77556AE9CBF327FCC9EFEB`。
+
+## 2026-09-02 本地录音与 PCM WAV 播放
+
+- 之前 Music 页只有三组 Cover Flow 演示元数据，播放按钮只改变 UI 状态，既没有打开文件，
+  也没有向 `sound0` 写 PCM。新增仓库内 `feathertalk_player.c/.h` 后端，扫描
+  `/sdcard/Recordings`、`/flash/Recordings`、`/sdcard/Music` 和 `/flash/Music`，最多保留
+  24 个通过校验的本地曲目。
+- WAV 解析器按 RIFF chunk 遍历 `fmt ` 与 `data`，不把音频数据硬编码在 44 字节；当前只接收
+  与板载播放驱动能力一致的未压缩 PCM：16/24/48/96 kHz、16/24 bit、单/双声道。录音机生成
+  的 16 kHz、16 bit、双声道 WAV 可直接播放；MP3/AAC/FLAC 解码尚未宣称支持。
+- 后台 `ft_player` 线程从文件系统读取对齐 PCM block，按文件格式配置 TDM0 与 ES8388 后再
+  打开 `sound0`。支持播放、暂停、继续、停止、当前位置和总时长，离开 Music 页面后继续播放。
+  Music 的 Cover Flow、标题、来源、格式、播放图标和进度条均绑定真实媒体库；从 Recorder
+  返回 Music 时会重新扫描，因此新录音无需经过 Files 应用。
+- 新增共享输出所有权：本地播放器和 USB UAC 在改变格式或打开 `sound0` 前分别申请
+  `LOCAL_PLAYER`/`USB_UAC`，冲突返回 `-RT_EBUSY`，不会让两个线程同时改 TDM/Codec 并交错
+  写入。UAC 停流或关闭设备后主动释放所有权。
+- 实板 SD 卡识别到 4 个 Recorder WAV，逐一解析得到 1.792--6.502 秒、16 kHz/16 bit/2 ch。
+  `feather_player play 3` 后驱动实际切换为 16 kHz，ES8388 回读为 16 bit、MCLK=128×Fs；
+  诊断统计累计 810 次 `rt_device_write`、0 次 transmit fail、0 次 underflow。暂停状态保持
+  position=3840 ms 与 owner=LOCAL，继续后恢复，曲末释放 owner；通过 UI 场景 25 也实际启动
+  相同播放链。动态四曲媒体库完成 Cover Flow 100 次连续翻页，最终 `ready=1`。
+- 最终媒体库把录音按文件名时间戳降序排列，最新录音位于 Cover Flow 中心；当前首项为
+  `REC_0000116025_00.wav`。最终 M55 构建 text=7,544,560、data=91,200、bss=4,887,720
+  字节；HEX=21,477,637 字节，SHA-256
+  `81DD6ECEDEC418EAC642345E34638D00AB89EB0460CA71E5F18F02E9B65345CF`。Infineon
+  Customized OpenOCD 已写入并校验 M55 7,639,040/7,635,760 字节以及签名 M33 镜像。
+
+## 2026-09-02 可选文件夹播放列表与 MP3
+
+- 修正“播放器只绑定录音目录”的模型：Music 页新增文件夹选择器，可在 SD 卡和内置 Flash
+  中逐层浏览并选取任意目录。媒体库只收集所选目录的直属 WAV/MP3，目录本身就是明确的
+  播放列表边界；默认目录为 `/sdcard/Music`。循环开关启用时曲末自动播放下一项并回绕。
+- SDK 内原先没有 MP3 解码器。现把官方 `lieff/minimp3` 单头文件及 CC0-1.0 许可证完整固化
+  到 `applications/third_party/minimp3`，产品构建不依赖仓库外源码。扫描阶段只解析 MPEG
+  Layer III 帧头，播放线程负责真正解码；44.1 kHz PCM 以线性插值转为板载 TDM/ES8388
+  已验证的 48 kHz、16 bit、单/双声道输出。
+- 首轮实板扫描直接在 tshell 中调用完整 MP3 解码器，超过 4 KiB shell 栈并触发 stack
+  overflow；改为无解码的帧头探测后消除。首轮播放又测得 minimp3 Layer-III 合成峰值超过
+  16 KiB worker 栈并损坏线程控制块；播放器改用独立 32 KiB 栈后，实测峰值为 72%，留有
+  约 9 KiB 余量。该内存不是 UI 绘制缓存，也不会占用线程栈以外的长期静态区。
+- 实板 `/sdcard/Music` 识别到浏览器下载的 319112 ms MP3：44.1 kHz、16 bit、双声道。
+  播放时 `sound0`/TDM0/ES8388 切换为 48 kHz、16 bit、双声道，连续 14.8 秒诊断累计
+  1392 次写入、0 transmit fail、0 underflow；暂停保持位置，继续恢复，停止后 owner 从
+  `LOCAL_PLAYER` 释放。随后切换到 `/sdcard/Recordings`，5 个 PCM WAV 均能重新扫描并播放。
+- 在同一构建上再次执行 100 次 Cover Flow 连续翻页，输出
+  `complete steps=100 track=0 ready=1`；压力测试结束后立即重新播放该 MP3，连续 15.3 秒
+  状态保持 `error=0`，停止后输出设备所有权正常释放。最终 HEX SHA-256 为
+  `06B211680A7FA1FD74767D3A97004E3A7C513F18622672C08F4FEF0D4474711E`。
+
+## 2026-09-02 音乐目录切换与动态矢量字体度量
+
+- “选择音乐文件夹”不再把目录选择当作只能在 STOPPED 状态修改的普通设置。选择有效目录
+  会立即发布 stopped 状态、关闭旧音频流、替换播放列表根目录并重新扫描；无论之前正在
+  播放、暂停还是尚未播放，都不要求用户先暂停，也不再弹出语义错误的异常提示。worker
+  消费 STOP 后再次清零 position/duration，消除了最后一个音频 block 与目录切换并发时偶发
+  的旧进度残留。实板在 MP3 播放中从 `/sdcard/Music` 切到 `/sdcard/Recordings` 返回 0，
+  得到 5 个 WAV，最终状态为 stopped、position=0、owner=0。
+- 目录弹窗改为明确的“音乐文件夹”：SD 卡、内置 Flash、上一级和子目录组成浏览视图，底部
+  主操作为“切换到此文件夹”。弹窗和滚动内容显式继承产品字体，目录行不再混入私有区
+  `LV_SYMBOL_DIRECTORY`；双 framebuffer 回读确认内置中英文文案均能形成字形，没有方框占位。
+- 字体偏细的根因是旧生成器用 `opentype.js` 打开可变字体后落在默认 Thin 100 实例。LVGL
+  矢量生成器现固定使用 SDK 已跟踪的官方 Noto Sans SC Medium 500 静态 OTF，并验证 OS/2
+  weight；任一请求字符缺失会让构建直接失败。当前产物包含 7,586 个字形、3,427,980 字节
+  canonical S16 路径数据。
+- 字体轮廓仍只保存一份 1000 UPM 原始坐标，不是预先栅格化的固定字号。8--48 px 的每个
+  整数尺寸按需建立持久 `lv_font_t`，GPU 矩阵动态缩放轮廓；advance、glyph offset、line
+  height 和 baseline 则从 UPM 与字体 typographic ascender/descender 动态换算。旧实现把
+  18 px 折为 16、30 px 折为 22，并用 `字号+2`/`字号÷6` 猜行高和基线，已完全删除。
+- 实板运行新增 `media-folder` 在内的全部 28 个视觉场景，共 1,680 个强制全屏帧，脚本退出
+  码 0；所有场景均完成 60 render/60 batch，GPU pipeline 最终 stage=0，scanout timeout=0，
+  UI overflow=0。随后执行 100 次 Cover Flow 连续动画，输出
+  `complete steps=100 track=0 ready=1`。证据为
+  `tools/freather/logs/ui-scene-benchmark-font-folder-final-20260902.log/.csv` 和
+  `COM17-font-folder-stress-final-20260902.log`。最终 M55 构建 text=5,132,936、
+  data=91,376、bss=4,894,560 字节；HEX=14,694,817 字节，SHA-256
+  `E5E0852AAA351B0485B903014B7BCDBBB2B16E6264C2C171613827A2325D512F`。Infineon
+  Customized OpenOCD 已写入 5,226,496 字节并校验 5,224,312 字节；验证结束设备留在
+  Home、route depth 1，本地播放器 stopped、owner=0。
+
+## 2026-09-03 文本块动态重排修复
+
+- 实板 framebuffer 证明字体轮廓、GPU scale 和 baseline 本身一致；系统信息错位来自页面
+  布局：flex-grow 值标签在最终列宽确定前参与 `LV_SIZE_CONTENT` 计算，换成两行后父行仍
+  使用左侧键名的一行高度，导致下一条卡片内分隔线穿过第二行。现在每个系统值行在尺寸或
+  布局变化后，用实际文本、实际字体、letter/line spacing 和最终可用列宽调用
+  `lv_text_get_size()`，再把测得的最大文本高度发布为行 content height。没有假设字号、
+  行数或固定像素高度；分辨率、语言、运行数据或 UI scale 改变都会重新测量。
+- 音乐页原来把 Cover Flow 之后的固定剩余高度强塞给文件名、来源、格式、进度、控制和
+  音量。长文件名的 `LV_LABEL_LONG_DOT` 在高度未约束时会先换成多行，再覆盖后续对象。
+  现在文件名、来源和格式均以当前 `lv_font_get_line_height()` 建立一行省略视图，详情容器
+  使用内容高度，外层可滚动页面承载增加的空间；字号和屏幕 scale 改变后行高会自动更新。
+- 修复前后分别回读 System 与 Media framebuffer。修复后“处理器”的第二行位于本行内部，
+  下一分隔线落在文字之后；MP3 长文件名只占一行并在实际宽度处省略，来源、格式、按钮和
+  音量互不覆盖。证据 PNG 位于 `tools/freather/logs/font-layout-ab/`。
+- 实板场景 2/4 各完成 60 个全屏帧，render/batch 全部完成，pipeline stage=0、
+  scanout timeout=0、UI overflow=0；测试结束恢复 Home。最终构建 text=5,133,824、
+  data=91,376、bss=4,894,560 字节；HEX=14,697,321 字节，SHA-256
+  `804D20DB9E776FD20C36BD1E980ECBE5087A84FE50268B606E4F029B3B06421C`。
+
+## 2026-09-03 全局矢量字形像素边界与基线修复
+
+- 上一节只解决了文本块与父容器的换行高度，不能据此判定字形基线正确。实板放大检查
+  “ST7102/ST7123 电容触控；长按 500 ms”确认，同一行内仍有个别拉丁字符、数字和汉字
+  上下错开 1 像素；这是字体后端的通性问题，不是该页面或该字符串的局部布局问题。
+- 根因是旧描述符分别计算 `ceil((yMax-yMin)*scale)` 和 `floor(yMin*scale)`。LVGL 用
+  `line_height-base_line-box_h-ofs_y` 定位字形顶部，这两个独立取整相加并不恒等于
+  `ceil(yMax*scale)`，不同轮廓会得到不同的额外像素。横向的相同算法也可能导致右边界
+  少 1 像素或多 1 像素。
+- 字体后端现在先对每个字形的绝对 `xMin/yMin` 做 floor、对绝对 `xMax/yMax` 做 ceil，
+  再由两端之差得到 `box_w/box_h`；advance 使用整数四舍五入。全部换算使用有符号整数
+  除法，不依赖浮点数接近整数时的舍入结果。由此对任意字号都严格满足
+  `ofs_x+box_w=xMaxPx`、`ofs_y+box_h=yMaxPx`，所有字形共享字体基线。
+- 新增 `ft_vector_font_metrics_self_test()` 及 MSH 命令 `feather_font_metrics_test`，遍历
+  8--48 px 的每个整数字号和全部 7,586 个生成字形，而非只检查当前可见文字。实板执行
+  输出 `PASS (7586 glyphs, 8..48 px)`。系统信息场景 framebuffer 与放大前后对比位于
+  `tools/freather/logs/font-global-metrics-20260903/`。
+- 修复固件重新构建、写入并校验成功；系统信息页单独 60 帧基准完成 60/60，29.15 FPS，
+  GPU busy 33.59%，pipeline 与 scanout 均无 timeout。最终构建 text=5,134,384、
+  data=91,376、bss=4,894,560 字节；HEX=14,698,896 字节，SHA-256
+  `BAF0E9701F1B854C1550B5777574D1EF4D86D1C3C93691C6C9B2F794CC22E7AD`。
+- 全局调用链审计确认：产品页面显式字体全部来自 `ft_layout_font()`，display theme 的
+  normal font 也指向同一后端；旧 12/14/16/22 px A8 字体由 UI `SConscript` 排除，未混入
+  当前固件。Montserrat fallback 只服务 LVGL 的剪切、目录、上下箭头等私有图标码位。
+- 修复后完整执行 0--27 共 28 个视觉场景、每场景 60 个强制全屏帧，合计 1,680 帧；
+  脚本退出码 0，全部场景完成 60/60，最终 Home route depth 1、UI overflow=0、pipeline
+  stage=0、scanout timeout=0。日志与 CSV 为
+  `tools/freather/logs/ui-font-global-metrics-all-scenes-20260903.log/.csv`。

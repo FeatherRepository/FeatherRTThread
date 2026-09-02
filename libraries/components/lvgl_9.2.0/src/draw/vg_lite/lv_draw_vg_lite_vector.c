@@ -470,6 +470,7 @@ lv_vg_lite_path_t * lv_draw_vg_lite_vector_path_prepare(const lv_vector_path_t *
 
 bool lv_draw_vg_lite_vector_path_attach_native(lv_vector_path_t * path,
                                                bool add_end,
+                                               bool upload,
                                                lv_vg_lite_path_t * native_path,
                                                const float bounds[4])
 {
@@ -491,11 +492,13 @@ bool lv_draw_vg_lite_vector_path_attach_native(lv_vector_path_t * path,
     *slot = native_path;
     lv_memcpy(cached_bounds, bounds, sizeof(cache->fill_bounds));
 #if LV_VG_LITE_USE_PATH_UPLOAD
-    if(add_end && lv_vg_lite_path_upload(native_path) != VG_LITE_SUCCESS) {
+    if(upload && add_end && lv_vg_lite_path_upload(native_path) != VG_LITE_SUCCESS) {
         /* The immutable XIP stream remains a valid fallback if GPU-addressable
          * storage is temporarily exhausted. */
         LV_LOG_WARN("native VG-Lite path upload failed; using XIP stream");
     }
+#else
+    LV_UNUSED(upload);
 #endif
     return true;
 }

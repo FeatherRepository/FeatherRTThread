@@ -40,7 +40,8 @@ SCENES = [
     (23, "gallery-viewer", 3.0),
     (24, "files-action", 1.2),
     (25, "media-playing", 1.0),
-    (26, "alert", 0.8),
+    (26, "media-folder", 1.0),
+    (27, "alert", 0.8),
 ]
 
 COMPLETE_RE = re.compile(

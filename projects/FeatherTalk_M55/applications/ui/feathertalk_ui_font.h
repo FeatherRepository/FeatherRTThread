@@ -3,9 +3,12 @@
 
 #include "lvgl.h"
 
-LV_FONT_DECLARE(feathertalk_vector_font_12);
-LV_FONT_DECLARE(feathertalk_vector_font_14);
-LV_FONT_DECLARE(feathertalk_vector_font_16);
-LV_FONT_DECLARE(feathertalk_vector_font_22);
+/* One canonical outline table backs every requested pixel size.  The returned
+ * font object is persistent for the life of the UI, so LVGL may cache it. */
+const lv_font_t *ft_vector_font_get(uint16_t pixel_size);
+
+/* Validate pixel-bound rounding for every generated glyph at every supported
+ * size.  This catches baseline drift and right/bottom clipping globally. */
+bool ft_vector_font_metrics_self_test(void);
 
 #endif /* FEATHERTALK_UI_FONT_H */

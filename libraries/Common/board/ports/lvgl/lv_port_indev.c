@@ -30,7 +30,6 @@ lv_indev_t *indev_touchpad;
 
 typedef struct
 {
-    volatile uint32_t sequence;
     volatile rt_bool_t pressed;
     volatile rt_int16_t x;
     volatile rt_int16_t y;
@@ -45,36 +44,33 @@ static rt_uint16_t touch_raw_ver_res = TOUCH_PHYS_VER_RES;
 
 static void touch_sample_publish(rt_bool_t pressed, rt_int16_t x, rt_int16_t y)
 {
-    touch_sample_cache.sequence++;
-    __DMB();
+    rt_base_t level = rt_hw_interrupt_disable();
+
     touch_sample_cache.pressed = pressed;
     if (pressed)
     {
         touch_sample_cache.x = x;
         touch_sample_cache.y = y;
     }
-    __DMB();
-    touch_sample_cache.sequence++;
+    rt_hw_interrupt_enable(level);
 }
 
 static rt_bool_t touch_sample_snapshot(rt_int16_t *x, rt_int16_t *y)
 {
-    uint32_t before;
-    uint32_t after;
+    rt_base_t level;
     rt_bool_t pressed;
 
-    for (;;)
-    {
-        before = touch_sample_cache.sequence;
-        if ((before & 1U) != 0U) continue;
-        __DMB();
-        pressed = touch_sample_cache.pressed;
-        *x = touch_sample_cache.x;
-        *y = touch_sample_cache.y;
-        __DMB();
-        after = touch_sample_cache.sequence;
-        if (before == after && (after & 1U) == 0U) break;
-    }
+    /* The former sequence-lock reader spun until the low-priority sampler
+     * finished publishing.  If LVGL preempted the sampler after it made the
+     * sequence odd, the higher-priority LVGL thread spun forever and prevented
+     * the publisher from ever running again.  This cache is only three machine
+     * words, so a bounded interrupt critical section is both cheaper and, more
+     * importantly, cannot create that priority-inversion deadlock. */
+    level = rt_hw_interrupt_disable();
+    pressed = touch_sample_cache.pressed;
+    *x = touch_sample_cache.x;
+    *y = touch_sample_cache.y;
+    rt_hw_interrupt_enable(level);
 
     return pressed;
 }
