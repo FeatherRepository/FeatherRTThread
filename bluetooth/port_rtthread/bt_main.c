@@ -18,6 +18,7 @@
 #include <rtthread.h>
 #include <rtdevice.h>
 #include <string.h>
+#include <stdlib.h>
 #include "board.h"
 
 #include "cycfg_pins.h"
@@ -34,6 +35,13 @@
 #include "hci_transport_h4.h"
 #include "gap.h"
 #include "btstack_memory.h"
+#include "hci_dump.h"
+#include "hci_dump_embedded_stdout.h"
+#include "ble/att_server.h"
+#include "ft_gatt.h"
+
+/* FT Data CCCD 使能值 (Bluetooth 规范) */
+#define FT_GATT_CCCD_NOTIFICATION   0x0001U
 
 #ifndef FEATHERTALK_BT_UART_DEV
 #define FEATHERTALK_BT_UART_DEV     "uart4"
@@ -83,6 +91,20 @@ static void bt_evt_log(uint16_t a, uint16_t b)
     g_bt_evt_log_pos++;
 }
 
+/* 线路嗅探环 (hal_uart_dma 填充完成时记录包类型), GDB 可读 */
+volatile uint8_t g_rx_log[16][2];
+volatile uint8_t g_rx_log_pos;
+
+/* h4 TX 计数 (定位"Reset 是否发出/TX 是否被 CTS 卡死"), GDB 可读 */
+extern volatile uint32_t g_h4_tx_calls;
+extern volatile uint32_t g_h4_tx_timeout;
+/* h4 TX 内容嗅探: 最近 4 次 [len, bytes...] */
+volatile uint8_t g_h4_tx_log[4][20];
+/* SCB 回环自测结果: [31:16]=matched [15:0]=avail */
+volatile uint32_t g_lb_result;
+/* 裸路径 Reset 在 h4 open 前的应答码 (二分定位用) */
+volatile int g_raw_reset_rc = -99;
+
 /* h4 传输配置: hci_init 必须携带, 否则 btstack_uart_embedded_open 会
  * 解引用 NULL 的 btstack_uart_block_configuration (addr 0 总线错误, 实测) */
 static const btstack_uart_config_t s_uart_config = {
@@ -91,6 +113,104 @@ static const btstack_uart_config_t s_uart_config = {
     .device_name = FEATHERTALK_BT_UART_DEV,
     .parity = 0,
 };
+
+/* ---- GATT 服务状态 (att_server, M2) ---- */
+static hci_con_handle_t s_gatt_con_handle;
+static volatile int   s_gatt_connected;
+static volatile int   s_notify_enabled;
+static btstack_timer_source_t s_notify_timer;
+static uint16_t       s_notify_counter;
+static uint8_t        s_ft_cmd;      /* 最近一条 FT CMD 命令字节 (供回读) */
+
+/* NTF 状态帧: [cnt_lo][cnt_hi][bt_state][connected][err][last_cmd] */
+static uint16_t ft_ntf_build_payload(uint8_t *out)
+{
+    out[0] = (uint8_t)(s_notify_counter & 0xFFU);
+    out[1] = (uint8_t)(s_notify_counter >> 8);
+    out[2] = (uint8_t)s_bt_state;
+    out[3] = (uint8_t)s_gatt_connected;
+    out[4] = (uint8_t)((s_bt_err < 0) ? 0xFF : s_bt_err);
+    out[5] = s_ft_cmd;
+    return 6;
+}
+
+static uint16_t att_read_callback(hci_con_handle_t con_handle, uint16_t att_handle,
+                                  uint16_t offset, uint8_t *buffer, uint16_t buffer_size)
+{
+    (void)con_handle;
+    if (att_handle == ATT_CHARACTERISTIC_46540002_4654_4541_4C4B_000000000002_01_VALUE_HANDLE)
+    {
+        if ((offset == 0U) && (buffer != NULL) && (buffer_size >= 1U))
+        {
+            buffer[0] = s_ft_cmd;
+            return 1;
+        }
+        return 0;
+    }
+    if (att_handle == ATT_CHARACTERISTIC_46540003_4654_4541_4C4B_000000000003_01_VALUE_HANDLE)
+    {
+        uint8_t payload[8];
+        uint16_t len = ft_ntf_build_payload(payload);
+        if ((buffer != NULL) && (offset < len) && (buffer_size >= (len - offset)))
+        {
+            memcpy(buffer, &payload[offset], len - offset);
+            return len - offset;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static int att_write_callback(hci_con_handle_t con_handle, uint16_t att_handle,
+                              uint16_t transaction_mode, uint16_t offset,
+                              uint8_t *buffer, uint16_t buffer_size)
+{
+    (void)transaction_mode;
+    (void)offset;
+    if (att_handle == ATT_CHARACTERISTIC_46540003_4654_4541_4C4B_000000000003_01_CLIENT_CONFIGURATION_HANDLE)
+    {
+        s_notify_enabled =
+            (little_endian_read_16(buffer, 0) == FT_GATT_CCCD_NOTIFICATION) ? 1 : 0;
+        s_gatt_con_handle = con_handle;
+        feathertalk_ipc_send_event(s_notify_enabled ? 70u : 71u);
+        return 0;
+    }
+    if (att_handle == ATT_CHARACTERISTIC_46540002_4654_4541_4C4B_000000000002_01_VALUE_HANDLE)
+    {
+        if (buffer_size > 0U)
+        {
+            s_ft_cmd = buffer[0];
+        }
+        feathertalk_ipc_send_event(72);
+        return 0;
+    }
+    return 0;
+}
+
+static void ft_notify_timer_handler(struct btstack_timer_source *ts)
+{
+    if (s_notify_enabled)
+    {
+        att_server_request_can_send_now_event(s_gatt_con_handle);
+    }
+    btstack_run_loop_set_timer(ts, 2000);
+    btstack_run_loop_add_timer(ts);
+}
+
+/* 广播保活: 连接尝试失败(未建立)时, 控制器会停广播且不产生断开事件,
+ * 造成"广播假死、扫不到"。每 3s 若未连接且未在广播, 重新使能。
+ * (对已建立连接无影响; 重发 enable 是幂等的) */
+static btstack_timer_source_t s_adv_keepalive_timer;
+static void ft_adv_keepalive_handler(struct btstack_timer_source *ts)
+{
+    if ((s_bt_state == 2) && !s_gatt_connected)
+    {
+        /* 控制器若已在广播, 此命令幂等; 若假死则救活 */
+        hci_send_cmd(&hci_le_set_advertise_enable, 1);
+    }
+    btstack_run_loop_set_timer(ts, 3000);
+    btstack_run_loop_add_timer(ts);
+}
 
 /* 广播三步: btstack 的 hci_send_cmd 在"上一命令在飞"时直接返回
  * ERROR_CODE_COMMAND_DISALLOWED 并丢弃命令 (实测: 连发三条只完成第一条),
@@ -134,6 +254,10 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     UNUSED(size);
     if (packet_type != HCI_EVENT_PACKET) return;
 
+    /* 全事件记录: 定位"连接事件到底来没来" (GDB 可读) */
+    bt_evt_log(0xE000U | packet[0],
+               (packet[0] == 0x3EU && size > 2U) ? packet[2] : 0xEEEEU);
+
     switch (hci_event_packet_get_type(packet))
     {
     case BTSTACK_EVENT_STATE:
@@ -170,7 +294,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         else if (opcode == 0x200A)
         {
             g_adv_cc_status[ADV_CC_ENABLE] = status;
-            if (status == 0U)
+            /* 保活定时器每 3s 会重发 enable, 只在"进入广播态"的边沿上报,
+             * 否则控制台/IPC 每 3s 被刷屏 */
+            if ((status == 0U) && (s_bt_state != 2))
             {
                 s_bt_state = 2;
                 rt_kprintf("[BT] BLE advertising as FeatherTalk\n");
@@ -182,9 +308,32 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     case HCI_EVENT_COMMAND_STATUS:
         bt_evt_log(0xFF0F, (uint16_t)((size > 1) ? packet[2] : 0xFD));
         break;
+    case HCI_EVENT_LE_META:
+        if (hci_event_le_meta_get_subevent_code(packet) == HCI_SUBEVENT_LE_CONNECTION_COMPLETE)
+        {
+            /* 布局: [0]=0x3E [1]=len [2]=subevent [3]=status [4..5]=handle LE16 */
+            s_gatt_con_handle = little_endian_read_16(packet, 4);
+            s_gatt_connected = 1;
+            feathertalk_ipc_send_event(60);
+        }
+        break;
     case HCI_EVENT_DISCONNECTION_COMPLETE:
         rt_kprintf("[BT] disconnect\n");
+        s_gatt_connected = 0;
+        s_notify_enabled = 0;
+        feathertalk_ipc_send_event(61);
+        bt_adv_start();   /* 断连回广播 */
         break;
+    case ATT_EVENT_CAN_SEND_NOW:
+    {
+        uint8_t payload[8];
+        uint16_t len = ft_ntf_build_payload(payload);
+        att_server_notify(s_gatt_con_handle,
+                          ATT_CHARACTERISTIC_46540003_4654_4541_4C4B_000000000003_01_VALUE_HANDLE,
+                          payload, len);
+        s_notify_counter++;
+        break;
+    }
     case HCI_EVENT_HARDWARE_ERROR:
         rt_kprintf("[BT] HARDWARE ERROR!\n");
         break;
@@ -201,11 +350,13 @@ static void bt_prepare_autobaud(void)
     rt_pin_write(FT_BT_MODULE_POWER_PIN, PIN_HIGH);
     rt_thread_mdelay(20);
 
-    /* 验证阶段保持控制器禁休眠 */
+    /* 保持控制器禁休眠: DEVICE_WAKE 必须拉高 (本板启动时序实测:
+     * "DEVICE_WAKE 保持高(禁休眠)")。参考实现里写成 0 是错的——
+     * 拉低=允许休眠, btstack init 的空闲期会让控制器睡死不再应答 */
     Cy_GPIO_Pin_FastInit(CYBSP_BT_DEVICE_WAKE_PORT,
                          CYBSP_BT_DEVICE_WAKE_PIN,
                          CY_GPIO_DM_STRONG,
-                         0U,
+                         1U,
                          HSIOM_SEL_GPIO);
 
     /* CYW55500 在 REG_ON 翻转期间主机 RTS 保持低电平 -> 自动波特率模式 */
@@ -353,21 +504,50 @@ static void bt_loop_thread_entry(void *param)
     s_bt_err = 0;
     rt_kprintf("[BT] S5 btstack init\n");
     feathertalk_ipc_send_event(8);
+    /* 全量 HCI 抓包到控制台 (排障期) */
+    hci_dump_init(hci_dump_embedded_stdout_get_instance());
+    /* btstack_memory_init 必须在 hci_init 之前: 连接对象/L2CAP 通道都来自
+     * 静态内存池。漏调时池为空 (BSS 全零), 首个连接到来时
+     * btstack_memory_hci_connection_get 返回 NULL, hci.c:3763 提前 return,
+     * 句柄永不登记 -> "acl_handler called with non-registered handle" (实测) */
+    btstack_memory_init();
     btstack_run_loop_init(btstack_run_loop_embedded_get_instance());
     BT_CP(50);
     const hci_transport_t *transport =
         hci_transport_h4_instance(btstack_uart_block_embedded_instance());
     hci_init(transport, &s_uart_config);
     BT_CP(52);
+
+    /* L2CAP 必须初始化: 它注册 ATT(CID4)/SM(CID6)/信令固定通道;
+     * 缺了它 ACL 数据包在 l2cap 层全数丢弃, ATT 交换无法进行
+     * (实测: 手机连接后服务发现超时)。且 hci_register_acl_packet_handler
+     * 会覆盖 l2cap 的 ACL 路由, 因此绝不能再调它。 */
+    l2cap_init();
+
     feathertalk_ipc_send_event(10);
     s_hci_event_handler.callback = &packet_handler;
     hci_add_event_handler(&s_hci_event_handler);
-    hci_register_acl_packet_handler(packet_handler);
     feathertalk_ipc_send_event(11);
     BT_CP(53);
+
+    /* M2: att_server (GAP+DIS+FT Data) */
+    att_server_init(profile_data, att_read_callback, att_write_callback);
+    att_server_register_packet_handler(packet_handler);
+
     hal_uart_dma_rtthread_start_rx_thread();
     feathertalk_ipc_send_event(12);
     BT_CP(54);
+
+    /* M2: 2s 状态 notify 定时器 (订阅后方发出) */
+    s_notify_timer.process = &ft_notify_timer_handler;
+    btstack_run_loop_set_timer(&s_notify_timer, 2000);
+    btstack_run_loop_add_timer(&s_notify_timer);
+
+    /* 广播保活定时器: 每 3s 检查未连接且未广播则重新使能 (防连接失败假死) */
+    s_adv_keepalive_timer.process = &ft_adv_keepalive_handler;
+    btstack_run_loop_set_timer(&s_adv_keepalive_timer, 3000);
+    btstack_run_loop_add_timer(&s_adv_keepalive_timer);
+
     rt_kprintf("[BT] hci_power_on\n");
     feathertalk_ipc_send_event(9);
     s_bt_state = 1;
@@ -426,6 +606,11 @@ int bt_service_enabled(void)
     return s_bt_state ? 1 : 0;
 }
 
+int bt_service_connected(void)
+{
+    return s_gatt_connected;
+}
+
 /* IPC 快捷控制入口: value 1=on, 0=off */
 int bt_service_quick_control(uint8_t on)
 {
@@ -460,6 +645,32 @@ static int bt_info(int argc, char **argv)
     rt_kprintf("[BT] state=%d (0=off,1=hci on,2=working/adv), uart=%s\n",
                s_bt_state, FEATHERTALK_BT_UART_DEV);
     rt_kprintf("[BT] HCI state=%d (0=OFF..6=HALTED)\n", (int)hci_get_state());
+    rt_kprintf("[BT] connected=%d notify=%d counter=%u\n",
+               s_gatt_connected, s_notify_enabled, s_notify_counter);
     return 0;
 }
 MSH_CMD_EXPORT_ALIAS(bt_info, bt_info, show btstack/HCI status);
+
+/* 诊断: 裸路径直发 HCI_Reset, 测试控制器此刻是否应答 (绕过 btstack/h4) */
+static int bt_raw_reset(int argc, char **argv)
+{
+    extern int bt_hcd_send_raw_command(uint16_t opcode, uint8_t plen, const uint8_t *params);
+    (void)argc; (void)argv;
+    int rc = bt_hcd_send_raw_command(HCI_RESET, 0, RT_NULL);
+    rt_kprintf("[BT] raw reset -> %d (0=answered, <0=timeout/deaf)\n", rc);
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(bt_raw_reset, bt_raw_reset, diag: send raw HCI Reset and report);
+
+/* 诊断: 查 btstack 连接登记簿里有没有这个句柄 (定位 non-registered handle) */
+static int bt_find(int argc, char **argv)
+{
+    unsigned h = 64;
+    if (argc > 1) h = (unsigned)strtoul(argv[1], NULL, 0);
+    hci_connection_t *conn = hci_connection_for_handle((hci_con_handle_t)h);
+    rt_kprintf("[BT] find handle 0x%x -> %s (conn=%p, state=%d)\n",
+               h, conn ? "REGISTERED" : "NOT FOUND", (void*)conn,
+               conn ? (int)conn->state : -1);
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(bt_find, bt_find, diag: check if a con handle is registered in btstack);

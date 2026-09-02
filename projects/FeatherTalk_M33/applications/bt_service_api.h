@@ -22,4 +22,8 @@ rt_err_t bt_service_start(void);
 /* 1 once the selected stack reports READY, 0 otherwise. */
 int bt_service_enabled(void);
 
+/* 1 while a BLE peer connection is active, 0 otherwise.
+   (Stacks without connection support return 0.) */
+int bt_service_connected(void);
+
 #endif

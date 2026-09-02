@@ -20,3 +20,9 @@ int bt_service_enabled(void)
 {
     return feathertalk_bt_host_enabled();
 }
+
+int bt_service_connected(void)
+{
+    /* The AIROC reference path currently supports scan/advertising only. */
+    return 0;
+}

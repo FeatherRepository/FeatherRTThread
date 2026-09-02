@@ -178,13 +178,16 @@ static rt_bool_t feathertalk_ipc_send_quick_status(rt_uint32_t sequence)
     message.sequence = sequence;
     /* Bluetooth is the only product driver wired into quick status so far.
        enabled/connected are per-control bitmasks (same layout as the
-       capability bits); connections are not supported yet, so the connected
-       byte honestly stays zero. */
+       capability bits), both fed from the stack-neutral service API. */
 #ifdef FEATHERTALK_IPC_HAS_BT
     message.capabilities |= (uint8_t)FEATHERTALK_QUICK_CAP_BLUETOOTH;
     if (bt_service_enabled() != 0)
     {
         message.enabled |= (uint8_t)FEATHERTALK_QUICK_CAP_BLUETOOTH;
+    }
+    if (bt_service_connected() != 0)
+    {
+        message.connected |= (uint8_t)FEATHERTALK_QUICK_CAP_BLUETOOTH;
     }
 #endif
     message.wifi_signal_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
