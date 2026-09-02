@@ -52,6 +52,9 @@ src += [os.path.join(btstack_root, 'src', f) for f in
          'l2cap.c', 'l2cap_signaling.c', 'ad_parser.c',
          'ble/le_device_db_memory.c',
          'ble/att_db.c', 'ble/att_server.c', 'ble/att_dispatch.c',
+         # M4a Classic: SDP server + link key 内存库
+         'classic/sdp_server.c', 'classic/sdp_util.c',
+         'classic/btstack_link_key_db_memory.c',
          'btstack_tlv.c', 'btstack_tlv_none.c')]
 src += [os.path.join(btstack_root, 'platform', 'embedded',
          'btstack_run_loop_embedded.c'),

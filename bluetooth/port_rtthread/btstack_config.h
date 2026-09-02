@@ -19,12 +19,14 @@
 #define MAX_NR_SM_KEYS 4
 #define MAX_NR_GATT_CLIENTS 1
 #define MAX_NR_HCI_CONNECTIONS 2
-#define MAX_NR_L2CAP_SERVICES 4
-#define MAX_NR_L2CAP_CHANNELS 4
+#define MAX_NR_L2CAP_SERVICES 8   /* M4a 起: SDP 1 + AVDTP/AVRCP 预留 */
+#define MAX_NR_L2CAP_CHANNELS 8
 #define MAX_NR_RFCOMM_MULTIPLEXERS 1
 #define MAX_NR_RFCOMM_SERVICES 1
 #define MAX_NR_RFCOMM_AND_BNEP_CHANNELS 2
 #define MAX_NR_BTSTACK_LINK_KEY_DB 0
+/* M4a: Classic SSP 配对的 link key 内存库 (A5: flash 持久化是 M3' 打磨项) */
+#define MAX_NR_BTSTACK_LINK_KEY_DB_MEMORY_ENTRIES 8
 
 /* logging off for P0 skeleton (avoids hci_dump dependency) */
 #define ENABLE_PRINTF_HEXDUMP

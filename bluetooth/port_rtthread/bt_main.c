@@ -39,6 +39,10 @@
 #include "hci_dump_embedded_stdout.h"
 #include "ble/att_server.h"
 #include "ft_gatt.h"
+/* M4a Classic: SDP server + link key 内存库 (SSP Just Works 配对) */
+#include "bluetooth.h"
+#include "classic/sdp_server.h"
+#include "classic/btstack_link_key_db_memory.h"
 
 /* FT Data CCCD 使能值 (Bluetooth 规范) */
 #define FT_GATT_CCCD_NOTIFICATION   0x0001U
@@ -117,6 +121,9 @@ static const btstack_uart_config_t s_uart_config = {
 /* ---- GATT 服务状态 (att_server, M2) ---- */
 static hci_con_handle_t s_gatt_con_handle;
 static volatile int   s_gatt_connected;
+/* M4a: Classic ACL 链路状态 (与 LE 连接互不排斥, 双模并存) */
+static hci_con_handle_t s_classic_handle;
+static volatile int   s_classic_connected;
 static volatile int   s_notify_enabled;
 static btstack_timer_source_t s_notify_timer;
 static uint16_t       s_notify_counter;
@@ -272,6 +279,13 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             feathertalk_ipc_send_event(40);
             BT_CP(60);
             bt_adv_start();
+            /* M4a: Classic 可见+可连 (与 LE 广播并存, 双模标准做法)。
+             * 这些是 gap task 型 API, 经 hci_run 排队发送, 不与上面的
+             * adv 串行链冲突 */
+            gap_set_class_of_device(0x240418U);  /* Audio/Rendering + Loudspeaker */
+            gap_set_local_name("FeatherTalk");
+            gap_discoverable_control(1);
+            gap_connectable_control(1);
         }
         break;
     case HCI_EVENT_COMMAND_COMPLETE:
@@ -317,13 +331,65 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             feathertalk_ipc_send_event(60);
         }
         break;
+    case GAP_EVENT_INQUIRY_RESULT:
+    {
+        bd_addr_t inq_addr;
+        gap_event_inquiry_result_get_bd_addr(packet, inq_addr);
+        rt_kprintf("[BT] inquiry found %s CoD=0x%06x rssi=%d\n",
+                   bd_addr_to_str(inq_addr),
+                   (unsigned)gap_event_inquiry_result_get_class_of_device(packet),
+                   (int)gap_event_inquiry_result_get_rssi(packet));
+        break;
+    }
+    case GAP_EVENT_INQUIRY_COMPLETE:
+        rt_kprintf("[BT] inquiry done\n");
+        break;
+    case HCI_EVENT_CONNECTION_COMPLETE:
+        /* Classic ACL 连接建立 (LE 走 LE_META, 不走这里) */
+        if ((size > 11U) && (packet[2] == 0U) && (packet[11] == 1U))
+        {
+            s_classic_handle = little_endian_read_16(packet, 3);
+            s_classic_connected = 1;
+            rt_kprintf("[BT] Classic connected (handle 0x%x)\n", s_classic_handle);
+            feathertalk_ipc_send_event(62);
+        }
+        break;
+    case HCI_EVENT_SIMPLE_PAIRING_COMPLETE:
+        /* 配对失败(对端超时/拒绝)时主动断开: 否则链路挂死占据连接池,
+         * 后续配对重试全部被陈旧链路顶掉 (实测: PC 配对超时后链路挂 sniff,
+         * 重试时新连接建不起来, rc=31) */
+        if ((size > 2U) && (packet[2] != 0U))
+        {
+            rt_kprintf("[BT] pairing failed (status 0x%x), disconnect link\n",
+                       packet[2]);
+            if (s_classic_connected)
+            {
+                gap_disconnect(s_classic_handle);
+            }
+        }
+        break;
+    case HCI_EVENT_LINK_KEY_NOTIFICATION:
+        /* 配对成功, link key 已由 hci 层自动存入内存库 */
+        rt_kprintf("[BT] link key stored (paired)\n");
+        feathertalk_ipc_send_event(63);
+        break;
     case HCI_EVENT_DISCONNECTION_COMPLETE:
+    {
+        uint16_t disc_handle = (size > 4U) ? little_endian_read_16(packet, 3) : 0;
         rt_kprintf("[BT] disconnect\n");
+        if (disc_handle == s_classic_handle)
+        {
+            s_classic_connected = 0;
+            rt_kprintf("[BT] Classic disconnected, back to discoverable\n");
+            gap_discoverable_control(1);
+            gap_connectable_control(1);
+        }
         s_gatt_connected = 0;
         s_notify_enabled = 0;
         feathertalk_ipc_send_event(61);
         bt_adv_start();   /* 断连回广播 */
         break;
+    }
     case ATT_EVENT_CAN_SEND_NOW:
     {
         uint8_t payload[8];
@@ -524,6 +590,16 @@ static void bt_loop_thread_entry(void *param)
      * 会覆盖 l2cap 的 ACL 路由, 因此绝不能再调它。 */
     l2cap_init();
 
+    /* M4a Classic: SDP server + SSP Just Works + link key 内存库。
+     * NoInputNoOutput + auto accept => 手机配对无需本机交互 */
+    sdp_init();
+    hci_set_link_key_db(btstack_link_key_db_memory_instance());
+    gap_ssp_set_io_capability(SSP_IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
+    gap_ssp_set_auto_accept(1);
+    gap_set_default_link_policy_settings(LM_LINK_POLICY_ENABLE_ROLE_SWITCH |
+                                         LM_LINK_POLICY_ENABLE_SNIFF_MODE);
+    gap_set_allow_role_switch(true);
+
     feathertalk_ipc_send_event(10);
     s_hci_event_handler.callback = &packet_handler;
     hci_add_event_handler(&s_hci_event_handler);
@@ -647,6 +723,8 @@ static int bt_info(int argc, char **argv)
     rt_kprintf("[BT] HCI state=%d (0=OFF..6=HALTED)\n", (int)hci_get_state());
     rt_kprintf("[BT] connected=%d notify=%d counter=%u\n",
                s_gatt_connected, s_notify_enabled, s_notify_counter);
+    rt_kprintf("[BT] classic=%d handle=0x%x\n",
+               s_classic_connected, (unsigned)s_classic_handle);
     return 0;
 }
 MSH_CMD_EXPORT_ALIAS(bt_info, bt_info, show btstack/HCI status);
@@ -661,6 +739,16 @@ static int bt_raw_reset(int argc, char **argv)
     return 0;
 }
 MSH_CMD_EXPORT_ALIAS(bt_raw_reset, bt_raw_reset, diag: send raw HCI Reset and report);
+
+/* 诊断: Classic inquiry ~6s, 列出发现的经典蓝牙设备 (验证 BR/EDR 射频通路) */
+static int bt_inq(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    rt_kprintf("[BT] classic inquiry ...\n");
+    gap_inquiry_start(5);
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(bt_inq, bt_inq, diag: classic inquiry scan ~6s);
 
 /* 诊断: 查 btstack 连接登记簿里有没有这个句柄 (定位 non-registered handle) */
 static int bt_find(int argc, char **argv)
