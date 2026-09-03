@@ -2177,6 +2177,8 @@ typedef enum
     FT_BENCH_SCENE_MEDIA_PLAYING,
     FT_BENCH_SCENE_MEDIA_FOLDER,
     FT_BENCH_SCENE_ALERT,
+    FT_BENCH_SCENE_SETTINGS_AUDIO_OUTPUT,
+    FT_BENCH_SCENE_SETTINGS_AUDIO_INPUT,
     FT_BENCH_SCENE_COUNT
 } ft_bench_scene_t;
 
@@ -2188,7 +2190,8 @@ static const char *const s_bench_scene_names[FT_BENCH_SCENE_COUNT] =
     "settings-time-language", "settings-personalization", "all-apps",
     "shade-open", "shade-drag", "search-keyboard", "settings-keyboard",
     "tile-edit", "gallery-viewer", "files-action", "media-playing",
-    "media-folder", "alert"
+    "media-folder", "alert", "settings-audio-output",
+    "settings-audio-input"
 };
 
 static void benchmark_scene_reset(void)
@@ -2297,6 +2300,16 @@ static void benchmark_scene_async_cb(void *user_data)
             break;
         case FT_BENCH_SCENE_ALERT:
             feathertalk_ui_alert("FeatherTalk", "GPU/CPU pipeline performance scene");
+            break;
+        case FT_BENCH_SCENE_SETTINGS_AUDIO_OUTPUT:
+            result = benchmark_scene_open_page(FT_PAGE_SETTINGS_AUDIO);
+            if (result == RT_EOK)
+                result = ft_router_push(FT_PAGE_SETTINGS_AUDIO_OUTPUT);
+            break;
+        case FT_BENCH_SCENE_SETTINGS_AUDIO_INPUT:
+            result = benchmark_scene_open_page(FT_PAGE_SETTINGS_AUDIO);
+            if (result == RT_EOK)
+                result = ft_router_push(FT_PAGE_SETTINGS_AUDIO_INPUT);
             break;
         default:
             result = -RT_EINVAL;

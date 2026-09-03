@@ -90,6 +90,8 @@ static lv_obj_t *create_files_page(lv_obj_t *parent);
 static lv_obj_t *create_about_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_display_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_audio_page(lv_obj_t *parent);
+static lv_obj_t *create_settings_audio_output_page(lv_obj_t *parent);
+static lv_obj_t *create_settings_audio_input_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_wifi_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_storage_page(lv_obj_t *parent);
@@ -270,6 +272,8 @@ static const ft_page_definition_t s_pages[] =
      settings_usb_page_enter, RT_NULL, settings_usb_page_leave},
     {FT_PAGE_SETTINGS_TIME_LANGUAGE, "Time & language", create_settings_time_language_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_PERSONALIZATION, "Personalization", create_settings_personalization_page, RT_NULL, RT_NULL, RT_NULL},
+    {FT_PAGE_SETTINGS_AUDIO_OUTPUT, "Output properties", create_settings_audio_output_page, RT_NULL, RT_NULL, RT_NULL},
+    {FT_PAGE_SETTINGS_AUDIO_INPUT, "Input properties", create_settings_audio_input_page, RT_NULL, RT_NULL, RT_NULL},
 };
 
 static lv_obj_t *s_home_tileview;
@@ -294,15 +298,25 @@ static lv_obj_t *s_settings_keyboard_hide;
 static lv_obj_t *s_settings_results[FT_SETTINGS_COUNT];
 static lv_obj_t *s_settings_brightness_slider;
 static lv_obj_t *s_settings_brightness_value;
+static lv_obj_t *s_audio_output_device;
+static lv_obj_t *s_audio_output_radio;
+static lv_obj_t *s_audio_output_list_status;
+static lv_obj_t *s_audio_output_list_details;
+static lv_obj_t *s_audio_input_device;
+static lv_obj_t *s_audio_input_radio;
+static lv_obj_t *s_audio_input_list_status;
+static lv_obj_t *s_audio_input_list_details;
+static lv_obj_t *s_audio_analog_list_status;
 static lv_obj_t *s_audio_output_slider;
 static lv_obj_t *s_audio_output_value;
 static lv_obj_t *s_audio_output_status;
 static lv_obj_t *s_audio_output_details;
+static lv_obj_t *s_audio_output_format_value;
 static lv_obj_t *s_audio_input_slider;
 static lv_obj_t *s_audio_input_value;
 static lv_obj_t *s_audio_input_status;
 static lv_obj_t *s_audio_input_details;
-static lv_obj_t *s_audio_analog_status;
+static lv_obj_t *s_audio_input_format_value;
 static lv_obj_t *s_audio_rate_buttons[FT_AUDIO_RATE_COUNT];
 static lv_obj_t *s_audio_bits_buttons[FT_AUDIO_BITS_COUNT];
 static lv_obj_t *s_audio_channel_buttons[FT_AUDIO_CHANNEL_COUNT];
@@ -1866,6 +1880,45 @@ static void settings_audio_format_clicked_cb(lv_event_t *event)
     settings_audio_refresh();
 }
 
+static void settings_audio_radio_refresh(lv_obj_t *radio, bool selected,
+                                         bool available)
+{
+    lv_obj_t *ring;
+    lv_obj_t *dot;
+    uint32_t accent = ft_preferences_get()->accent_rgb;
+
+    if (radio == RT_NULL || !lv_obj_is_valid(radio)) return;
+    ring = lv_obj_get_child_count(radio) > 0U ? lv_obj_get_child(radio, 0U) : RT_NULL;
+    dot = lv_obj_get_child_count(radio) > 1U ? lv_obj_get_child(radio, 1U) : RT_NULL;
+    if (ring != RT_NULL)
+        lv_obj_set_style_text_color(ring,
+                                    lv_color_hex(available ? accent : 0x666666),
+                                    LV_PART_MAIN);
+    if (dot != RT_NULL)
+    {
+        lv_obj_set_style_text_color(dot, lv_color_hex(accent), LV_PART_MAIN);
+        if (selected && available)
+            lv_obj_remove_flag(dot, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void settings_audio_device_clicked_cb(lv_event_t *event)
+{
+    ft_page_id_t page_id =
+        (ft_page_id_t)(uintptr_t)lv_event_get_user_data(event);
+    ft_audio_status_t status;
+    bool available;
+
+    if (ft_audio_get_status(&status) != RT_EOK) return;
+    available = page_id == FT_PAGE_SETTINGS_AUDIO_OUTPUT ?
+                    status.output_ready :
+                    page_id == FT_PAGE_SETTINGS_AUDIO_INPUT && status.input_ready;
+    if (available)
+        (void)ft_router_push(page_id);
+}
+
 static void settings_audio_refresh(void)
 {
     ft_audio_status_t status;
@@ -1873,6 +1926,54 @@ static void settings_audio_refresh(void)
     size_t i;
 
     (void)ft_audio_get_status(&status);
+    if (s_audio_output_device != RT_NULL &&
+        lv_obj_is_valid(s_audio_output_device))
+    {
+        if (status.output_ready)
+            lv_obj_remove_state(s_audio_output_device, LV_STATE_DISABLED);
+        else
+            lv_obj_add_state(s_audio_output_device, LV_STATE_DISABLED);
+    }
+    settings_audio_radio_refresh(s_audio_output_radio, status.output_ready,
+                                 status.output_ready);
+    if (s_audio_output_list_status != RT_NULL &&
+        lv_obj_is_valid(s_audio_output_list_status))
+        lv_label_set_text(s_audio_output_list_status, status.output_ready ?
+            ft_preferences_text("已启用 · 默认设备", "Enabled · Default device") :
+            status.output_registered ?
+            ft_preferences_text("已注册 · 初始化失败", "Registered · Initialization failed") :
+            ft_preferences_text("不可用 · sound0 未注册", "Unavailable · sound0 missing"));
+    if (s_audio_output_list_details != RT_NULL &&
+        lv_obj_is_valid(s_audio_output_list_details))
+        lv_label_set_text(s_audio_output_list_details,
+                          "sound0 · ES8388 + MD8002");
+
+    if (s_audio_input_device != RT_NULL &&
+        lv_obj_is_valid(s_audio_input_device))
+    {
+        if (status.input_ready)
+            lv_obj_remove_state(s_audio_input_device, LV_STATE_DISABLED);
+        else
+            lv_obj_add_state(s_audio_input_device, LV_STATE_DISABLED);
+    }
+    settings_audio_radio_refresh(s_audio_input_radio, status.input_ready,
+                                 status.input_ready);
+    if (s_audio_input_list_status != RT_NULL &&
+        lv_obj_is_valid(s_audio_input_list_status))
+        lv_label_set_text(s_audio_input_list_status, status.input_ready ?
+            ft_preferences_text("已启用 · 默认设备", "Enabled · Default device") :
+            status.input_registered ?
+            ft_preferences_text("已注册 · 初始化失败", "Registered · Initialization failed") :
+            ft_preferences_text("不可用 · mic0 未注册", "Unavailable · mic0 missing"));
+    if (s_audio_input_list_details != RT_NULL &&
+        lv_obj_is_valid(s_audio_input_list_details))
+        lv_label_set_text(s_audio_input_list_details, "mic0 · Dual PDM");
+    if (s_audio_analog_list_status != RT_NULL &&
+        lv_obj_is_valid(s_audio_analog_list_status))
+        lv_label_set_text(s_audio_analog_list_status,
+            ft_preferences_text("不可用 · 驱动尚未接入",
+                                "Unavailable · Driver not implemented"));
+
     if (s_audio_output_slider != RT_NULL &&
         lv_obj_is_valid(s_audio_output_slider))
     {
@@ -1915,6 +2016,17 @@ static void settings_audio_refresh(void)
                                     text, sizeof(text));
         lv_label_set_text(s_audio_output_value, text);
     }
+    if (s_audio_output_format_value != RT_NULL &&
+        lv_obj_is_valid(s_audio_output_format_value))
+    {
+        lv_snprintf(text, sizeof(text), "%lu kHz · %u bit · %s",
+                    (unsigned long)(status.output_sample_rate / 1000U),
+                    status.output_sample_bits,
+                    status.output_channels == 1U ?
+                        ft_preferences_text("单声道", "Mono") :
+                        ft_preferences_text("双声道", "Stereo"));
+        lv_label_set_text(s_audio_output_format_value, text);
+    }
 
     if (s_audio_input_slider != RT_NULL && lv_obj_is_valid(s_audio_input_slider))
     {
@@ -1954,10 +2066,17 @@ static void settings_audio_refresh(void)
                                     text, sizeof(text));
         lv_label_set_text(s_audio_input_value, text);
     }
-    if (s_audio_analog_status != RT_NULL && lv_obj_is_valid(s_audio_analog_status))
-        lv_label_set_text(s_audio_analog_status,
-            ft_preferences_text("硬件前端存在 · 产品驱动尚未接入",
-                                "Hardware front end present · Product driver unavailable"));
+    if (s_audio_input_format_value != RT_NULL &&
+        lv_obj_is_valid(s_audio_input_format_value))
+    {
+        lv_snprintf(text, sizeof(text), "%lu kHz · %u bit · %s",
+                    (unsigned long)(status.input_sample_rate / 1000U),
+                    status.input_sample_bits,
+                    status.input_channels == 1U ?
+                        ft_preferences_text("单声道", "Mono") :
+                        ft_preferences_text("双声道", "Stereo"));
+        lv_label_set_text(s_audio_input_format_value, text);
+    }
     for (i = 0U; i < FT_AUDIO_RATE_COUNT; i++)
     {
         settings_choice_refresh(s_audio_rate_buttons[i],
@@ -1965,7 +2084,9 @@ static void settings_audio_refresh(void)
         if (s_audio_rate_buttons[i] != RT_NULL &&
             lv_obj_is_valid(s_audio_rate_buttons[i]))
         {
-            if (status.output_ready)
+            if (status.output_ready && ft_audio_output_format_supported(
+                    s_audio_rates[i], status.output_sample_bits,
+                    status.output_channels))
                 lv_obj_remove_state(s_audio_rate_buttons[i], LV_STATE_DISABLED);
             else
                 lv_obj_add_state(s_audio_rate_buttons[i], LV_STATE_DISABLED);
@@ -1978,7 +2099,9 @@ static void settings_audio_refresh(void)
         if (s_audio_bits_buttons[i] != RT_NULL &&
             lv_obj_is_valid(s_audio_bits_buttons[i]))
         {
-            if (status.output_ready)
+            if (status.output_ready && ft_audio_output_format_supported(
+                    status.output_sample_rate, s_audio_bits[i],
+                    status.output_channels))
                 lv_obj_remove_state(s_audio_bits_buttons[i], LV_STATE_DISABLED);
             else
                 lv_obj_add_state(s_audio_bits_buttons[i], LV_STATE_DISABLED);
@@ -1991,7 +2114,9 @@ static void settings_audio_refresh(void)
         if (s_audio_channel_buttons[i] != RT_NULL &&
             lv_obj_is_valid(s_audio_channel_buttons[i]))
         {
-            if (status.output_ready)
+            if (status.output_ready && ft_audio_output_format_supported(
+                    status.output_sample_rate, status.output_sample_bits,
+                    s_audio_channels[i]))
                 lv_obj_remove_state(s_audio_channel_buttons[i], LV_STATE_DISABLED);
             else
                 lv_obj_add_state(s_audio_channel_buttons[i], LV_STATE_DISABLED);
@@ -2009,6 +2134,91 @@ static void settings_audio_slider_released_cb(lv_event_t *event)
     else
         (void)ft_preferences_set_audio_output_volume(value);
     settings_audio_refresh();
+}
+
+static lv_obj_t *settings_audio_create_device_row(
+    lv_obj_t *parent, ft_icon_id_t icon_id, const char *title,
+    lv_obj_t **row_slot, lv_obj_t **radio_slot,
+    lv_obj_t **status_slot, lv_obj_t **details_slot,
+    ft_page_id_t properties_page, bool disabled)
+{
+    lv_obj_t *row = lv_button_create(parent);
+    lv_obj_t *radio;
+    lv_obj_t *column;
+    lv_obj_t *label;
+    lv_obj_t *details;
+    lv_obj_t *chevron;
+
+    if (row_slot != RT_NULL) track_object(row_slot, row);
+    ft_ui_style_panel(row);
+    lv_obj_set_size(row, lv_pct(100), ft_layout_px(82));
+    lv_obj_set_style_radius(row, ft_layout_px(4), LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(row, ft_layout_px(10), LV_PART_MAIN);
+    lv_obj_set_style_pad_column(row, ft_layout_px(10), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x292929), LV_STATE_PRESSED);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    radio = lv_obj_create(row);
+    if (radio_slot != RT_NULL) track_object(radio_slot, radio);
+    lv_obj_remove_style_all(radio);
+    lv_obj_set_size(radio, ft_layout_px(24), ft_layout_px(24));
+    label = lv_label_create(radio);
+    lv_label_set_text(label, "○");
+    lv_obj_set_style_text_font(label, ft_layout_font(22), LV_PART_MAIN);
+    lv_obj_center(label);
+    label = lv_label_create(radio);
+    lv_label_set_text(label, "•");
+    lv_obj_set_style_text_font(label, ft_layout_font(14), LV_PART_MAIN);
+    lv_obj_center(label);
+    if (disabled) lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+
+    (void)ft_icon_create(row, icon_id, ft_layout_icon_size(30U), true);
+    column = lv_obj_create(row);
+    style_layout_container(column);
+    lv_obj_set_width(column, 0);
+    lv_obj_set_height(column, LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(column, 1);
+    lv_obj_set_style_pad_row(column, ft_layout_px(2), LV_PART_MAIN);
+    lv_obj_set_flex_flow(column, LV_FLEX_FLOW_COLUMN);
+    label = lv_label_create(column);
+    lv_label_set_text(label, title);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(label, ft_layout_font(16), LV_PART_MAIN);
+    track_object(status_slot, lv_label_create(column));
+    lv_obj_set_width(*status_slot, lv_pct(100));
+    lv_label_set_long_mode(*status_slot, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(*status_slot, ft_layout_font(12), LV_PART_MAIN);
+    ft_ui_register_accent(*status_slot, FT_ACCENT_TEXT);
+    details = lv_label_create(column);
+    if (details_slot != RT_NULL) track_object(details_slot, details);
+    lv_label_set_text(details, "");
+    lv_obj_set_width(details, lv_pct(100));
+    lv_label_set_long_mode(details, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(details, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(details, ft_layout_font(11), LV_PART_MAIN);
+
+    chevron = lv_label_create(row);
+    lv_label_set_text(chevron, ">");
+    lv_obj_set_style_text_color(chevron, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(chevron, ft_layout_font(22), LV_PART_MAIN);
+    if (disabled)
+    {
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x101010), LV_PART_MAIN);
+        lv_obj_add_flag(chevron, LV_OBJ_FLAG_HIDDEN);
+        settings_audio_radio_refresh(radio, false, false);
+    }
+    else
+    {
+        lv_obj_add_event_cb(row, settings_audio_device_clicked_cb,
+                            LV_EVENT_CLICKED,
+                            (void *)(uintptr_t)properties_page);
+    }
+    return row;
 }
 
 static lv_obj_t *settings_audio_create_device_card(
@@ -2100,25 +2310,38 @@ static lv_obj_t *settings_audio_create_level_control(lv_obj_t *page,
     return slider;
 }
 
-static lv_obj_t *create_settings_audio_page(lv_obj_t *parent)
+static lv_obj_t *settings_audio_create_format_readout(lv_obj_t *page,
+                                                      bool input)
 {
-    lv_obj_t *page = create_text_page(
-        parent, ft_preferences_text("音频", "Audio"), FT_ICON_AUDIO_SETTINGS,
-        ft_preferences_text("管理此开发板实际连接的音频输出、输入和电平。",
-                            "Manage the audio outputs, inputs and levels physically connected on this board."));
+    lv_obj_t *row = lv_obj_create(page);
+    lv_obj_t *caption;
+    lv_obj_t **value_slot = input ? &s_audio_input_format_value :
+                                    &s_audio_output_format_value;
+
+    ft_ui_style_panel(row);
+    lv_obj_set_size(row, lv_pct(100), ft_layout_px(54));
+    lv_obj_set_style_radius(row, ft_layout_px(4), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(row, ft_layout_px(12), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    caption = lv_label_create(row);
+    lv_label_set_text(caption, ft_preferences_text("格式", "Format"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    track_object(value_slot, lv_label_create(row));
+    lv_obj_set_style_text_font(*value_slot, ft_layout_font(13), LV_PART_MAIN);
+    ft_ui_register_accent(*value_slot, FT_ACCENT_TEXT);
+    return row;
+}
+
+static void settings_audio_create_output_format_controls(lv_obj_t *page)
+{
     lv_obj_t *caption;
     lv_obj_t *row;
     size_t i;
 
-    caption = lv_label_create(page);
-    lv_label_set_text(caption, ft_preferences_text("输出", "Output"));
-    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
-    (void)settings_audio_create_device_card(
-        page, FT_ICON_SPEAKER_DEVICE,
-        ft_preferences_text("板载扬声器", "Onboard speaker"),
-        &s_audio_output_status, &s_audio_output_details, "", false);
-    (void)settings_audio_create_level_control(page, false);
-
+    (void)settings_audio_create_format_readout(page, false);
     caption = lv_label_create(page);
     lv_label_set_text(caption, ft_preferences_text("采样率", "Sample rate"));
     lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
@@ -2183,6 +2406,63 @@ static lv_obj_t *create_settings_audio_page(lv_obj_t *parent)
         lv_obj_set_width(s_audio_channel_buttons[i], 0);
         lv_obj_set_flex_grow(s_audio_channel_buttons[i], 1);
     }
+}
+
+static lv_obj_t *create_settings_audio_page(lv_obj_t *parent)
+{
+    lv_obj_t *page = create_text_page(
+        parent, ft_preferences_text("音频", "Audio"), FT_ICON_AUDIO_SETTINGS,
+        ft_preferences_text("选择默认设备；点击设备可进入属性页。",
+                            "Choose a default device; select a device to open its properties."));
+    lv_obj_t *caption;
+
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("输出", "Output"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    (void)settings_audio_create_device_row(
+        page, FT_ICON_SPEAKER_DEVICE,
+        ft_preferences_text("板载扬声器", "Onboard speaker"),
+        &s_audio_output_device, &s_audio_output_radio,
+        &s_audio_output_list_status, &s_audio_output_list_details,
+        FT_PAGE_SETTINGS_AUDIO_OUTPUT, false);
+
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("输入", "Input"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    (void)settings_audio_create_device_row(
+        page, FT_ICON_PDM_MIC_DEVICE,
+        ft_preferences_text("双 PDM 麦克风阵列", "Dual PDM microphone array"),
+        &s_audio_input_device, &s_audio_input_radio,
+        &s_audio_input_list_status, &s_audio_input_list_details,
+        FT_PAGE_SETTINGS_AUDIO_INPUT, false);
+    (void)settings_audio_create_device_row(
+        page, FT_ICON_ANALOG_MIC_DEVICE,
+        ft_preferences_text("模拟麦克风前端", "Analog microphone front end"),
+        RT_NULL, RT_NULL, &s_audio_analog_list_status, RT_NULL,
+        FT_PAGE_COUNT, true);
+    settings_audio_refresh();
+    return page;
+}
+
+static lv_obj_t *create_settings_audio_output_page(lv_obj_t *parent)
+{
+    lv_obj_t *page = create_text_page(
+        parent,
+        ft_preferences_text("音频 > 板载扬声器", "Audio > Onboard speaker"),
+        FT_ICON_SPEAKER_DEVICE,
+        ft_preferences_text("配置 sound0 的输出格式和音量。",
+                            "Configure the sound0 output format and volume."));
+    lv_obj_t *caption;
+
+    (void)settings_audio_create_device_card(
+        page, FT_ICON_SPEAKER_DEVICE,
+        ft_preferences_text("板载扬声器", "Onboard speaker"),
+        &s_audio_output_status, &s_audio_output_details, "", false);
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("输出设置", "Output settings"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    settings_audio_create_output_format_controls(page);
+    (void)settings_audio_create_level_control(page, false);
     caption = lv_label_create(page);
     lv_label_set_text(caption, ft_preferences_text(
         "单声道数据会复制到左右 DAC；板载功放最终驱动一个扬声器。",
@@ -2191,22 +2471,37 @@ static lv_obj_t *create_settings_audio_page(lv_obj_t *parent)
     lv_label_set_long_mode(caption, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(caption, ft_layout_font(12), LV_PART_MAIN);
     lv_obj_set_style_text_color(caption, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    settings_audio_refresh();
+    return page;
+}
 
-    caption = lv_label_create(page);
-    lv_label_set_text(caption, ft_preferences_text("输入", "Input"));
-    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+static lv_obj_t *create_settings_audio_input_page(lv_obj_t *parent)
+{
+    lv_obj_t *page = create_text_page(
+        parent,
+        ft_preferences_text("音频 > PDM 麦克风", "Audio > PDM microphone"),
+        FT_ICON_PDM_MIC_DEVICE,
+        ft_preferences_text("查看 mic0 格式并配置输入增益。",
+                            "View the mic0 format and configure input gain."));
+    lv_obj_t *caption;
+
     (void)settings_audio_create_device_card(
         page, FT_ICON_PDM_MIC_DEVICE,
         ft_preferences_text("双 PDM 麦克风阵列", "Dual PDM microphone array"),
         &s_audio_input_status, &s_audio_input_details, "", false);
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("输入设置", "Input settings"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    (void)settings_audio_create_format_readout(page, true);
     (void)settings_audio_create_level_control(page, true);
-    (void)settings_audio_create_device_card(
-        page, FT_ICON_ANALOG_MIC_DEVICE,
-        ft_preferences_text("模拟麦克风前端", "Analog microphone front end"),
-        &s_audio_analog_status, RT_NULL,
-        ft_preferences_text("AMIC2 · 尚未注册为 RT-Thread Audio 设备",
-                            "AMIC2 · Not registered as an RT-Thread Audio device"),
-        true);
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text(
+        "当前采样格式由 mic0 PDM 驱动固定，驱动未上报其他可选格式。",
+        "The current format is fixed by the mic0 PDM driver; no alternative formats are reported."));
+    lv_obj_set_width(caption, lv_pct(100));
+    lv_label_set_long_mode(caption, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(caption, ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_set_style_text_color(caption, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
     settings_audio_refresh();
     return page;
 }
@@ -6417,6 +6712,10 @@ ft_page_id_t ft_pages_test_settings_page_id(size_t i)
 { return i < FT_SETTINGS_COUNT ? s_settings[i].page_id : FT_PAGE_COUNT; }
 lv_obj_t *ft_pages_test_get_settings_brightness(void)
 { return s_settings_brightness_slider; }
+lv_obj_t *ft_pages_test_get_audio_output_device(void)
+{ return s_audio_output_device; }
+lv_obj_t *ft_pages_test_get_audio_input_device(void)
+{ return s_audio_input_device; }
 lv_obj_t *ft_pages_test_get_audio_output_slider(void)
 { return s_audio_output_slider; }
 lv_obj_t *ft_pages_test_get_audio_input_slider(void)
@@ -6430,17 +6729,40 @@ lv_obj_t *ft_pages_test_get_audio_channel_button(size_t index)
 bool ft_pages_test_audio_state_valid(void)
 {
     ft_audio_status_t status;
+
+    if (!tracked_object_is_type(&s_audio_output_device, &lv_button_class) ||
+        !tracked_object_is_type(&s_audio_output_radio, &lv_obj_class) ||
+        !tracked_object_is_type(&s_audio_output_list_status, &lv_label_class) ||
+        !tracked_object_is_type(&s_audio_output_list_details, &lv_label_class) ||
+        !tracked_object_is_type(&s_audio_input_device, &lv_button_class) ||
+        !tracked_object_is_type(&s_audio_input_radio, &lv_obj_class) ||
+        !tracked_object_is_type(&s_audio_input_list_status, &lv_label_class) ||
+        !tracked_object_is_type(&s_audio_input_list_details, &lv_label_class) ||
+        !tracked_object_is_type(&s_audio_analog_list_status, &lv_label_class) ||
+        ft_audio_get_status(&status) != RT_EOK)
+        return false;
+    return status.output_registered && status.input_registered &&
+           status.output_ready && status.input_ready &&
+           !status.analog_input_supported &&
+           !lv_obj_has_state(s_audio_output_device, LV_STATE_DISABLED) &&
+           !lv_obj_has_state(s_audio_input_device, LV_STATE_DISABLED) &&
+           lv_obj_get_child_count(s_audio_output_radio) == 2U &&
+           lv_obj_get_child_count(s_audio_input_radio) == 2U &&
+           !lv_obj_has_flag(lv_obj_get_child(s_audio_output_radio, 1U),
+                            LV_OBJ_FLAG_HIDDEN) &&
+           !lv_obj_has_flag(lv_obj_get_child(s_audio_input_radio, 1U),
+                            LV_OBJ_FLAG_HIDDEN);
+}
+bool ft_pages_test_audio_output_properties_valid(void)
+{
+    ft_audio_status_t status;
     size_t i;
 
     if (!tracked_object_is_type(&s_audio_output_slider, &lv_slider_class) ||
         !tracked_object_is_type(&s_audio_output_value, &lv_label_class) ||
         !tracked_object_is_type(&s_audio_output_status, &lv_label_class) ||
         !tracked_object_is_type(&s_audio_output_details, &lv_label_class) ||
-        !tracked_object_is_type(&s_audio_input_slider, &lv_slider_class) ||
-        !tracked_object_is_type(&s_audio_input_value, &lv_label_class) ||
-        !tracked_object_is_type(&s_audio_input_status, &lv_label_class) ||
-        !tracked_object_is_type(&s_audio_input_details, &lv_label_class) ||
-        !tracked_object_is_type(&s_audio_analog_status, &lv_label_class) ||
+        !tracked_object_is_type(&s_audio_output_format_value, &lv_label_class) ||
         ft_audio_get_status(&status) != RT_EOK)
         return false;
     for (i = 0U; i < FT_AUDIO_RATE_COUNT; i++)
@@ -6452,13 +6774,24 @@ bool ft_pages_test_audio_state_valid(void)
     for (i = 0U; i < FT_AUDIO_CHANNEL_COUNT; i++)
         if (!tracked_object_is_type(&s_audio_channel_buttons[i],
                                     &lv_button_class)) return false;
-    return status.output_registered && status.input_registered &&
-           status.output_ready && status.input_ready &&
-           !status.analog_input_supported &&
+    return status.output_registered && status.output_ready &&
            !lv_obj_has_state(s_audio_output_slider, LV_STATE_DISABLED) &&
-           !lv_obj_has_state(s_audio_input_slider, LV_STATE_DISABLED) &&
            lv_slider_get_min_value(s_audio_output_slider) == 0 &&
-           lv_slider_get_max_value(s_audio_output_slider) == 100 &&
+           lv_slider_get_max_value(s_audio_output_slider) == 100;
+}
+bool ft_pages_test_audio_input_properties_valid(void)
+{
+    ft_audio_status_t status;
+
+    if (!tracked_object_is_type(&s_audio_input_slider, &lv_slider_class) ||
+        !tracked_object_is_type(&s_audio_input_value, &lv_label_class) ||
+        !tracked_object_is_type(&s_audio_input_status, &lv_label_class) ||
+        !tracked_object_is_type(&s_audio_input_details, &lv_label_class) ||
+        !tracked_object_is_type(&s_audio_input_format_value, &lv_label_class) ||
+        ft_audio_get_status(&status) != RT_EOK)
+        return false;
+    return status.input_registered && status.input_ready &&
+           !lv_obj_has_state(s_audio_input_slider, LV_STATE_DISABLED) &&
            lv_slider_get_min_value(s_audio_input_slider) == 0 &&
            lv_slider_get_max_value(s_audio_input_slider) == 75;
 }
@@ -6934,11 +7267,17 @@ bool ft_pages_test_transient_slots_clear(void)
         s_settings_search_box != RT_NULL || s_settings_keyboard_tray != RT_NULL ||
         s_settings_keyboard != RT_NULL || s_settings_keyboard_hide != RT_NULL ||
         s_settings_brightness_slider != RT_NULL || s_settings_brightness_value != RT_NULL ||
+        s_audio_output_device != RT_NULL || s_audio_output_radio != RT_NULL ||
+        s_audio_output_list_status != RT_NULL || s_audio_output_list_details != RT_NULL ||
+        s_audio_input_device != RT_NULL || s_audio_input_radio != RT_NULL ||
+        s_audio_input_list_status != RT_NULL || s_audio_input_list_details != RT_NULL ||
+        s_audio_analog_list_status != RT_NULL ||
         s_audio_output_slider != RT_NULL || s_audio_output_value != RT_NULL ||
         s_audio_output_status != RT_NULL || s_audio_output_details != RT_NULL ||
+        s_audio_output_format_value != RT_NULL ||
         s_audio_input_slider != RT_NULL || s_audio_input_value != RT_NULL ||
         s_audio_input_status != RT_NULL || s_audio_input_details != RT_NULL ||
-        s_audio_analog_status != RT_NULL ||
+        s_audio_input_format_value != RT_NULL ||
         s_settings_radio_status != RT_NULL || s_settings_radio_button != RT_NULL ||
         s_storage_detail_icon != RT_NULL ||
         s_storage_detail_title != RT_NULL ||

@@ -29,6 +29,8 @@ typedef enum
     FT_PAGE_SETTINGS_USB,
     FT_PAGE_SETTINGS_TIME_LANGUAGE,
     FT_PAGE_SETTINGS_PERSONALIZATION,
+    FT_PAGE_SETTINGS_AUDIO_OUTPUT,
+    FT_PAGE_SETTINGS_AUDIO_INPUT,
     FT_PAGE_COUNT
 } ft_page_id_t;
 
@@ -321,12 +323,16 @@ size_t ft_pages_test_settings_count(void);
 size_t ft_pages_test_settings_visible_count(void);
 ft_page_id_t ft_pages_test_settings_page_id(size_t index);
 lv_obj_t *ft_pages_test_get_settings_brightness(void);
+lv_obj_t *ft_pages_test_get_audio_output_device(void);
+lv_obj_t *ft_pages_test_get_audio_input_device(void);
 lv_obj_t *ft_pages_test_get_audio_output_slider(void);
 lv_obj_t *ft_pages_test_get_audio_input_slider(void);
 lv_obj_t *ft_pages_test_get_audio_rate_button(size_t index);
 lv_obj_t *ft_pages_test_get_audio_bits_button(size_t index);
 lv_obj_t *ft_pages_test_get_audio_channel_button(size_t index);
 bool ft_pages_test_audio_state_valid(void);
+bool ft_pages_test_audio_output_properties_valid(void);
+bool ft_pages_test_audio_input_properties_valid(void);
 lv_obj_t *ft_pages_test_get_usb_role_button(ft_usb_role_t role);
 lv_obj_t *ft_pages_test_get_usb_function_button(ft_usb_function_t function);
 lv_obj_t *ft_pages_test_get_usb_stop_button(void);

@@ -297,23 +297,22 @@ static void run_settings_test(void)
     }
     else if (s_control_index == 7U)
     {
-        lv_obj_t *output = ft_pages_test_get_audio_output_slider();
-        lv_obj_t *input = ft_pages_test_get_audio_input_slider();
+        lv_obj_t *output;
+        lv_obj_t *input;
         ft_audio_status_t audio_status;
+
+        (void)test_click(ft_pages_test_get_audio_output_device(),
+                         "settings.audio.output.open", "sound0 properties");
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS_AUDIO_OUTPUT &&
+                    ft_router_depth() == 4U &&
+                    ft_pages_test_audio_output_properties_valid(),
+                    "settings.audio.output.route", "device -> output properties");
+        output = ft_pages_test_get_audio_output_slider();
         lv_slider_set_value(output, 36, LV_ANIM_OFF);
         (void)test_event(output, LV_EVENT_VALUE_CHANGED,
                          "settings.audio.output", "36%");
         (void)test_event(output, LV_EVENT_RELEASED,
                          "settings.audio.output.apply", "sound0");
-        lv_slider_set_value(input, 30, LV_ANIM_OFF);
-        (void)test_event(input, LV_EVENT_VALUE_CHANGED,
-                         "settings.audio.input", "15.0 dB");
-        (void)test_event(input, LV_EVENT_RELEASED,
-                         "settings.audio.input.apply", "mic0");
-        test_record(preferences->audio_output_volume == 36U &&
-                    preferences->audio_input_gain == 30U &&
-                    ft_pages_test_audio_state_valid(),
-                    "settings.audio.state", "levels applied through RT-Thread Audio");
         (void)test_click(ft_pages_test_get_audio_rate_button(2U),
                          "settings.audio.rate", "48 kHz");
         (void)test_click(ft_pages_test_get_audio_bits_button(1U),
@@ -330,12 +329,40 @@ static void run_settings_test(void)
                     "settings.audio.format", "UI selection and sound0 readback agree");
         lv_slider_set_value(output, s_settings_audio_output_before, LV_ANIM_OFF);
         (void)lv_obj_send_event(output, LV_EVENT_RELEASED, RT_NULL);
-        lv_slider_set_value(input, s_settings_audio_input_before, LV_ANIM_OFF);
-        (void)lv_obj_send_event(input, LV_EVENT_RELEASED, RT_NULL);
         (void)ft_preferences_set_audio_output_format(
             s_preferences_before.audio_output_sample_rate,
             s_preferences_before.audio_output_sample_bits,
             s_preferences_before.audio_output_channels);
+        (void)ft_router_back();
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS_AUDIO &&
+                    ft_router_depth() == 3U &&
+                    ft_pages_test_audio_state_valid(),
+                    "settings.audio.output.back", "properties -> device list");
+
+        (void)test_click(ft_pages_test_get_audio_input_device(),
+                         "settings.audio.input.open", "mic0 properties");
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS_AUDIO_INPUT &&
+                    ft_router_depth() == 4U &&
+                    ft_pages_test_audio_input_properties_valid(),
+                    "settings.audio.input.route", "device -> input properties");
+        input = ft_pages_test_get_audio_input_slider();
+        lv_slider_set_value(input, 30, LV_ANIM_OFF);
+        (void)test_event(input, LV_EVENT_VALUE_CHANGED,
+                         "settings.audio.input", "15.0 dB");
+        (void)test_event(input, LV_EVENT_RELEASED,
+                         "settings.audio.input.apply", "mic0");
+        test_record(preferences->audio_output_volume ==
+                        s_settings_audio_output_before &&
+                    preferences->audio_input_gain == 30U &&
+                    ft_pages_test_audio_input_properties_valid(),
+                    "settings.audio.state", "levels applied through RT-Thread Audio");
+        lv_slider_set_value(input, s_settings_audio_input_before, LV_ANIM_OFF);
+        (void)lv_obj_send_event(input, LV_EVENT_RELEASED, RT_NULL);
+        (void)ft_router_back();
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS_AUDIO &&
+                    ft_router_depth() == 3U &&
+                    ft_pages_test_audio_state_valid(),
+                    "settings.audio.input.back", "properties -> device list");
         (void)ft_router_back();
         test_record(ft_router_current_page() == FT_PAGE_SETTINGS &&
                     ft_router_depth() == 2U,

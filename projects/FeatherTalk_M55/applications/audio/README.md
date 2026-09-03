@@ -41,11 +41,20 @@ ES8388 readback.
 
 ## Settings behavior
 
-Settings > Audio contains separate, uniquely illustrated cards for the onboard
-speaker, dual PDM microphone array and analog microphone front end. Output
-volume (0-100) and PDM input gain (0-37.5 dB in 0.5 dB steps) are applied on
-slider release to avoid repeated I2C writes while dragging. Both values are
-stored in the existing per-device A/B preference record and restored at boot.
+Settings > Audio is a two-level, capability-driven device view. The first
+level lists physical output and input devices with a default-device radio
+marker and a properties chevron. The onboard speaker opens a dedicated page
+for its supported sample rates, sample depths, channel count and output
+volume. The dual PDM array opens a separate page that reports its fixed driver
+format and exposes input gain. The analog microphone front end remains visible
+but unavailable until it has a product driver; it cannot be selected or opened.
+
+Output volume (0-100) and PDM input gain (0-37.5 dB in 0.5 dB steps) are
+applied on slider release to avoid repeated I2C writes while dragging. Both
+values are stored in the existing per-device A/B preference record and
+restored at boot. Format choices are enabled only when the complete candidate
+combination is accepted by `feathertalk_audio`; unsupported controls are not
+presented as working settings.
 
 ## USB Audio
 

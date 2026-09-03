@@ -1134,3 +1134,30 @@
   脚本退出码 0，全部场景完成 60/60，最终 Home route depth 1、UI overflow=0、pipeline
   stage=0、scanout timeout=0。日志与 CSV 为
   `tools/freather/logs/ui-font-global-metrics-all-scenes-20260903.log/.csv`。
+
+## 2026-09-03 音频设备选择页与独立属性页
+
+- “设置 > 音频”从把全部设备和参数堆在同一页面，改为两层设备模型。主页按输出/输入列出
+  物理设备，每行包含默认设备单选状态、独立设备图标、注册状态、驱动名称和属性页箭头；
+  当前唯一可用输出 `sound0` 与输入 `mic0` 分别被选为默认设备。AMIC2 模拟前端继续显示，
+  但由于没有 RT-Thread Audio 驱动，不可选择也不能进入伪属性页。
+- 点击板载扬声器进入输出属性页。页面从 `feathertalk_audio` 的实时状态和完整候选组合判断
+  生成 16/24/48/96 kHz、16/24 bit、单/双声道控件，并保留 0--100 音量；任意组合若未被
+  `sound0`、TDM0 和 ES8388 整条链路接受，就保持禁用，不能只靠 UI 表格假定可用。
+- 点击双 PDM 麦克风进入输入属性页。当前 `mic0` 驱动只上报 16 kHz、16 bit、双声道，
+  因此格式作为只读实时值显示，只提供驱动实际支持的 0--37.5 dB 输入增益，不伪造采样格式
+  下拉框、音频增强或空间音效。
+- 自动化接口新增主页、输出属性页和输入属性页的对象/路由/能力断言；视觉场景新增 28/29，
+  覆盖两种属性页。实板场景 10、28、29 均进入成功，route depth 分别为 3、4、4；三场景
+  各完成 60 个全屏压力帧，无 UI overflow 或 scanout timeout。输出与输入属性页保持每帧
+  一次 GPU submit。主页初测每帧有 3 个 software boundary，逐项统计确认不是字体或圆形
+  轮廓，而是三个 `lv_button` 设备行继承的主题阴影；显式清零 shadow 后主页也达到
+  60 frame / 60 batch / 60 submit、software task=0，帧率由 20.81 提升到 32.11 FPS。
+  单选状态使用矢量空心圆和独立中心点，不依赖软件 Border 绘制。
+- 板端双 framebuffer 已分别回读声音主页、输出属性页和输入属性页；设备行、单选标记、
+  属性箭头、格式控件和底部导航均处于有效区域，没有新增交界脏块或裁剪。验证日志和 PNG
+  位于 `projects/FeatherTalk_M55/build/audio-*-page.*` 与
+  `projects/FeatherTalk_M55/build/audio-device-pages-bench.log`（构建目录不纳入版本控制）。
+- 最终固件 text=5,137,976、data=91,376、bss=4,894,600 字节；HEX SHA-256 为
+  `5337B3AD7E628D043E3C50089928B24709206695C03D432CD5C1256EBC5B93E7`。Infineon
+  Customized OpenOCD 已写入 5,230,592 字节并校验 5,229,352 字节。

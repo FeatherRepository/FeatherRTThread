@@ -42,6 +42,8 @@ SCENES = [
     (25, "media-playing", 1.0),
     (26, "media-folder", 1.0),
     (27, "alert", 0.8),
+    (28, "settings-audio-output", 0.8),
+    (29, "settings-audio-input", 0.8),
 ]
 
 COMPLETE_RE = re.compile(
