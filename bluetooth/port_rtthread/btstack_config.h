@@ -27,6 +27,10 @@
 #define MAX_NR_BTSTACK_LINK_KEY_DB 0
 /* M4a: Classic SSP 配对的 link key 内存库 (A5: flash 持久化是 M3' 打磨项) */
 #define MAX_NR_BTSTACK_LINK_KEY_DB_MEMORY_ENTRIES 8
+/* A0-4: A2DP/AVDTP/AVRCP 静态池 (源已编入; 运行时在 M4b 才初始化) */
+#define MAX_NR_AVDTP_STREAM_ENDPOINTS 2
+#define MAX_NR_AVDTP_CONNECTIONS 1
+#define MAX_NR_AVRCP_CONNECTIONS 1
 
 /* logging off for P0 skeleton (avoids hci_dump dependency) */
 #define ENABLE_PRINTF_HEXDUMP

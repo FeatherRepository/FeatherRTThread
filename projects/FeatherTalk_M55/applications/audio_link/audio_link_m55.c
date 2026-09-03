@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include <feathertalk/audio_link.h>
+#include "ft_sbc_decode.h"   /* A0-2: fmt_gen 非 0 时切换到 SBC 帧解码 */
 
 #define FT_ALINK_EVT_DBELL   0x01U
 #define FT_ALINK_CHUNK       4096U
@@ -18,6 +19,7 @@
 static struct rt_event  s_alink_event;
 static rt_thread_t      s_alink_thread;
 static rt_bool_t        s_alink_ready;
+static rt_uint32_t      s_last_fmt_gen;   /* ring 流格式代际 (0 = 图案校验模式) */
 
 /* 统计 (msh ft_audio_stats 可读) */
 static rt_uint32_t s_stat_bytes;
@@ -50,11 +52,20 @@ static void ft_alink_consume(void)
     while ((got = ft_alink_read(r, buf, FT_ALINK_CHUNK)) > 0U)
     {
         rt_uint32_t base = r->rd - got;   /* 本次读块的绝对起始位置 */
-        for (rt_uint32_t i = 0; i < got; i++)
+
+        if (s_last_fmt_gen != 0U)
         {
-            if (buf[i] != ft_audio_pattern(base + i))
+            /* A0-2: SBC 流模式, 帧化字节流送解码器 */
+            ft_sbc_feed(buf, got);
+        }
+        else
+        {
+            for (rt_uint32_t i = 0; i < got; i++)
             {
-                s_stat_errors++;
+                if (buf[i] != ft_audio_pattern(base + i))
+                {
+                    s_stat_errors++;
+                }
             }
         }
         s_stat_blocks++;
@@ -109,6 +120,16 @@ static void ft_alink_thread_entry(void *parameter)
         if (s_first_wake_tick == 0 && ft_alink_used(FT_ALINK) > 0U)
         {
             s_first_wake_tick = rt_tick_get();
+        }
+        /* A0-2: 流格式代际变化 (M33 开始 SBC 流) -> 复位解码器与统计 */
+        FT_ALINK_DCACHE_INVALID(FT_ALINK_BASE, 32);
+        if (FT_ALINK->fmt_gen != s_last_fmt_gen)
+        {
+            s_last_fmt_gen = FT_ALINK->fmt_gen;
+            if (s_last_fmt_gen != 0U)
+            {
+                ft_sbc_stream_begin();
+            }
         }
         ft_alink_consume();
     }

@@ -1,0 +1,33 @@
+import os
+from building import *
+
+# A0-2: SBC 解码链 (M55) —— btstack bluedroid 适配层 + bluedroid decoder 底层。
+# M55 工程没有 btstack_config.h: 本目录提供最小配置, CPPPATH 置最前。
+cwd = GetCurrentDir()
+repo_root = os.path.normpath(os.path.join(cwd, '..', '..', '..', '..'))
+btstack_root = os.path.join(repo_root, 'bluetooth', 'reference', 'btstack')
+
+bt_src = [os.path.join(btstack_root, 'src', f) for f in
+          ('classic/btstack_sbc_decoder_bluedroid.c',
+           'classic/btstack_sbc_bluedroid.c',
+           'classic/btstack_sbc_plc.c',
+           'btstack_util.c')]          # btstack_min
+bt_src += [os.path.join(btstack_root, '3rd-party', 'bluedroid', 'decoder', 'srce', f) for f in
+           ('alloc.c', 'bitalloc-sbc.c', 'bitalloc.c', 'bitstream-decode.c',
+            'decoder-oina.c', 'decoder-private.c', 'decoder-sbc.c', 'dequant.c',
+            'framing-sbc.c', 'framing.c', 'oi_codec_version.c',
+            'synthesis-8-generated.c', 'synthesis-dct8.c', 'synthesis-sbc.c')]
+
+src = Glob('*.c') + bt_src
+
+path = [cwd,                            # 最小 btstack_config.h 在最前
+        btstack_root + '/src',
+        btstack_root + '/src/classic',
+        btstack_root + '/3rd-party/bluedroid/decoder/include',
+        # btstack_sbc_bluedroid.h 需要 sbc_encoder.h (仅头文件; 编码器函数不链接,
+        # 未被引用的编码路径由 --gc-sections 剔除)
+        btstack_root + '/3rd-party/bluedroid/encoder/include']
+
+group = DefineGroup('FeatherTalk BT audio', src, depend=['BSP_USING_IPC'], CPPPATH=path)
+
+Return('group')

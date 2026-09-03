@@ -55,7 +55,20 @@ src += [os.path.join(btstack_root, 'src', f) for f in
          # M4a Classic: SDP server + link key 内存库
          'classic/sdp_server.c', 'classic/sdp_util.c',
          'classic/btstack_link_key_db_memory.c',
+         # A0-4 Classic 音频: A2DP sink + AVDTP + AVRCP + SBC 编解码
+         # (仅编入/链接, A2DP 初始化在后续里程碑)
+         'classic/a2dp.c', 'classic/a2dp_sink.c',
+         'classic/avdtp.c', 'classic/avdtp_acceptor.c', 'classic/avdtp_sink.c',
+         'classic/avdtp_util.c',
+         'classic/avrcp.c', 'classic/avrcp_target.c', 'classic/avrcp_controller.c',
+         'classic/btstack_sbc_bluedroid.c', 'classic/btstack_sbc_encoder_bluedroid.c',
+         'classic/btstack_sbc_plc.c',
          'btstack_tlv.c', 'btstack_tlv_none.c')]
+# A0-4: bluedroid SBC 编码器底层实现 (A2DP 源方向的编码路径)
+src += [os.path.join(btstack_root, '3rd-party', 'bluedroid', 'encoder', 'srce', f) for f in
+        ('sbc_analysis.c', 'sbc_dct.c', 'sbc_dct_coeffs.c',
+         'sbc_enc_bit_alloc_mono.c', 'sbc_enc_bit_alloc_ste.c',
+         'sbc_enc_coeffs.c', 'sbc_encoder.c', 'sbc_packing.c')]
 src += [os.path.join(btstack_root, 'platform', 'embedded',
          'btstack_run_loop_embedded.c'),
         os.path.join(btstack_root, 'platform', 'embedded',
@@ -72,6 +85,8 @@ src += [File(firmware_build_source)]
 
 path = [btstack_root + '/src',
         btstack_root + '/platform/embedded',
+        btstack_root + '/3rd-party/bluedroid/encoder/include',   # A0-4: sbc_encoder.h
+        btstack_root + '/3rd-party/bluedroid/decoder/include',   # A0-4: oi_codec_sbc.h (btstack_sbc_bluedroid.h)
         bt_root,
         bsp_gen,
         os.path.normpath(os.path.join(cwd, '..')),                       # applications/ (bt_service_api.h, ipc/)
