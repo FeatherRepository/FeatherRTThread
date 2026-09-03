@@ -1161,3 +1161,43 @@
 - 最终固件 text=5,137,976、data=91,376、bss=4,894,600 字节；HEX SHA-256 为
   `5337B3AD7E628D043E3C50089928B24709206695C03D432CD5C1256EBC5B93E7`。Infineon
   Customized OpenOCD 已写入 5,230,592 字节并校验 5,229,352 字节。
+
+## 2026-09-03 USB 总开关、功能选择与独立属性页
+
+- “设置 > USB”改为清晰的四层状态：USB 总开关、端口角色、设备功能选择、功能属性。
+  总开关直接调用现有 `ft_usb_set_function()`：关闭进入 `NONE` 并真正停止 CherryUSB，
+  开启则启动当前选中的 MSC 或 UAC2，不再用页面底部的“停止 USB 功能”按钮替代开关。
+- Device 是当前唯一可选角色；Host 仍显示但禁用，并明确说明本板 Type-C 用户口没有主机
+  VBUS 供电路径。MSC 与 UAC2 使用独立单选区域，USB 关闭时可以先配置待启动功能，USB
+  运行时切换功能会沿驱动现有的 stop-old/start-new 路径执行，失败时保留真实错误状态。
+- MSC 与 UAC2 分别增加独立属性页。MSC 页显示固定的 LUN0 Internal Flash、LUN1 SD card
+  及实际可用状态，并可跳转本机存储管理；SD 卡缺失时 MSC 单选项禁用，但属性页仍可进入
+  查看原因。UAC2 页承接 sound0/mic0 设备和输出/输入格式，主 USB 页不再承载专属参数。
+- 自动化增加主页面总开关/角色/功能状态断言，以及 MSC、UAC2 属性页 push/pop 和控件能力
+  检查；性能场景新增 30 `settings-usb-storage`、31 `settings-usb-audio`。新增中文字符已重新
+  进入全局矢量字库，当前生成资源含 7,587 个字形。
+- 修复属性页返回后的共享状态监视生命周期：USB 主页面统一持有监视定时器，两个属性页
+  push/pop 不再提前销毁它。实板自动化中 USB #176--#187 全部通过，覆盖离线选择 UAC2、
+  总开关真实启动/停止 USB stack、MSC/UAC2 属性页进入与返回；本轮出现的 3 个非 USB 失败
+  仍是 M33 快捷能力不可用及既有动态磁贴内容未推进。
+- 正式配置 clean build 为 text=5,141,920、data=91,376、bss=4,894,656 字节；HEX 为
+  14,720,091 字节，SHA-256
+  `C567BD9BB87AB8BD0E54E34D246966743E3735D1048AD858EA6A984D6FC29E79`。Customized
+  OpenOCD 写入 5,234,688 字节并校验 5,233,296 字节。实板 60 帧压力测试分别为 USB 主页
+  26.03 FPS、MSC 属性页 35.60 FPS、UAC2 属性页 25.41 FPS；每页均为 60 batch / 60 submit、
+  software task=0、无 pipeline/scanout 错误。测试后回到 Home（route depth 1），最终 USB
+  状态为 `function=none active=0 luns=0 error=0`。
+
+## 2026-09-03 UI 功能导航图与构建一致性门禁
+
+- 新增 `UI_NAVIGATION_MAP_zh.md`，以 Mermaid 路由图和契约表同时记录常驻 Shell、Start/
+  All Apps、通知面板、键盘/Alert、设置层级、5 个默认应用、21 个路由页面及 32 个实板
+  性能场景。每个功能分支同时描述入口、操作、返回/释放语义、硬件门控、状态所有者与
+  持久化边界，避免导航图退化为只有页面名称的静态示意图。
+- 新增 `tools/freather/check-ui-navigation-map.py`。检查器从 `ft_page_id_t`、`s_pages[]` 和
+  `benchmark-ui-scenes.py` 读取稳定标识，要求文档中的 Page ID 与 Scene 标识一一对应，
+  并拒绝缺失、未知或重复项。`build-demo.ps1` 已把它接入 FeatherTalk_M55 构建前置步骤；
+  因此新增页面或场景但未同步导航图会使构建失败。
+- 本地检查结果为 `21 pages, 32 benchmark scenes`，随后 FeatherTalk_M55 增量构建通过；
+  固件尺寸保持 text=5,141,920、data=91,376、bss=4,894,656 字节，没有因文档门禁引入
+  运行时代码或存储开销。

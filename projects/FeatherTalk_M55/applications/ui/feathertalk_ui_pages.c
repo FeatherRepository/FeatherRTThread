@@ -96,6 +96,8 @@ static lv_obj_t *create_settings_wifi_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_storage_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_usb_page(lv_obj_t *parent);
+static lv_obj_t *create_settings_usb_storage_page(lv_obj_t *parent);
+static lv_obj_t *create_settings_usb_audio_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_time_language_page(lv_obj_t *parent);
 static lv_obj_t *create_settings_personalization_page(lv_obj_t *parent);
 static void files_page_enter(void);
@@ -274,6 +276,10 @@ static const ft_page_definition_t s_pages[] =
     {FT_PAGE_SETTINGS_PERSONALIZATION, "Personalization", create_settings_personalization_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_AUDIO_OUTPUT, "Output properties", create_settings_audio_output_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_AUDIO_INPUT, "Input properties", create_settings_audio_input_page, RT_NULL, RT_NULL, RT_NULL},
+    {FT_PAGE_SETTINGS_USB_STORAGE, "USB storage properties", create_settings_usb_storage_page,
+     settings_usb_page_enter, RT_NULL, RT_NULL},
+    {FT_PAGE_SETTINGS_USB_AUDIO, "USB Audio properties", create_settings_usb_audio_page,
+     settings_usb_page_enter, RT_NULL, RT_NULL},
 };
 
 static lv_obj_t *s_home_tileview;
@@ -324,6 +330,12 @@ static lv_obj_t *s_settings_radio_status;
 static lv_obj_t *s_settings_radio_button;
 static lv_obj_t *s_usb_role_buttons[2];
 static lv_obj_t *s_usb_function_buttons[2];
+static lv_obj_t *s_usb_function_radios[2];
+static lv_obj_t *s_usb_function_status[2];
+static lv_obj_t *s_usb_function_details[2];
+static lv_obj_t *s_usb_function_property_buttons[2];
+static lv_obj_t *s_usb_enable_switch;
+static lv_obj_t *s_usb_enable_state_label;
 static lv_obj_t *s_usb_output_device_buttons[1];
 static lv_obj_t *s_usb_input_device_buttons[2];
 static lv_obj_t *s_usb_output_rate_buttons[FT_AUDIO_RATE_COUNT];
@@ -332,9 +344,14 @@ static lv_obj_t *s_usb_output_channel_buttons[FT_AUDIO_CHANNEL_COUNT];
 static lv_obj_t *s_usb_input_rate_buttons[FT_AUDIO_RATE_COUNT];
 static lv_obj_t *s_usb_input_bits_buttons[FT_AUDIO_BITS_COUNT];
 static lv_obj_t *s_usb_input_channel_buttons[FT_AUDIO_CHANNEL_COUNT];
-static lv_obj_t *s_usb_stop_button;
 static lv_obj_t *s_usb_status_label;
+static lv_obj_t *s_usb_storage_status_label;
+static lv_obj_t *s_usb_storage_flash_label;
+static lv_obj_t *s_usb_storage_sd_label;
+static lv_obj_t *s_usb_storage_manage_button;
+static lv_obj_t *s_usb_audio_status_label;
 static lv_timer_t *s_usb_monitor_timer;
+static ft_usb_function_t s_usb_selected_function = FT_USB_FUNCTION_AUDIO;
 static lv_obj_t *s_storage_device_buttons[FT_STORAGE_DEVICE_COUNT];
 static lv_obj_t *s_storage_device_icons[FT_STORAGE_DEVICE_COUNT];
 static lv_obj_t *s_storage_device_capacity[FT_STORAGE_DEVICE_COUNT];
@@ -3424,10 +3441,25 @@ static void settings_usb_refresh(void)
     uint8_t output_bits;
     uint8_t output_channels;
     char text[320];
+    char summary[160];
+    bool storage_available;
+    bool audio_available;
+    bool selected_available;
     size_t i;
 
     ft_usb_get_status(&status);
     (void)ft_audio_get_status(&audio);
+    storage_available = status.storage_supported &&
+                        (status.sd_present ||
+                         (status.active &&
+                          status.function == FT_USB_FUNCTION_STORAGE));
+    audio_available = status.audio_supported;
+    if (status.active && status.function != FT_USB_FUNCTION_NONE)
+        s_usb_selected_function = status.function;
+    selected_available =
+        (s_usb_selected_function == FT_USB_FUNCTION_STORAGE &&
+         storage_available) ||
+        (s_usb_selected_function == FT_USB_FUNCTION_AUDIO && audio_available);
 
     /* SET_CUR and SET_INTERFACE requests made by the USB host are the
      * authoritative format while UAC is active. Mirror them into the local
@@ -3461,10 +3493,14 @@ static void settings_usb_refresh(void)
 
     settings_choice_refresh(s_usb_role_buttons[FT_USB_ROLE_DEVICE], true);
     settings_choice_refresh(s_usb_role_buttons[FT_USB_ROLE_HOST], false);
-    settings_choice_refresh(s_usb_function_buttons[0],
-                            status.function == FT_USB_FUNCTION_STORAGE);
-    settings_choice_refresh(s_usb_function_buttons[1],
-                            status.function == FT_USB_FUNCTION_AUDIO);
+    settings_audio_radio_refresh(
+        s_usb_function_radios[0],
+        s_usb_selected_function == FT_USB_FUNCTION_STORAGE,
+        storage_available);
+    settings_audio_radio_refresh(
+        s_usb_function_radios[1],
+        s_usb_selected_function == FT_USB_FUNCTION_AUDIO,
+        audio_available);
 
     if (s_usb_role_buttons[FT_USB_ROLE_HOST] != RT_NULL &&
         lv_obj_is_valid(s_usb_role_buttons[FT_USB_ROLE_HOST]))
@@ -3472,7 +3508,7 @@ static void settings_usb_refresh(void)
     if (s_usb_function_buttons[0] != RT_NULL &&
         lv_obj_is_valid(s_usb_function_buttons[0]))
     {
-        if (status.storage_supported && (status.sd_present || status.active))
+        if (storage_available)
             lv_obj_remove_state(s_usb_function_buttons[0], LV_STATE_DISABLED);
         else
             lv_obj_add_state(s_usb_function_buttons[0], LV_STATE_DISABLED);
@@ -3480,7 +3516,7 @@ static void settings_usb_refresh(void)
     if (s_usb_function_buttons[1] != RT_NULL &&
         lv_obj_is_valid(s_usb_function_buttons[1]))
     {
-        if (status.audio_supported)
+        if (audio_available)
             lv_obj_remove_state(s_usb_function_buttons[1], LV_STATE_DISABLED);
         else
             lv_obj_add_state(s_usb_function_buttons[1], LV_STATE_DISABLED);
@@ -3566,107 +3602,199 @@ static void settings_usb_refresh(void)
             lv_obj_add_state(s_usb_input_channel_buttons[i],
                              LV_STATE_DISABLED);
     }
-    if (s_usb_stop_button != RT_NULL && lv_obj_is_valid(s_usb_stop_button))
+    if (s_usb_enable_switch != RT_NULL &&
+        lv_obj_is_valid(s_usb_enable_switch))
     {
-        if (status.active)
-            lv_obj_remove_state(s_usb_stop_button, LV_STATE_DISABLED);
+        if (selected_available || status.active)
+            lv_obj_remove_state(s_usb_enable_switch, LV_STATE_DISABLED);
         else
-            lv_obj_add_state(s_usb_stop_button, LV_STATE_DISABLED);
+            lv_obj_add_state(s_usb_enable_switch, LV_STATE_DISABLED);
+        if (status.active)
+            lv_obj_add_state(s_usb_enable_switch, LV_STATE_CHECKED);
+        else
+            lv_obj_remove_state(s_usb_enable_switch, LV_STATE_CHECKED);
     }
+    if (s_usb_enable_state_label != RT_NULL &&
+        lv_obj_is_valid(s_usb_enable_state_label))
+        lv_label_set_text(s_usb_enable_state_label,
+                          status.active ?
+                          ft_preferences_text("开", "On") :
+                          ft_preferences_text("关", "Off"));
+    if (s_usb_function_status[0] != RT_NULL &&
+        lv_obj_is_valid(s_usb_function_status[0]))
+        lv_label_set_text(s_usb_function_status[0],
+            status.active && status.function == FT_USB_FUNCTION_STORAGE ?
+                ft_preferences_text("正在运行", "Active") :
+            storage_available ?
+                ft_preferences_text("可用", "Available") :
+                ft_preferences_text("不可用 · 需要 SD 卡", "Unavailable · SD card required"));
+    if (s_usb_function_status[1] != RT_NULL &&
+        lv_obj_is_valid(s_usb_function_status[1]))
+        lv_label_set_text(s_usb_function_status[1],
+            status.active && status.function == FT_USB_FUNCTION_AUDIO ?
+                ft_preferences_text("正在运行", "Active") :
+            audio_available ? ft_preferences_text("可用", "Available") :
+                              ft_preferences_text("不可用 · 未编译驱动", "Unavailable · driver not built"));
+    lv_snprintf(summary, sizeof(summary), "%s · %s",
+                status.active ? ft_preferences_text("USB 已开启", "USB on") :
+                                ft_preferences_text("USB 已关闭", "USB off"),
+                s_usb_selected_function == FT_USB_FUNCTION_STORAGE ?
+                    ft_preferences_text("存储器", "Storage") : "USB Audio (UAC2)");
+    if (status.active)
+        lv_snprintf(summary, sizeof(summary), "%s · %s · %s",
+                    ft_preferences_text("USB 已开启", "USB on"),
+                    status.function == FT_USB_FUNCTION_STORAGE ?
+                        ft_preferences_text("存储器", "Storage") :
+                        "USB Audio (UAC2)",
+                    status.configured ? ft_preferences_text("已枚举", "Enumerated") :
+                    status.connected ? ft_preferences_text("已连接", "Connected") :
+                                       ft_preferences_text("等待主机", "Waiting for host"));
+    if (s_usb_status_label != RT_NULL && lv_obj_is_valid(s_usb_status_label))
+        lv_label_set_text(s_usb_status_label, summary);
 
-    if (s_usb_status_label == RT_NULL || !lv_obj_is_valid(s_usb_status_label))
-        return;
     if (status.active && status.function == FT_USB_FUNCTION_AUDIO)
-    {
         lv_snprintf(text, sizeof(text), ft_preferences_text(
-                    "USB Audio：运行中 · %s\n输出：sound0 · %lu Hz · %u bit · %u ch · %s\n"
-                    "输入：mic0 · %lu Hz · %u bit · %u ch · %s\n"
-                    "同步：主机 %lu 次 / 本机 %lu 次 · 错误 %d",
-                    "USB Audio: active · %s\nOutput: sound0 · %lu Hz · %u bit · %u ch · %s\n"
-                    "Input: mic0 · %lu Hz · %u bit · %u ch · %s\n"
-                    "Sync: host %lu / device %lu · error %d"),
+                    "运行中 · %s\n输出 sound0：%lu Hz · %u bit · %u ch · %s\n"
+                    "输入 mic0：%lu Hz · %u bit · %u ch · %s\n"
+                    "格式同步：主机 %lu 次 / 本机 %lu 次",
+                    "Active · %s\nOutput sound0: %lu Hz · %u bit · %u ch · %s\n"
+                    "Input mic0: %lu Hz · %u bit · %u ch · %s\n"
+                    "Format sync: host %lu / device %lu"),
                     status.configured ? ft_preferences_text("已枚举", "enumerated") :
                     status.connected ? ft_preferences_text("已连接", "connected") :
                                        ft_preferences_text("等待电脑", "waiting for host"),
                     (unsigned long)status.uac_output_sample_rate,
-                    status.uac_output_sample_bits,
-                    status.uac_output_channels,
+                    status.uac_output_sample_bits, status.uac_output_channels,
                     status.uac_output_streaming ?
                         ft_preferences_text("传输中", "streaming") :
                         ft_preferences_text("空闲", "idle"),
                     (unsigned long)status.uac_input_sample_rate,
-                    status.uac_input_sample_bits,
-                    status.uac_input_channels,
+                    status.uac_input_sample_bits, status.uac_input_channels,
                     status.uac_input_streaming ?
                         ft_preferences_text("传输中", "streaming") :
                         ft_preferences_text("空闲", "idle"),
                     (unsigned long)status.uac_host_update_count,
-                    (unsigned long)status.uac_device_update_count,
-                    status.last_error);
-    }
-    else if (status.active)
+                    (unsigned long)status.uac_device_update_count);
+    else if (audio_available)
+        lv_snprintf(text, sizeof(text), "%s", ft_preferences_text(
+                    "USB Audio 已就绪。打开 USB 总开关后，电脑将枚举扬声器和麦克风。",
+                    "USB Audio is ready. Turn on USB to enumerate speaker and microphone interfaces."));
+    else
+        lv_snprintf(text, sizeof(text), "%s", ft_preferences_text(
+                    "USB Audio 驱动未编入当前固件。",
+                    "USB Audio support is not built into this firmware."));
+    if (s_usb_audio_status_label != RT_NULL &&
+        lv_obj_is_valid(s_usb_audio_status_label))
+        lv_label_set_text(s_usb_audio_status_label, text);
+
+    if (status.active && status.function == FT_USB_FUNCTION_STORAGE)
+        lv_snprintf(text, sizeof(text), "%s", ft_preferences_text(
+                    "正在由电脑独占访问。关闭 USB 后，本机将重新挂载两个卷。",
+                    "The computer owns both volumes exclusively. Turning USB off remounts them locally."));
+    else if (storage_available)
+        lv_snprintf(text, sizeof(text), "%s", ft_preferences_text(
+                    "双 LUN 已就绪。打开 USB 后，内置 Flash 与 SD 卡将暂时从本机卸载。",
+                    "Both LUNs are ready. Turning USB on temporarily unmounts Internal Flash and the SD card locally."));
+    else
+        lv_snprintf(text, sizeof(text), "%s", ft_preferences_text(
+                    "未检测到可导出的 SD 卡；当前双 LUN 存储器功能不可开启。",
+                    "No exportable SD card was detected; the current dual-LUN storage function cannot be enabled."));
+    if (s_usb_storage_status_label != RT_NULL &&
+        lv_obj_is_valid(s_usb_storage_status_label))
+        lv_label_set_text(s_usb_storage_status_label, text);
+
+    if (s_usb_storage_flash_label != RT_NULL &&
+        lv_obj_is_valid(s_usb_storage_flash_label))
     {
-        uint64_t flash_bytes = (uint64_t)status.flash_block_size *
-                               status.flash_block_count;
+        uint64_t flash_bytes = status.active &&
+            status.function == FT_USB_FUNCTION_STORAGE ?
+            (uint64_t)status.flash_block_size * status.flash_block_count :
+            2ULL * 1024ULL * 1024ULL;
+        lv_snprintf(text, sizeof(text), "LUN 0 · Internal Flash · %lu MiB · %s",
+                    (unsigned long)(flash_bytes / (1024U * 1024U)),
+                    status.flash_present ? ft_preferences_text("可用", "Available") :
+                                           ft_preferences_text("不可用", "Unavailable"));
+        lv_label_set_text(s_usb_storage_flash_label, text);
+    }
+    if (s_usb_storage_sd_label != RT_NULL &&
+        lv_obj_is_valid(s_usb_storage_sd_label))
+    {
         uint64_t sd_bytes = (uint64_t)status.sd_block_size *
                             status.sd_block_count;
-        lv_snprintf(text, sizeof(text), ft_preferences_text(
-                    "存储器模式：运行中\n连接：%s\nLUN 0 内置 Flash：%lu MiB\nLUN 1 SD 卡：%lu MiB\n"
-                    "两块介质已从本机卸载，由电脑独占访问。请先停止 USB 存储再拔卡或断开连接。",
-                    "Storage mode: active\nConnection: %s\nLUN 0 Internal Flash: %lu MiB\nLUN 1 SD card: %lu MiB\n"
-                    "Both volumes are unmounted locally and owned exclusively by the computer. Stop USB storage before removing media or disconnecting."),
-                    status.configured ? ft_preferences_text("已枚举", "enumerated") :
-                    status.connected ? ft_preferences_text("已连接，等待枚举", "connected, enumerating") :
-                                       ft_preferences_text("等待电脑连接", "waiting for computer"),
-                    (unsigned long)(flash_bytes / (1024U * 1024U)),
-                    (unsigned long)(sd_bytes / (1024U * 1024U)));
+        if (sd_bytes > 0U)
+            lv_snprintf(text, sizeof(text), "LUN 1 · SD card · %lu MiB · %s",
+                        (unsigned long)(sd_bytes / (1024U * 1024U)),
+                        ft_preferences_text("可用", "Available"));
+        else
+            lv_snprintf(text, sizeof(text), "LUN 1 · SD card · %s",
+                        status.sd_present ? ft_preferences_text("可用", "Available") :
+                                            ft_preferences_text("未插入", "Not inserted"));
+        lv_label_set_text(s_usb_storage_sd_label, text);
     }
-    else if (!status.storage_supported && !status.audio_supported)
-    {
-        lv_snprintf(text, sizeof(text), "%s", ft_preferences_text(
-                    "USB 设备功能未编入当前固件。",
-                    "USB device functions are not built into this firmware."));
-    }
-    else if (!status.sd_present)
-    {
-        lv_snprintf(text, sizeof(text), "%s", ft_preferences_text(
-                    "内置 Flash 已就绪，但未检测到已挂载的 SD 卡。当前双磁盘模式需要插卡后才能启动。",
-                    "Internal Flash is ready, but no mounted SD card was detected. Insert a card to start the current two-disk mode."));
-    }
-    else if (status.last_error != RT_EOK)
-    {
-        lv_snprintf(text, sizeof(text), ft_preferences_text(
-                    "Flash 和 SD 卡已就绪，但上次 USB 操作失败（错误 %d）。",
-                    "Flash and SD card are ready, but the last USB operation failed (error %d)."),
-                    status.last_error);
-    }
-    else
-    {
-        lv_snprintf(text, sizeof(text), "%s", ft_preferences_text(
-                    "USB Audio 已就绪；输出格式可由本机或电脑双向更新。存储器模式需要 SD 卡。",
-                    "USB Audio is ready; its output format can be updated by either the device or host. Storage mode requires an SD card."));
-    }
-    lv_label_set_text(s_usb_status_label, text);
 }
 
-static void settings_usb_storage_clicked_cb(lv_event_t *event)
+static bool settings_usb_function_available(const ft_usb_status_t *status,
+                                            ft_usb_function_t function)
 {
-    LV_UNUSED(event);
-    (void)ft_usb_set_function(FT_USB_FUNCTION_STORAGE);
+    if (status == RT_NULL) return false;
+    if (function == FT_USB_FUNCTION_STORAGE)
+        return status->storage_supported &&
+               (status->sd_present ||
+                (status->active &&
+                 status->function == FT_USB_FUNCTION_STORAGE));
+    if (function == FT_USB_FUNCTION_AUDIO)
+        return status->audio_supported;
+    return false;
+}
+
+static void settings_usb_function_selected_cb(lv_event_t *event)
+{
+    ft_usb_function_t function =
+        (ft_usb_function_t)(uintptr_t)lv_event_get_user_data(event);
+    ft_usb_status_t status;
+    int result = RT_EOK;
+
+    ft_usb_get_status(&status);
+    if (!settings_usb_function_available(&status, function)) return;
+    s_usb_selected_function = function;
+    if (status.active && status.function != function)
+        result = ft_usb_set_function(function);
+    if (result != RT_EOK)
+        feathertalk_ui_alert(
+            ft_preferences_text("USB 功能切换失败",
+                                "USB function switch failed"),
+            ft_preferences_text("请关闭正在使用该资源的应用后重试。",
+                                "Close the application using this resource and try again."));
     settings_usb_refresh();
 }
 
-static void settings_usb_audio_clicked_cb(lv_event_t *event)
+static void settings_usb_function_properties_cb(lv_event_t *event)
 {
-    int result;
-    LV_UNUSED(event);
-    result = ft_usb_set_function(FT_USB_FUNCTION_AUDIO);
+    ft_usb_function_t function =
+        (ft_usb_function_t)(uintptr_t)lv_event_get_user_data(event);
+    ft_page_id_t page = function == FT_USB_FUNCTION_STORAGE ?
+                        FT_PAGE_SETTINGS_USB_STORAGE :
+                        FT_PAGE_SETTINGS_USB_AUDIO;
+    (void)ft_router_push(page);
+}
+
+static void settings_usb_enable_changed_cb(lv_event_t *event)
+{
+    lv_obj_t *control = lv_event_get_target(event);
+    bool enabled = lv_obj_has_state(control, LV_STATE_CHECKED);
+    int result = ft_usb_set_function(enabled ? s_usb_selected_function :
+                                               FT_USB_FUNCTION_NONE);
+
     if (result != RT_EOK)
         feathertalk_ui_alert(
-            ft_preferences_text("USB Audio 启动失败",
-                                "USB Audio failed to start"),
-            ft_preferences_text("请检查 USB 音频驱动和音频设备状态。",
-                                "Check the USB audio driver and audio device state."));
+            ft_preferences_text("无法开启 USB", "Unable to enable USB"),
+            s_usb_selected_function == FT_USB_FUNCTION_STORAGE ?
+                ft_preferences_text(
+                    "存储器模式需要内置 Flash 和已挂载的 SD 卡，并且两者当前不能被其他操作占用。",
+                    "Storage mode requires Internal Flash and a mounted SD card; neither volume may be busy.") :
+                ft_preferences_text(
+                    "请检查 USB Audio、sound0 和 mic0 驱动状态。",
+                    "Check USB Audio, sound0 and mic0 driver state."));
     settings_usb_refresh();
 }
 
@@ -3701,13 +3829,6 @@ static void settings_usb_output_format_clicked_cb(lv_event_t *event)
             ft_preferences_text(
                 "当前 sound0 驱动没有接受该组合，USB 主机配置保持不变。",
                 "The current sound0 driver rejected this combination; the USB host configuration was not changed."));
-    settings_usb_refresh();
-}
-
-static void settings_usb_stop_clicked_cb(lv_event_t *event)
-{
-    LV_UNUSED(event);
-    (void)ft_usb_set_function(FT_USB_FUNCTION_NONE);
     settings_usb_refresh();
 }
 
@@ -3809,17 +3930,123 @@ static void settings_usb_create_format_controls(lv_obj_t *page, bool input)
     }
 }
 
+static lv_obj_t *settings_usb_create_function_row(
+    lv_obj_t *parent, size_t index, ft_usb_function_t function,
+    ft_icon_id_t icon, const char *title, const char *details)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_t *selector;
+    lv_obj_t *radio;
+    lv_obj_t *column;
+    lv_obj_t *label;
+    lv_obj_t *property;
+
+    ft_ui_style_panel(row);
+    lv_obj_set_size(row, lv_pct(100), ft_layout_px(84));
+    lv_obj_set_style_radius(row, ft_layout_px(4), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(row, ft_layout_px(10), LV_PART_MAIN);
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    track_object(&s_usb_function_buttons[index], lv_button_create(row));
+    selector = s_usb_function_buttons[index];
+    lv_obj_remove_style_all(selector);
+    lv_obj_set_size(selector, ft_layout_px(38), ft_layout_px(38));
+    lv_obj_add_flag(selector, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(selector, settings_usb_function_selected_cb,
+                        LV_EVENT_CLICKED, (void *)(uintptr_t)function);
+    track_object(&s_usb_function_radios[index], lv_obj_create(selector));
+    radio = s_usb_function_radios[index];
+    lv_obj_remove_style_all(radio);
+    lv_obj_set_size(radio, ft_layout_px(28), ft_layout_px(28));
+    lv_obj_center(radio);
+    label = lv_label_create(radio);
+    lv_label_set_text(label, "○");
+    lv_obj_set_style_text_font(label, ft_layout_font(22), LV_PART_MAIN);
+    lv_obj_center(label);
+    label = lv_label_create(radio);
+    lv_label_set_text(label, "•");
+    lv_obj_set_style_text_font(label, ft_layout_font(14), LV_PART_MAIN);
+    lv_obj_center(label);
+
+    (void)ft_icon_create(row, icon, ft_layout_icon_size(30U), true);
+    column = lv_obj_create(row);
+    style_layout_container(column);
+    lv_obj_set_width(column, 0);
+    lv_obj_set_height(column, LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(column, 1);
+    lv_obj_set_style_pad_row(column, ft_layout_px(2), LV_PART_MAIN);
+    lv_obj_set_flex_flow(column, LV_FLEX_FLOW_COLUMN);
+    label = lv_label_create(column);
+    lv_label_set_text(label, title);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(label, ft_layout_font(16), LV_PART_MAIN);
+    track_object(&s_usb_function_status[index], lv_label_create(column));
+    lv_obj_set_width(s_usb_function_status[index], lv_pct(100));
+    lv_label_set_long_mode(s_usb_function_status[index], LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(s_usb_function_status[index],
+                               ft_layout_font(12), LV_PART_MAIN);
+    ft_ui_register_accent(s_usb_function_status[index], FT_ACCENT_TEXT);
+    track_object(&s_usb_function_details[index], lv_label_create(column));
+    lv_label_set_text(s_usb_function_details[index], details);
+    lv_obj_set_width(s_usb_function_details[index], lv_pct(100));
+    lv_label_set_long_mode(s_usb_function_details[index], LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(s_usb_function_details[index],
+                               ft_layout_font(11), LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_usb_function_details[index],
+                                lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+
+    track_object(&s_usb_function_property_buttons[index],
+                 lv_button_create(row));
+    property = s_usb_function_property_buttons[index];
+    lv_obj_remove_style_all(property);
+    lv_obj_set_size(property, ft_layout_px(40), ft_layout_px(52));
+    lv_obj_add_flag(property, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(property, settings_usb_function_properties_cb,
+                        LV_EVENT_CLICKED, (void *)(uintptr_t)function);
+    label = lv_label_create(property);
+    lv_label_set_text(label, ">");
+    lv_obj_set_style_text_font(label, ft_layout_font(22), LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xC8C8C8), LV_PART_MAIN);
+    lv_obj_center(label);
+    return row;
+}
+
 static lv_obj_t *create_settings_usb_page(lv_obj_t *parent)
 {
     const ft_ui_layout_t *layout = ft_layout_get();
     lv_obj_t *page = create_text_page(
         parent, "USB", FT_ICON_USB,
         ft_preferences_text(
-        "此版硬件的 Type-C 用户口固定为 USB 设备/受电端；主机模式不可用。",
-        "This board revision fixes the user Type-C port as a USB device/sink; Host mode is unavailable."));
+            "打开或关闭 USB，并选择端口角色和设备枚举功能。",
+            "Turn USB on or off, then choose the port role and enumerated device function."));
     lv_obj_t *caption;
     lv_obj_t *row;
-    lv_obj_t *note;
+    lv_obj_t *label;
+
+    row = lv_obj_create(page);
+    ft_ui_style_panel(row);
+    lv_obj_set_size(row, lv_pct(100), ft_layout_px(64));
+    lv_obj_set_style_radius(row, ft_layout_px(4), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(row, ft_layout_px(12), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    label = lv_label_create(row);
+    lv_label_set_text(label, ft_preferences_text("USB 总开关", "USB power"));
+    lv_obj_set_style_text_font(label, ft_layout_font(16), LV_PART_MAIN);
+    track_object(&s_usb_enable_state_label, lv_label_create(row));
+    lv_obj_set_style_text_font(s_usb_enable_state_label,
+                               ft_layout_font(14), LV_PART_MAIN);
+    ft_ui_register_accent(s_usb_enable_state_label, FT_ACCENT_TEXT);
+    track_object(&s_usb_enable_switch, lv_switch_create(row));
+    lv_obj_set_size(s_usb_enable_switch, ft_layout_px(54), ft_layout_px(28));
+    lv_obj_add_event_cb(s_usb_enable_switch, settings_usb_enable_changed_cb,
+                        LV_EVENT_VALUE_CHANGED, RT_NULL);
 
     caption = lv_label_create(page);
     lv_label_set_text(caption, ft_preferences_text("USB 角色", "USB role"));
@@ -3831,57 +4058,123 @@ static lv_obj_t *create_settings_usb_page(lv_obj_t *parent)
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     track_object(&s_usb_role_buttons[FT_USB_ROLE_DEVICE],
                  create_flat_button(row,
-                                    ft_preferences_text("设备（默认）", "Device (default)"),
-                                    RT_NULL, RT_NULL));
+                    ft_preferences_text("设备（当前）", "Device (current)"),
+                    RT_NULL, RT_NULL));
     track_object(&s_usb_role_buttons[FT_USB_ROLE_HOST],
                  create_flat_button(row,
-                                    ft_preferences_text("主机", "Host"),
-                                    RT_NULL, RT_NULL));
+                    ft_preferences_text("主机（不可用）", "Host (unavailable)"),
+                    RT_NULL, RT_NULL));
     lv_obj_set_width(s_usb_role_buttons[0], 0);
     lv_obj_set_width(s_usb_role_buttons[1], 0);
     lv_obj_set_flex_grow(s_usb_role_buttons[0], 1);
     lv_obj_set_flex_grow(s_usb_role_buttons[1], 1);
 
-    note = lv_label_create(page);
-    lv_obj_set_width(note, lv_pct(100));
-    lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(note, ft_preferences_text(
-                      "主机模式需要 Type-C Rp 和 VBUS 5V 输出硬件，本板未实现。",
-                      "Host mode requires Type-C Rp and a switched 5 V VBUS source, which this board does not implement."));
-    lv_obj_set_style_text_color(note, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
-    lv_obj_set_style_text_font(note, ft_layout_font(12), LV_PART_MAIN);
+    label = lv_label_create(page);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(label, ft_preferences_text(
+        "此版 Type-C 用户口缺少主机 VBUS 供电路径，因此主机角色保留显示但不可选择。",
+        "This Type-C port lacks the host VBUS source, so Host remains visible but cannot be selected."));
+    lv_obj_set_style_text_color(label, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
 
     caption = lv_label_create(page);
     lv_label_set_text(caption, ft_preferences_text("设备功能", "Device function"));
     lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
-    row = lv_obj_create(page);
-    style_layout_container(row);
-    lv_obj_set_size(row, lv_pct(100), layout->control_height);
-    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    track_object(&s_usb_function_buttons[0],
-                 create_flat_button(row,
-                                    ft_preferences_text("存储器", "Storage"),
-                                    settings_usb_storage_clicked_cb, RT_NULL));
-    track_object(&s_usb_function_buttons[1],
-                 create_flat_button(row, "USB Audio (UAC2)",
-                                    settings_usb_audio_clicked_cb, RT_NULL));
-    lv_obj_set_width(s_usb_function_buttons[0], 0);
-    lv_obj_set_width(s_usb_function_buttons[1], 0);
-    lv_obj_set_flex_grow(s_usb_function_buttons[0], 1);
-    lv_obj_set_flex_grow(s_usb_function_buttons[1], 1);
+    (void)settings_usb_create_function_row(
+        page, 0U, FT_USB_FUNCTION_STORAGE, FT_ICON_STORAGE,
+        ft_preferences_text("USB 存储器", "USB storage"),
+        ft_preferences_text("内置 Flash + SD 卡 · 双 LUN", "Internal Flash + SD card · dual LUN"));
+    (void)settings_usb_create_function_row(
+        page, 1U, FT_USB_FUNCTION_AUDIO, FT_ICON_AUDIO_SETTINGS,
+        "USB Audio (UAC2)",
+        ft_preferences_text("扬声器输出 + 麦克风输入", "Speaker output + microphone input"));
 
-    note = lv_label_create(page);
-    lv_obj_set_width(note, lv_pct(100));
-    lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(note, ft_preferences_text(
-                      "存储器模式共享 Flash 和 SD 卡；UAC2 同时提供扬声器输出和麦克风输入。",
-                      "Storage shares Flash and SD media; UAC2 provides speaker output and microphone input simultaneously."));
-    lv_obj_set_style_text_color(note, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
-    lv_obj_set_style_text_font(note, ft_layout_font(12), LV_PART_MAIN);
+    track_object(&s_usb_status_label, lv_label_create(page));
+    lv_obj_set_width(s_usb_status_label, lv_pct(100));
+    lv_label_set_long_mode(s_usb_status_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_usb_status_label, ft_layout_font(14), LV_PART_MAIN);
+    ft_ui_register_accent(s_usb_status_label, FT_ACCENT_TEXT);
+    settings_usb_refresh();
+    return page;
+}
+
+static void settings_usb_storage_manage_clicked_cb(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    (void)ft_router_push(FT_PAGE_SETTINGS_STORAGE);
+}
+
+static lv_obj_t *settings_usb_create_storage_lun(
+    lv_obj_t *parent, ft_icon_id_t icon, const char *title,
+    lv_obj_t **value_slot)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_t *label;
+
+    ft_ui_style_panel(row);
+    lv_obj_set_size(row, lv_pct(100), ft_layout_px(68));
+    lv_obj_set_style_radius(row, ft_layout_px(4), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(row, ft_layout_px(12), LV_PART_MAIN);
+    lv_obj_set_style_pad_column(row, ft_layout_px(10), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    (void)ft_icon_create(row, icon, ft_layout_icon_size(30U), true);
+    label = lv_label_create(row);
+    lv_label_set_text(label, title);
+    lv_obj_set_width(label, ft_layout_px(112));
+    lv_obj_set_style_text_font(label, ft_layout_font(15), LV_PART_MAIN);
+    track_object(value_slot, lv_label_create(row));
+    lv_obj_set_width(*value_slot, 0);
+    lv_obj_set_flex_grow(*value_slot, 1);
+    lv_label_set_long_mode(*value_slot, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(*value_slot, ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_set_style_text_color(*value_slot,
+                                lv_color_hex(0xB8B8B8), LV_PART_MAIN);
+    return row;
+}
+
+static lv_obj_t *create_settings_usb_storage_page(lv_obj_t *parent)
+{
+    lv_obj_t *page = create_text_page(
+        parent, ft_preferences_text("USB > 存储器", "USB > Storage"),
+        FT_ICON_STORAGE,
+        ft_preferences_text("配置并检查 USB 大容量存储器的导出介质。",
+                            "Configure and inspect media exported by USB mass storage."));
+
+    (void)settings_usb_create_storage_lun(
+        page, FT_ICON_FLASH_DEVICE, "Internal Flash", &s_usb_storage_flash_label);
+    (void)settings_usb_create_storage_lun(
+        page, FT_ICON_SD_DEVICE, "SD card", &s_usb_storage_sd_label);
+    track_object(&s_usb_storage_manage_button,
+                 create_icon_button(page, FT_ICON_SD_STORAGE,
+                    ft_preferences_text("管理本机存储", "Manage local storage"),
+                    settings_usb_storage_manage_clicked_cb, RT_NULL,
+                    RT_NULL, RT_NULL));
+    lv_obj_set_width(s_usb_storage_manage_button, lv_pct(100));
+    track_object(&s_usb_storage_status_label, lv_label_create(page));
+    lv_obj_set_width(s_usb_storage_status_label, lv_pct(100));
+    lv_label_set_long_mode(s_usb_storage_status_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_usb_storage_status_label,
+                               ft_layout_font(13), LV_PART_MAIN);
+    ft_ui_register_accent(s_usb_storage_status_label, FT_ACCENT_TEXT);
+    settings_usb_refresh();
+    return page;
+}
+
+static lv_obj_t *create_settings_usb_audio_page(lv_obj_t *parent)
+{
+    lv_obj_t *page = create_text_page(
+        parent, "USB > USB Audio (UAC2)", FT_ICON_AUDIO_SETTINGS,
+        ft_preferences_text("配置电脑枚举到的扬声器和麦克风接口。",
+                            "Configure speaker and microphone interfaces enumerated by the host."));
+    lv_obj_t *caption;
+    lv_obj_t *row;
+    lv_obj_t *note;
 
     caption = lv_label_create(page);
-    lv_label_set_text(caption, ft_preferences_text("UAC 输出设备", "UAC output device"));
+    lv_label_set_text(caption, ft_preferences_text("输出设备", "Output device"));
     lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
     track_object(&s_usb_output_device_buttons[0],
                  create_flat_button(page,
@@ -3892,7 +4185,7 @@ static lv_obj_t *create_settings_usb_page(lv_obj_t *parent)
     settings_usb_create_format_controls(page, false);
 
     caption = lv_label_create(page);
-    lv_label_set_text(caption, ft_preferences_text("UAC 输入设备", "UAC input device"));
+    lv_label_set_text(caption, ft_preferences_text("输入设备", "Input device"));
     lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
     row = lv_obj_create(page);
     style_layout_container(row);
@@ -3924,17 +4217,12 @@ static lv_obj_t *create_settings_usb_page(lv_obj_t *parent)
     lv_obj_set_style_text_color(note, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
     lv_obj_set_style_text_font(note, ft_layout_font(12), LV_PART_MAIN);
 
-    track_object(&s_usb_stop_button,
-                 create_flat_button(page,
-                                    ft_preferences_text("停止 USB 功能", "Stop USB function"),
-                                    settings_usb_stop_clicked_cb, RT_NULL));
-    lv_obj_set_width(s_usb_stop_button, lv_pct(100));
-
-    track_object(&s_usb_status_label, lv_label_create(page));
-    lv_obj_set_width(s_usb_status_label, lv_pct(100));
-    lv_label_set_long_mode(s_usb_status_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_font(s_usb_status_label, ft_layout_font(14), LV_PART_MAIN);
-    ft_ui_register_accent(s_usb_status_label, FT_ACCENT_TEXT);
+    track_object(&s_usb_audio_status_label, lv_label_create(page));
+    lv_obj_set_width(s_usb_audio_status_label, lv_pct(100));
+    lv_label_set_long_mode(s_usb_audio_status_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_usb_audio_status_label,
+                               ft_layout_font(13), LV_PART_MAIN);
+    ft_ui_register_accent(s_usb_audio_status_label, FT_ACCENT_TEXT);
     settings_usb_refresh();
     return page;
 }
@@ -6803,20 +7091,65 @@ lv_obj_t *ft_pages_test_get_usb_function_button(ft_usb_function_t function)
     if (function == FT_USB_FUNCTION_AUDIO) return s_usb_function_buttons[1];
     return RT_NULL;
 }
-lv_obj_t *ft_pages_test_get_usb_stop_button(void) { return s_usb_stop_button; }
+lv_obj_t *ft_pages_test_get_usb_function_properties_button(
+    ft_usb_function_t function)
+{
+    if (function == FT_USB_FUNCTION_STORAGE)
+        return s_usb_function_property_buttons[0];
+    if (function == FT_USB_FUNCTION_AUDIO)
+        return s_usb_function_property_buttons[1];
+    return RT_NULL;
+}
+lv_obj_t *ft_pages_test_get_usb_enable_switch(void)
+{ return s_usb_enable_switch; }
 bool ft_pages_test_usb_state_valid(void)
 {
     ft_usb_status_t status;
-    size_t i;
     if (s_usb_monitor_timer == RT_NULL ||
+        !tracked_object_is_type(&s_usb_enable_switch, &lv_switch_class) ||
+        !tracked_object_is_type(&s_usb_enable_state_label, &lv_label_class) ||
         s_usb_role_buttons[FT_USB_ROLE_DEVICE] == RT_NULL ||
         s_usb_role_buttons[FT_USB_ROLE_HOST] == RT_NULL ||
         s_usb_function_buttons[0] == RT_NULL ||
         s_usb_function_buttons[1] == RT_NULL ||
+        s_usb_function_radios[0] == RT_NULL ||
+        s_usb_function_radios[1] == RT_NULL ||
+        s_usb_function_property_buttons[0] == RT_NULL ||
+        s_usb_function_property_buttons[1] == RT_NULL ||
+        s_usb_status_label == RT_NULL)
+        return false;
+    ft_usb_get_status(&status);
+    return !lv_obj_has_state(s_usb_role_buttons[FT_USB_ROLE_DEVICE], LV_STATE_DISABLED) &&
+           lv_obj_has_state(s_usb_role_buttons[FT_USB_ROLE_HOST], LV_STATE_DISABLED) &&
+           lv_obj_has_state(s_usb_function_buttons[1], LV_STATE_DISABLED) ==
+               !status.audio_supported &&
+           lv_obj_has_state(s_usb_function_buttons[0], LV_STATE_DISABLED) ==
+               (!status.sd_present &&
+                !(status.active && status.function == FT_USB_FUNCTION_STORAGE)) &&
+           lv_obj_has_state(s_usb_enable_switch, LV_STATE_CHECKED) ==
+               status.active;
+}
+bool ft_pages_test_usb_storage_properties_valid(void)
+{
+    return s_usb_monitor_timer != RT_NULL &&
+           tracked_object_is_type(&s_usb_storage_status_label,
+                                  &lv_label_class) &&
+           tracked_object_is_type(&s_usb_storage_flash_label,
+                                  &lv_label_class) &&
+           tracked_object_is_type(&s_usb_storage_sd_label,
+                                  &lv_label_class) &&
+           tracked_object_is_type(&s_usb_storage_manage_button,
+                                  &lv_button_class);
+}
+bool ft_pages_test_usb_audio_properties_valid(void)
+{
+    size_t i;
+
+    if (s_usb_monitor_timer == RT_NULL ||
         s_usb_output_device_buttons[0] == RT_NULL ||
         s_usb_input_device_buttons[0] == RT_NULL ||
         s_usb_input_device_buttons[1] == RT_NULL ||
-        s_usb_stop_button == RT_NULL || s_usb_status_label == RT_NULL)
+        !tracked_object_is_type(&s_usb_audio_status_label, &lv_label_class))
         return false;
     for (i = 0U; i < FT_AUDIO_RATE_COUNT; i++)
         if (s_usb_output_rate_buttons[i] == RT_NULL ||
@@ -6827,17 +7160,9 @@ bool ft_pages_test_usb_state_valid(void)
     for (i = 0U; i < FT_AUDIO_CHANNEL_COUNT; i++)
         if (s_usb_output_channel_buttons[i] == RT_NULL ||
             s_usb_input_channel_buttons[i] == RT_NULL) return false;
-    ft_usb_get_status(&status);
-    return !lv_obj_has_state(s_usb_role_buttons[FT_USB_ROLE_DEVICE], LV_STATE_DISABLED) &&
-           lv_obj_has_state(s_usb_role_buttons[FT_USB_ROLE_HOST], LV_STATE_DISABLED) &&
-           lv_obj_has_state(s_usb_function_buttons[1], LV_STATE_DISABLED) ==
-               !status.audio_supported &&
-           lv_obj_has_state(s_usb_function_buttons[0], LV_STATE_DISABLED) ==
-               (!status.sd_present && !status.active) &&
-           lv_obj_has_state(s_usb_input_rate_buttons[0], LV_STATE_DISABLED) &&
+    return lv_obj_has_state(s_usb_input_rate_buttons[0], LV_STATE_DISABLED) &&
            lv_obj_has_state(s_usb_input_bits_buttons[0], LV_STATE_DISABLED) &&
-           lv_obj_has_state(s_usb_input_channel_buttons[1], LV_STATE_DISABLED) &&
-           lv_obj_has_state(s_usb_stop_button, LV_STATE_DISABLED) == !status.active;
+           lv_obj_has_state(s_usb_input_channel_buttons[1], LV_STATE_DISABLED);
 }
 lv_obj_t *ft_pages_test_get_storage_format_button(void)
 { return s_storage_format_button; }
@@ -7295,7 +7620,14 @@ bool ft_pages_test_transient_slots_clear(void)
         s_storage_confirm_cancel != RT_NULL ||
         s_storage_confirm_continue != RT_NULL ||
         s_storage_monitor_timer != RT_NULL ||
-        s_usb_stop_button != RT_NULL || s_usb_status_label != RT_NULL ||
+        s_usb_enable_switch != RT_NULL ||
+        s_usb_enable_state_label != RT_NULL ||
+        s_usb_status_label != RT_NULL ||
+        s_usb_storage_status_label != RT_NULL ||
+        s_usb_storage_flash_label != RT_NULL ||
+        s_usb_storage_sd_label != RT_NULL ||
+        s_usb_storage_manage_button != RT_NULL ||
+        s_usb_audio_status_label != RT_NULL ||
         s_usb_output_device_buttons[0] != RT_NULL ||
         s_usb_input_device_buttons[0] != RT_NULL ||
         s_usb_input_device_buttons[1] != RT_NULL ||
@@ -7359,7 +7691,11 @@ bool ft_pages_test_transient_slots_clear(void)
         if (s_language_buttons[i] != RT_NULL) return false;
     for (i = 0U; i < 2U; i++)
         if (s_usb_role_buttons[i] != RT_NULL ||
-            s_usb_function_buttons[i] != RT_NULL) return false;
+            s_usb_function_buttons[i] != RT_NULL ||
+            s_usb_function_radios[i] != RT_NULL ||
+            s_usb_function_status[i] != RT_NULL ||
+            s_usb_function_details[i] != RT_NULL ||
+            s_usb_function_property_buttons[i] != RT_NULL) return false;
     for (i = 0U; i < FT_AUDIO_RATE_COUNT; i++)
         if (s_usb_output_rate_buttons[i] != RT_NULL ||
             s_usb_input_rate_buttons[i] != RT_NULL) return false;

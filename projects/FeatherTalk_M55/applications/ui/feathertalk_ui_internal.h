@@ -10,6 +10,8 @@
 #include "feathertalk_ui_layout.h"
 #include "feathertalk_usb.h"
 
+/* Keep every routed page synchronized with UI_NAVIGATION_MAP_zh.md.
+ * tools/freather/check-ui-navigation-map.py enforces this during M55 builds. */
 typedef enum
 {
     FT_PAGE_HOME = 0,
@@ -31,6 +33,8 @@ typedef enum
     FT_PAGE_SETTINGS_PERSONALIZATION,
     FT_PAGE_SETTINGS_AUDIO_OUTPUT,
     FT_PAGE_SETTINGS_AUDIO_INPUT,
+    FT_PAGE_SETTINGS_USB_STORAGE,
+    FT_PAGE_SETTINGS_USB_AUDIO,
     FT_PAGE_COUNT
 } ft_page_id_t;
 
@@ -335,8 +339,12 @@ bool ft_pages_test_audio_output_properties_valid(void);
 bool ft_pages_test_audio_input_properties_valid(void);
 lv_obj_t *ft_pages_test_get_usb_role_button(ft_usb_role_t role);
 lv_obj_t *ft_pages_test_get_usb_function_button(ft_usb_function_t function);
-lv_obj_t *ft_pages_test_get_usb_stop_button(void);
+lv_obj_t *ft_pages_test_get_usb_function_properties_button(
+    ft_usb_function_t function);
+lv_obj_t *ft_pages_test_get_usb_enable_switch(void);
 bool ft_pages_test_usb_state_valid(void);
+bool ft_pages_test_usb_storage_properties_valid(void);
+bool ft_pages_test_usb_audio_properties_valid(void);
 lv_obj_t *ft_pages_test_get_storage_format_button(void);
 lv_obj_t *ft_pages_test_get_storage_browse_button(void);
 lv_obj_t *ft_pages_test_get_storage_device_button(size_t index);

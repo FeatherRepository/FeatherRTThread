@@ -39,6 +39,12 @@ The product UI now provides:
 - a runtime responsive-layout profile with compact, portrait, large-screen, and landscape breakpoints; and
 - a read-only `feather_ui_status` MSH diagnostic command.
 
+The complete route graph, overlay branches, page capabilities, hardware gates,
+state ownership, and benchmark-scene mapping are maintained in
+`UI_NAVIGATION_MAP_zh.md`. Every M55 build runs
+`tools/freather/check-ui-navigation-map.py` so a new routed page or visual test
+scene cannot be added without updating that map.
+
 Page and control dimensions must use the helpers in `feathertalk_ui_layout.h`.
 The layout profile, breakpoint formulas, supported geometries, and new-page
 rules are documented in `RESPONSIVE_LAYOUT_zh.md`.

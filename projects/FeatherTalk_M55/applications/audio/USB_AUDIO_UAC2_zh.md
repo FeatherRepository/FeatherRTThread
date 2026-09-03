@@ -67,7 +67,24 @@ UAC 能力刷新、Clock/alternate 双向协商和实际流格式一致，不伪
 
 ## 4. 使用与诊断
 
-设置页选择 `USB Audio (UAC2)` 即可启动。MSH 命令：
+设置页采用两层结构：
+
+1. “设置 > USB”用总开关控制整个 USB Device stack；关闭后执行
+   `ft_usb_set_function(FT_USB_FUNCTION_NONE)`，会真正 deinitialize 端点并停止枚举，
+   不是只隐藏 UI 状态；
+2. 角色区显示 Device/Host。当前硬件只能选择 Device，Host 因没有受控 5 V VBUS
+   source 而保持禁用；
+3. Device 功能区用单选项选择 Storage 或 USB Audio。USB 关闭时只改变待启动功能；
+   USB 已开启时选择另一项会停止旧 class、再启动新 class；
+4. 每个功能右侧的属性入口分别进入 MSC 双 LUN 属性页或 UAC2 输入/输出属性页，
+   主页面不再混放音频格式和存储介质细节。
+
+总开关和功能单选不是纯 UI 状态：开启、关闭和运行中换类都读取驱动返回值并刷新
+`ft_usb_status_t`。关闭后的可观测状态必须为 `function=none / active=0 / luns=0`；
+再次开启时使用此前选中的 Device 功能。Host 选项仅表达未来能力边界，当前不能被选中，
+也不会伪造 Host stack 或 VBUS 状态。
+
+MSH 命令仍可直接控制相同驱动状态：
 
 ```text
 feather_usb audio

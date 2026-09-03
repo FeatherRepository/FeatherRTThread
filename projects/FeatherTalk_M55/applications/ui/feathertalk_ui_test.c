@@ -466,12 +466,66 @@ static void run_settings_test(void)
     }
     else if (s_control_index == 12U)
     {
+        ft_usb_status_t usb_status;
+        lv_obj_t *usb_switch;
+
         (void)test_click(ft_pages_test_get_settings_result(5U),
                          "settings.open", "USB");
         test_record(ft_router_current_page() == FT_PAGE_SETTINGS_USB &&
                     ft_router_depth() == 3U &&
                     ft_pages_test_usb_state_valid(),
-                    "settings.usb", "device-only roles and media-gated functions");
+                    "settings.usb", "master switch, device-only role and function list");
+        ft_usb_get_status(&usb_status);
+        usb_switch = ft_pages_test_get_usb_enable_switch();
+        if (!usb_status.active && usb_status.audio_supported)
+        {
+            (void)test_click(ft_pages_test_get_usb_function_button(
+                                FT_USB_FUNCTION_AUDIO),
+                             "settings.usb.function", "select UAC2 while off");
+            lv_obj_add_state(usb_switch, LV_STATE_CHECKED);
+            (void)test_event(usb_switch, LV_EVENT_VALUE_CHANGED,
+                             "settings.usb.enable", "start selected UAC2");
+            ft_usb_get_status(&usb_status);
+            test_record(usb_status.active &&
+                        usb_status.function == FT_USB_FUNCTION_AUDIO,
+                        "settings.usb.enable.state", "UAC2 stack active");
+            lv_obj_remove_state(usb_switch, LV_STATE_CHECKED);
+            (void)test_event(usb_switch, LV_EVENT_VALUE_CHANGED,
+                             "settings.usb.disable", "stop USB stack");
+            ft_usb_get_status(&usb_status);
+            test_record(!usb_status.active &&
+                        usb_status.function == FT_USB_FUNCTION_NONE,
+                        "settings.usb.disable.state", "USB stack stopped");
+        }
+        else
+        {
+            test_record(ft_pages_test_usb_state_valid(),
+                        "settings.usb.switch.gate", "existing USB state preserved");
+        }
+        (void)test_click(ft_pages_test_get_usb_function_properties_button(
+                            FT_USB_FUNCTION_STORAGE),
+                         "settings.usb.storage.open", "storage properties");
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS_USB_STORAGE &&
+                    ft_router_depth() == 4U &&
+                    ft_pages_test_usb_storage_properties_valid(),
+                    "settings.usb.storage.route", "function -> storage properties");
+        (void)ft_router_back();
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS_USB &&
+                    ft_router_depth() == 3U &&
+                    ft_pages_test_usb_state_valid(),
+                    "settings.usb.storage.back", "properties -> function list");
+        (void)test_click(ft_pages_test_get_usb_function_properties_button(
+                            FT_USB_FUNCTION_AUDIO),
+                         "settings.usb.audio.open", "UAC2 properties");
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS_USB_AUDIO &&
+                    ft_router_depth() == 4U &&
+                    ft_pages_test_usb_audio_properties_valid(),
+                    "settings.usb.audio.route", "function -> UAC2 properties");
+        (void)ft_router_back();
+        test_record(ft_router_current_page() == FT_PAGE_SETTINGS_USB &&
+                    ft_router_depth() == 3U &&
+                    ft_pages_test_usb_state_valid(),
+                    "settings.usb.audio.back", "properties -> function list");
         (void)ft_router_back();
         test_record(ft_router_current_page() == FT_PAGE_SETTINGS &&
                     ft_router_depth() == 2U,

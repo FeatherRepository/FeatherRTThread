@@ -38,6 +38,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $toolchainBin 'arm-none-eabi-gcc.exe
 }
 
 if ($Project -eq 'FeatherTalk_M55') {
+    $navigationMapChecker = Join-Path $toolsRoot 'check-ui-navigation-map.py'
+    & $buildPython $navigationMapChecker
+    if ($LASTEXITCODE -ne 0) {
+        throw "UI navigation map check failed with exit code $LASTEXITCODE"
+    }
     $projectConfig = Get-Content -LiteralPath (Join-Path $projectPath '.config') -Raw
     $fontGeneratorName = if ($projectConfig -match '(?m)^CONFIG_FEATHERTALK_USING_UI_SHELL=y$') {
         'build-lvgl-vector-font.js'

@@ -44,6 +44,8 @@ SCENES = [
     (27, "alert", 0.8),
     (28, "settings-audio-output", 0.8),
     (29, "settings-audio-input", 0.8),
+    (30, "settings-usb-storage", 0.8),
+    (31, "settings-usb-audio", 0.8),
 ]
 
 COMPLETE_RE = re.compile(
