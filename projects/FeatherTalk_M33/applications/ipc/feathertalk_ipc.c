@@ -31,6 +31,74 @@ static volatile rt_uint32_t g_error_count = 0;
 static rt_uint8_t g_quick_last_control = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
 static rt_uint8_t g_quick_last_result = FEATHERTALK_QUICK_RESULT_NONE;
 
+/* A0 音频门铃邮箱: 生产者登记最新快照, IPC 线程合并发出 (纯通知, 可合并) */
+static volatile rt_bool_t   g_audio_db_pending = RT_FALSE;
+static volatile rt_uint32_t g_audio_db_wr = 0;
+static volatile rt_uint8_t  g_audio_db_flags = 0;
+
+void feathertalk_ipc_send_audio_db(rt_uint32_t wr_snapshot, rt_uint8_t flags)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    g_audio_db_wr = wr_snapshot;
+    g_audio_db_flags = flags;
+    g_audio_db_pending = RT_TRUE;
+    rt_hw_interrupt_enable(level);
+}
+
+static rt_bool_t feathertalk_ipc_send_audio_db_frame(rt_uint32_t wr_snapshot,
+                                                     rt_uint8_t flags)
+{
+    edge_rc_frame_t frame;
+    feathertalk_ipc_audio_db_t message;
+
+    if (g_ipc_tx == RT_NULL)
+    {
+        return RT_FALSE;
+    }
+
+    rt_memset(&frame, 0, sizeof(frame));
+    rt_memset(&message, 0, sizeof(message));
+    message.abi_version = FEATHERTALK_IPC_ABI_VERSION;
+    message.message_id = FEATHERTALK_IPC_MSG_AUDIO_DB;
+    message.sequence = ++g_sequence;
+    message.wr_snapshot = wr_snapshot;
+    message.flags = flags;
+    rt_memcpy(frame.channel, &message, sizeof(message));
+    frame.seq = message.sequence;
+    if (rt_device_write(g_ipc_tx, 0, &frame, 1) != 1)
+    {
+        g_error_count++;
+        return RT_FALSE;
+    }
+    g_tx_count++;
+    return RT_TRUE;
+}
+
+static void feathertalk_ipc_flush_audio_db(void)
+{
+    rt_base_t level;
+    rt_uint32_t wr;
+    rt_uint8_t flags;
+
+    if (!g_audio_db_pending)
+    {
+        return;
+    }
+    level = rt_hw_interrupt_disable();
+    wr = g_audio_db_wr;
+    flags = g_audio_db_flags;
+    rt_hw_interrupt_enable(level);
+    if (feathertalk_ipc_send_audio_db_frame(wr, flags) == RT_TRUE)
+    {
+        level = rt_hw_interrupt_disable();
+        if (g_audio_db_wr == wr)
+        {
+            g_audio_db_pending = RT_FALSE;   /* 期间没有更新快照才清 */
+        }
+        rt_hw_interrupt_enable(level);
+    }
+}
+
 static rt_bool_t feathertalk_ipc_send(feathertalk_ipc_message_id_t message_id,
                                      rt_uint32_t sequence)
 {
@@ -282,6 +350,7 @@ static void feathertalk_ipc_thread_entry(void *parameter)
 
         feathertalk_ipc_receive();
         feathertalk_ipc_flush_events();
+        feathertalk_ipc_flush_audio_db();
 
         if (g_peer_online && (now - g_last_rx_ms) > FEATHERTALK_PEER_TIMEOUT_MS)
         {

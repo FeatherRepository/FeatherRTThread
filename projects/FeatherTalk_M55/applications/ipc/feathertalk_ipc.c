@@ -187,6 +187,15 @@ static void feathertalk_ipc_thread_entry(void *parameter)
                 continue;
             }
 
+            if (message.message_id == FEATHERTALK_IPC_MSG_AUDIO_DB)
+            {
+                /* A0 音频门铃: 纯通知, 唤醒 audio_link consumer */
+                extern void feathertalk_audio_doorbell(void);
+                g_rx_count++;
+                feathertalk_audio_doorbell();
+                continue;
+            }
+
             if (message.message_id == FEATHERTALK_IPC_MSG_HELLO)
             {
                 response_id = FEATHERTALK_IPC_MSG_HELLO_ACK;

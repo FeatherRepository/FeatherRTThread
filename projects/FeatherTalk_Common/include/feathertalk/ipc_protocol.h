@@ -22,7 +22,8 @@ typedef enum
     FEATHERTALK_IPC_MSG_EVENT         = 6,
     FEATHERTALK_IPC_MSG_SYSTEM_STATUS = 7,
     FEATHERTALK_IPC_MSG_QUICK_STATUS  = 8,
-    FEATHERTALK_IPC_MSG_QUICK_COMMAND = 9
+    FEATHERTALK_IPC_MSG_QUICK_COMMAND = 9,
+    FEATHERTALK_IPC_MSG_AUDIO_DB      = 10
 } feathertalk_ipc_message_id_t;
 
 typedef enum
@@ -126,6 +127,18 @@ typedef struct
     uint8_t reserved[6];
 } feathertalk_ipc_quick_command_t;
 
+/* A0 音频门铃: 音频 ring (audio_link.h) 有新数据的纯通知。
+ * wr_snapshot 仅为观测信息, 接收方以共享控制块为准重读。 */
+typedef struct
+{
+    uint16_t abi_version;
+    uint16_t message_id;
+    uint32_t sequence;
+    uint32_t wr_snapshot;
+    uint8_t flags;          /* bit0: 格式代际变化 */
+    uint8_t reserved[3];
+} feathertalk_ipc_audio_db_t;
+
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(sizeof(feathertalk_ipc_message_t) == FEATHERTALK_IPC_WIRE_BYTES,
                "FeatherTalk IPC payload must fit the PSoC E84 IPC frame");
@@ -135,6 +148,8 @@ _Static_assert(sizeof(feathertalk_ipc_quick_status_t) == FEATHERTALK_IPC_WIRE_BY
                "FeatherTalk quick status must fit the PSoC E84 IPC frame");
 _Static_assert(sizeof(feathertalk_ipc_quick_command_t) == FEATHERTALK_IPC_WIRE_BYTES,
                "FeatherTalk quick command must fit the PSoC E84 IPC frame");
+_Static_assert(sizeof(feathertalk_ipc_audio_db_t) == FEATHERTALK_IPC_WIRE_BYTES,
+               "FeatherTalk audio doorbell must fit the PSoC E84 IPC frame");
 #endif
 
 #ifdef __cplusplus

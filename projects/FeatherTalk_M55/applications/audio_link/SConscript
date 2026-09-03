@@ -1,0 +1,10 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+src = Glob('*.c')
+path = [cwd]
+
+group = DefineGroup('FeatherTalk AudioLink', src, depend=['BSP_USING_IPC'], CPPPATH=path)
+
+Return('group')
