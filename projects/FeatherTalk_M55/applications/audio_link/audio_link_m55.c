@@ -121,14 +121,19 @@ static void ft_alink_thread_entry(void *parameter)
         {
             s_first_wake_tick = rt_tick_get();
         }
-        /* A0-2: 流格式代际变化 (M33 开始 SBC 流) -> 复位解码器与统计 */
+        /* A0-2/M4b: 流格式代际变化 -> fmt_rate 非 0 开流 (SBC 解码+sound0),
+         * fmt_rate 为 0 则流结束 (M33 侧停流/断连), 关 sound0 释放 */
         FT_ALINK_DCACHE_INVALID(FT_ALINK_BASE, 32);
         if (FT_ALINK->fmt_gen != s_last_fmt_gen)
         {
             s_last_fmt_gen = FT_ALINK->fmt_gen;
-            if (s_last_fmt_gen != 0U)
+            if ((s_last_fmt_gen != 0U) && (FT_ALINK->fmt_rate != 0U))
             {
                 ft_sbc_stream_begin();
+            }
+            else if (s_last_fmt_gen != 0U)
+            {
+                ft_sbc_stream_end();
             }
         }
         ft_alink_consume();

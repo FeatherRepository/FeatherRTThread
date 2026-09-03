@@ -44,6 +44,9 @@
 #include "classic/sdp_server.h"
 #include "classic/btstack_link_key_db_memory.h"
 
+/* M4b: A2DP Sink + AVRCP (bt_a2dp_sink.c) */
+extern int bt_a2dp_sink_setup(void);
+
 /* FT Data CCCD 使能值 (Bluetooth 规范) */
 #define FT_GATT_CCCD_NOTIFICATION   0x0001U
 
@@ -239,7 +242,10 @@ static void bt_adv_set_data(void)
 {
     uint8_t adv[31];
     uint8_t pos = 0;
-    adv[pos++] = 2;  adv[pos++] = 0x01;  adv[pos++] = 0x06;   /* flags */
+    /* M4b: 双模音箱 flags 必须是 0x02 (LE 可发现 + 支持经典蓝牙)。
+     * 原来写 0x06 (含 "BR/EDR Not Supported" bit) 会让 Windows 把我们当纯 BLE
+     * 设备配对, 从不做经典 SDP 服务发现 -> 建不出 A2DP 音频端点 (实测)。 */
+    adv[pos++] = 2;  adv[pos++] = 0x01;  adv[pos++] = 0x02;   /* flags: LE general + BR/EDR supported */
     adv[pos++] = 12;                                          /* len(1 type + 11 chars) */
     adv[pos++] = 0x09;                                        /* complete name */
     memcpy(&adv[pos], "FeatherTalk", 11);
@@ -599,6 +605,10 @@ static void bt_loop_thread_entry(void *param)
     gap_set_default_link_policy_settings(LM_LINK_POLICY_ENABLE_ROLE_SWITCH |
                                          LM_LINK_POLICY_ENABLE_SNIFF_MODE);
     gap_set_allow_role_switch(true);
+
+    /* M4b: A2DP Sink + AVRCP (SDP 记录/流端点/handler 注册, 纯静态登记,
+     * 须在 hci_power_on 前完成) */
+    bt_a2dp_sink_setup();
 
     feathertalk_ipc_send_event(10);
     s_hci_event_handler.callback = &packet_handler;

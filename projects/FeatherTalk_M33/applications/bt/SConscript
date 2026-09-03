@@ -44,7 +44,8 @@ if not os.path.isfile(firmware_source):
 src = [os.path.join(bt_root, f) for f in
        ('bt_main.c', 'bt_hcd_download.c',
         'hal_uart_dma_rtthread.c', 'hal_cpu_rtthread.c', 'hal_time_ms_rtthread.c',
-        'sm_stubs_m2.c')]
+        'sm_stubs_m2.c',
+        'bt_a2dp_sink.c')]    # M4b: A2DP sink + AVRCP + 媒体包 -> 跨核 ring
 src += [os.path.join(btstack_root, 'src', f) for f in
         ('hci.c', 'hci_transport_h4.c', 'hci_cmd.c', 'hci_dump.c',
          'btstack_linked_list.c', 'btstack_memory.c', 'btstack_memory_pool.c',
@@ -63,6 +64,10 @@ src += [os.path.join(btstack_root, 'src', f) for f in
          'classic/avrcp.c', 'classic/avrcp_target.c', 'classic/avrcp_controller.c',
          'classic/btstack_sbc_bluedroid.c', 'classic/btstack_sbc_encoder_bluedroid.c',
          'classic/btstack_sbc_plc.c',
+         # M4b: a2dp_sink_init 实链后 avdtp.c 拉进来的依赖 (initiator FSM +
+         # SDP 客户端查询); device_id_server 提供 PnP SDP 记录
+         'classic/avdtp_initiator.c', 'classic/sdp_client.c',
+         'classic/device_id_server.c',
          'btstack_tlv.c', 'btstack_tlv_none.c')]
 # A0-4: bluedroid SBC 编码器底层实现 (A2DP 源方向的编码路径)
 src += [os.path.join(btstack_root, '3rd-party', 'bluedroid', 'encoder', 'srce', f) for f in

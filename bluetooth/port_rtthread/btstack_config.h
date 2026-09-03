@@ -31,11 +31,19 @@
 #define MAX_NR_AVDTP_STREAM_ENDPOINTS 2
 #define MAX_NR_AVDTP_CONNECTIONS 1
 #define MAX_NR_AVRCP_CONNECTIONS 1
+/* M4b: SDP 动态服务记录池 (sdp_register_service 走该池; 为 0 时注册全部
+ * 静默失败 -> Windows 枚举不到 A2DP Sink, 实测根因) */
+#define MAX_NR_SERVICE_RECORD_ITEMS 8
 
 /* logging off for P0 skeleton (avoids hci_dump dependency) */
 #define ENABLE_PRINTF_HEXDUMP
 #define ENABLE_LOG_INFO
 #define ENABLE_LOG_ERROR
 #define ENABLE_LOG_DEBUG
+/* M4b: ACL 媒体包超过 64B 只打一行摘要, 否则 A2DP 流期间全量 hexdump
+ * 会刷爆 115200 控制台并拖慢 btloop (信令包 <64B 仍全量可见) */
+#define HCI_DUMP_STDOUT_MAX_SIZE_ACL 64
+/* M4b: bt_a2dp sdp 诊断命令的 de_dump_data_element 依赖它 (printf 输出) */
+#define ENABLE_SDP_DES_DUMP
 
 #endif

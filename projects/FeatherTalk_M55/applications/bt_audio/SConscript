@@ -1,11 +1,16 @@
 import os
 from building import *
 
-# A0-2: SBC 解码链 (M55) —— btstack bluedroid 适配层 + bluedroid decoder 底层。
+# A0-2/M4b: SBC 解码链 (M55) —— btstack bluedroid 适配层 + bluedroid decoder 底层。
 # M55 工程没有 btstack_config.h: 本目录提供最小配置, CPPPATH 置最前。
+#
+# 参考源拷到项目 build 目录再编译 (btfw.c 同款手法): btstack 源树同时被
+# M33 工程 (softfp) 以内联 .o 方式构建, 直接引用绝对路径会让 M55 (hardfp)
+# 链到 ABI 不符的陈旧 .o (实测 ld 报 "uses VFP register arguments")。
 cwd = GetCurrentDir()
 repo_root = os.path.normpath(os.path.join(cwd, '..', '..', '..', '..'))
 btstack_root = os.path.join(repo_root, 'bluetooth', 'reference', 'btstack')
+build_dir = os.path.normpath(os.path.join(cwd, '..', '..', 'build', 'bt_audio'))
 
 bt_src = [os.path.join(btstack_root, 'src', f) for f in
           ('classic/btstack_sbc_decoder_bluedroid.c',
@@ -18,7 +23,17 @@ bt_src += [os.path.join(btstack_root, '3rd-party', 'bluedroid', 'decoder', 'srce
             'framing-sbc.c', 'framing.c', 'oi_codec_version.c',
             'synthesis-8-generated.c', 'synthesis-dct8.c', 'synthesis-sbc.c')]
 
-src = Glob('*.c') + bt_src
+# 文件名在这些源里均唯一, 可平铺到同一目录;
+# decoder-sbc.c 相对包含 readsamplesjoint.inc, 一并拷入 (不编译)
+copied = []
+for f in bt_src + [os.path.join(btstack_root, '3rd-party', 'bluedroid',
+                                'decoder', 'srce', 'readsamplesjoint.inc')]:
+    dst = os.path.join(build_dir, os.path.basename(f))
+    Command(dst, f, [Mkdir(build_dir), Copy('$TARGET', '$SOURCE')])
+    if f.endswith('.c'):
+        copied.append(File(dst))
+
+src = Glob('*.c') + copied
 
 path = [cwd,                            # 最小 btstack_config.h 在最前
         btstack_root + '/src',

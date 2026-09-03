@@ -272,6 +272,23 @@ static int feather_audio_format(int argc, char **argv)
     return result;
 }
 MSH_CMD_EXPORT(feather_audio_format, Configure sound0 sample rate depth and channels.);
+
+static int feather_audio_volume(int argc, char **argv)
+{
+    ft_audio_status_t st;
+
+    if (argc == 2)
+    {
+        int v = atoi(argv[1]);
+        if (v < 0) v = 0;
+        if (v > 100) v = 100;
+        ft_audio_set_output_volume((uint8_t)v);
+    }
+    ft_audio_get_status(&st);
+    rt_kprintf("sound0 volume=%u\n", st.output_volume);
+    return 0;
+}
+MSH_CMD_EXPORT(feather_audio_volume, Set or show sound0 output volume 0-100.);
 #endif
 
 #else /* RT_USING_AUDIO */

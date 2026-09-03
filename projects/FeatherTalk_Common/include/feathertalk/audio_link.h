@@ -32,7 +32,7 @@ typedef struct
     volatile uint32_t fmt_ch;           /* 声道数 */
     volatile uint32_t fmt_gen;          /* 格式代际: 变化即 +1 (UAC 同款语义) */
     volatile uint32_t flags;            /* 预留 */
-    volatile uint32_t reserved0;
+    volatile uint32_t volume_percent;   /* M4b: AVRCP 绝对音量 0-100, 0xFF=不变 (M33 写, M55 读; 原名 reserved0) */
     uint8_t  _pad0[32 - 8 * 4];
 
     volatile uint32_t wr;               /* 写偏移 (字节, 单调不回绕; 取模用) */
@@ -70,6 +70,7 @@ static inline void ft_alink_init(void)
     ft_audio_link_t *r = FT_ALINK;
     memset((void *)r, 0, sizeof(*r));
     r->capacity = FT_ALINK_RING_BYTES;
+    r->volume_percent = 0xFFU;   /* 0xFF=无变化哨兵: 0 会被 M55 当"音量 0"应用导致静音 */
     __DMB();
     r->magic = FT_ALINK_MAGIC;
     FT_ALINK_DCACHE_CLEAN(FT_ALINK_BASE, 128);
