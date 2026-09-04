@@ -32,5 +32,7 @@ src = Glob('*.c') + copied
 CPPPATH = [build_dir]
 
 group = DefineGroup('le_audio', src, depend=[''], CPPPATH=CPPPATH)
+# 注: -O3 实测在 GCC 13.3 auto-vectorize 下产生 "co-processor offset out of
+# range" 汇编错误, Source 端若需补 2.7% 算力缺口, 试 -O3 -fno-tree-vectorize
 
 Return('group')
