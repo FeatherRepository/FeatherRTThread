@@ -78,7 +78,9 @@ typedef enum
     FEATHERTALK_QUICK_RESULT_OK          = 1,
     FEATHERTALK_QUICK_RESULT_UNAVAILABLE = 2,
     FEATHERTALK_QUICK_RESULT_INVALID     = 3,
-    FEATHERTALK_QUICK_RESULT_FAILED      = 4
+    FEATHERTALK_QUICK_RESULT_FAILED      = 4,
+    /* Compatible extension of the result byte; packet layout unchanged. */
+    FEATHERTALK_QUICK_RESULT_PENDING     = 5
 } feathertalk_quick_result_t;
 
 typedef struct

@@ -71,6 +71,8 @@ CPPDEFINES = [
 
 
 group = DefineGroup("Drivers", src, depend=[""], CPPPATH=path, CPPDEFINES=CPPDEFINES)
+group += SConscript(os.path.join(cwd, '..', '..', 'FeatherTalk_Common', 'radio', 'SConscript'),
+                    variant_dir=os.path.join(cwd, '..', 'build', 'radio'), duplicate=0)
 
 list = os.listdir(cwd)
 for item in list:

@@ -10,11 +10,9 @@
  */
 
 #include "board.h"
+#include <feathertalk/radio_manager.h>
 #define ES8388_CTRL             GET_PIN(16, 2)
 #define SPEAKER_OE_CTRL         GET_PIN(21, 6)
-#define WIFI_OE_CTRL            GET_PIN(16, 3)
-#define WIFI_WL_REG_OE_CTRL     GET_PIN(11, 6)
-#define CTRL                    GET_PIN(7, 2)
 
 void cy_bsp_all_init(void)
 {
@@ -28,6 +26,7 @@ void cy_bsp_all_init(void)
     {
         CY_ASSERT(0);
     }
+    ft_radio_attach(FT_RADIO_CORE_M55);
 }
 
 void _start(void)
@@ -40,21 +39,14 @@ void _start(void)
 
 void poweroff(void)
 {
-    rt_pin_mode(WIFI_OE_CTRL, PIN_MODE_OUTPUT);
-    rt_pin_write(WIFI_OE_CTRL, PIN_LOW);
-
-    rt_pin_mode(WIFI_WL_REG_OE_CTRL, PIN_MODE_OUTPUT);
-    rt_pin_write(WIFI_WL_REG_OE_CTRL, PIN_LOW);
-
     rt_pin_mode(ES8388_CTRL, PIN_MODE_OUTPUT);
     rt_pin_write(ES8388_CTRL, PIN_LOW);
 
     rt_pin_mode(SPEAKER_OE_CTRL, PIN_MODE_OUTPUT);
     rt_pin_write(SPEAKER_OE_CTRL, PIN_LOW);
 
-    rt_pin_mode(CTRL, PIN_MODE_OUTPUT);
-    rt_pin_write(CTRL, PIN_LOW);
-
+    /* Disable audio loads before removing the shared baseboard supply. */
+    ft_radio_system_poweroff();
     Cy_SysClk_PllDisable(SRSS_DPLL_LP_0_PATH_NUM);
     Cy_SysPm_SystemEnterHibernate();
 }
@@ -66,9 +58,6 @@ void poweroff(void)
 //Mos管控制
 #define ES8388_CTRL                 GET_PIN(16, 2)  //ES8388 电源 Enable引脚
 #define SPEAKER_OE_CTRL             GET_PIN(21, 6)  //功放 Enable引脚
-#define WIFI_OE_CTRL                GET_PIN(16, 3)  //WIFI Enable引脚
-#define WIFI_WL_REG_OE_CTRL         GET_PIN(11, 6)  //WiFi寄存器开关
-#define CTRL                        GET_PIN(7, 2)   //底板 3V3 DCDC电源控制
 #define LCD_BL_GPIO_NUM             GET_PIN(15, 7)  //LCD 背光电源开关
 #define LCD_DISP_GPIO_NUM           GET_PIN(15, 6)  //LCD IC电源开关
 #define BL_PWM_DISP_CTRL            GET_PIN(20, 6)  //LCD PWM亮度调节
@@ -79,13 +68,11 @@ void poweroff(void)
 #define LCD_DISP_GPIO_NUM           GET_PIN(15, 6)
 #define BL_PWM_DISP_CTRL            GET_PIN(20, 6)
 #define LCD_POWER_STABLE_DELAY_MS   200U
-#define BOARD_POWER_OFF_DELAY_MS    50U
-#define BOARD_POWER_STABLE_DELAY_MS 200U
+#define LCD_CODEC_OFF_DELAY_MS      50U
 int en_gpio(void)
 {
-    rt_pin_mode(CTRL, PIN_MODE_OUTPUT);
-    rt_pin_mode(WIFI_OE_CTRL, PIN_MODE_OUTPUT);
-    rt_pin_mode(WIFI_WL_REG_OE_CTRL, PIN_MODE_OUTPUT);
+    /* Shared rails and radio reset lines belong to the resource manager.
+     * This sequence is now strictly LCD/codec/amplifier initialization. */
     rt_pin_mode(ES8388_CTRL, PIN_MODE_OUTPUT);
     rt_pin_mode(SPEAKER_OE_CTRL, PIN_MODE_OUTPUT);
 
@@ -98,16 +85,7 @@ int en_gpio(void)
     rt_pin_write(BL_PWM_DISP_CTRL, PIN_LOW);
     rt_pin_write(SPEAKER_OE_CTRL, PIN_LOW);
     rt_pin_write(ES8388_CTRL, PIN_LOW);
-    rt_pin_write(WIFI_WL_REG_OE_CTRL, PIN_LOW);
-    rt_pin_write(WIFI_OE_CTRL, PIN_LOW);
-    rt_pin_write(CTRL, PIN_LOW);
-    Cy_SysLib_Delay(BOARD_POWER_OFF_DELAY_MS);
-
-    rt_pin_write(CTRL, PIN_HIGH);
-    Cy_SysLib_Delay(BOARD_POWER_STABLE_DELAY_MS);
-
-    rt_pin_write(WIFI_OE_CTRL, PIN_HIGH);
-    rt_pin_write(WIFI_WL_REG_OE_CTRL, PIN_HIGH);
+    Cy_SysLib_Delay(LCD_CODEC_OFF_DELAY_MS);
 #ifdef BSP_USING_AUDIO
     rt_pin_write(ES8388_CTRL, PIN_HIGH);
 #else

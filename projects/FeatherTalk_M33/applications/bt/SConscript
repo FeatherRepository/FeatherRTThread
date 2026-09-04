@@ -42,7 +42,7 @@ if not os.path.isfile(firmware_source):
 # 显式源清单: btfw_data.c (旧 BTANT 变体) 不再参与构建,
 # 统一使用子模块里板选的 wlbga 固件 (与 AIROC 参考同一份)
 src = [os.path.join(bt_root, f) for f in
-       ('bt_main.c', 'bt_hcd_download.c',
+       ('bt_main.c', 'bt_hcd_download.c', 'bt_uart_block_rtthread.c',
         'hal_uart_dma_rtthread.c', 'hal_cpu_rtthread.c', 'hal_time_ms_rtthread.c',
         'sm_stubs_m2.c',
         'bt_a2dp_sink.c')]    # M4b: A2DP sink + AVRCP + 媒体包 -> 跨核 ring
@@ -77,9 +77,7 @@ src += [os.path.join(btstack_root, '3rd-party', 'bluedroid', 'encoder', 'srce', 
 src += [os.path.join(btstack_root, 'platform', 'embedded',
          'btstack_run_loop_embedded.c'),
         os.path.join(btstack_root, 'platform', 'embedded',
-         'hci_dump_embedded_stdout.c'),
-        os.path.join(btstack_root, 'platform', 'embedded',
-         'btstack_uart_block_embedded.c')]
+         'hci_dump_embedded_stdout.c')]
 
 # 固件数组拷到构建目录编译, 避免在子模块 (仓库外内容) 旁边写 .o
 Command(

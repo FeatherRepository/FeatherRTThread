@@ -63,6 +63,7 @@ MEMORY
     m33_data_C : ORIGIN = 0x040BD000, LENGTH = 0x00040000
     m33_allocatable_shared : ORIGIN = 0x240FE000, LENGTH = 0x00001000
     m33_allocatable_shared_C : ORIGIN = 0x040FE000, LENGTH = 0x00001000
+    feathertalk_radio_shared : ORIGIN = 0x240FFF40, LENGTH = 0x80
 }
 
 REGION_ALIAS("m33_nvm_sel", m33_nvm_C)
@@ -361,6 +362,13 @@ SECTIONS
 
         . = ALIGN(4);
     } > m33_allocatable_shared
+
+    .feathertalk_radio_shared(NOLOAD) : ALIGN(32)
+    {
+        . += LENGTH(feathertalk_radio_shared);
+    } > feathertalk_radio_shared
+    ASSERT(ADDR(.feathertalk_radio_shared) == 0x240FFF40,
+           "Radio manager shared ABI address changed")
 
     /* A section for shared SOC memory */
     .cy_shared_socmem (NOLOAD) : ALIGN(4)

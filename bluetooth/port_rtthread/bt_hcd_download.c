@@ -26,6 +26,7 @@ extern int  bt_uart_raw_open(uint32_t baud);
 extern int  bt_uart_raw_write(const uint8_t *buf, uint16_t len);
 extern int  bt_uart_raw_read(uint8_t *buf, uint16_t len, uint32_t timeout_ms);
 extern void feathertalk_ipc_send_event(rt_uint32_t code);
+extern int bt_service_start_cancelled(void);
 
 #define HCD_CMD_WRITE_RAM        0xFC4C
 #define HCD_CMD_LAUNCH_RAM       0xFC4E
@@ -45,6 +46,7 @@ static int wait_command_complete(uint16_t opcode)
 
     while ((rt_tick_get() - start) < rt_tick_from_millisecond(HCD_CMD_TIMEOUT_MS))
     {
+        if (bt_service_start_cancelled()) return -RT_EBUSY;
         int n = bt_uart_raw_read(&hdr, 1, 20);
         if (n <= 0) continue;
         if (hdr != 0x04)
@@ -86,10 +88,11 @@ static int send_hci_command(uint16_t opcode, uint8_t plen, const uint8_t *params
                        (uint8_t)(opcode & 0xFF),
                        (uint8_t)(opcode >> 8),
                        plen };
-    bt_uart_raw_write(hdr, 4);
+    if (bt_service_start_cancelled()) return -RT_EBUSY;
+    if (bt_uart_raw_write(hdr, 4) != 4) return -RT_ERROR;
     if (plen)
     {
-        bt_uart_raw_write(params, plen);
+        if (bt_uart_raw_write(params, plen) != plen) return -RT_ERROR;
     }
     return wait_command_complete(opcode);
 }
@@ -107,6 +110,7 @@ int bt_hcd_download_run(void)
     uint32_t count = 0;
     while (off + 3 <= (uint32_t)brcm_patch_ram_length)
     {
+        if (bt_service_start_cancelled()) return -RT_EBUSY;
         uint16_t cmd = brcm_patchram_buf[off] | (brcm_patchram_buf[off + 1] << 8);
         uint8_t  plen = brcm_patchram_buf[off + 2];
         int status;

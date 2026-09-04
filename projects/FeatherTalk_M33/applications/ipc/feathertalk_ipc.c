@@ -263,6 +263,16 @@ static rt_bool_t feathertalk_ipc_send_quick_status(rt_uint32_t sequence)
     message.rotation = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
     message.last_control = g_quick_last_control;
     message.result = g_quick_last_result;
+#ifdef FEATHERTALK_IPC_HAS_BT
+    if (bt_service_busy()) {
+        message.last_control = FEATHERTALK_QUICK_BLUETOOTH;
+        message.result = FEATHERTALK_QUICK_RESULT_PENDING;
+    } else if (message.last_control == FEATHERTALK_QUICK_BLUETOOTH &&
+               (message.result == FEATHERTALK_QUICK_RESULT_PENDING ||
+                message.result == FEATHERTALK_QUICK_RESULT_OK)) {
+        message.result = bt_service_error() ? FEATHERTALK_QUICK_RESULT_FAILED : FEATHERTALK_QUICK_RESULT_OK;
+    }
+#endif
     rt_memcpy(frame.channel, &message, sizeof(message));
     frame.seq = sequence;
     if (rt_device_write(g_ipc_tx, 0, &frame, 1) != 1)
@@ -298,12 +308,11 @@ static void feathertalk_ipc_receive(void)
 #ifdef FEATHERTALK_IPC_HAS_BT
             if (command.control == FEATHERTALK_QUICK_BLUETOOTH)
             {
-                g_quick_last_result =
-                    (command.value != 0U)
-                    ? ((bt_service_start() == RT_EOK)
-                       ? FEATHERTALK_QUICK_RESULT_OK
-                       : FEATHERTALK_QUICK_RESULT_FAILED)
-                    : FEATHERTALK_QUICK_RESULT_UNAVAILABLE;  /* no stop yet */
+                int rc = bt_service_set_enabled(command.value);
+                g_quick_last_result = rc == -RT_ENOSYS ? FEATHERTALK_QUICK_RESULT_UNAVAILABLE :
+                    rc == -RT_EINVAL ? FEATHERTALK_QUICK_RESULT_INVALID :
+                    rc != RT_EOK ? FEATHERTALK_QUICK_RESULT_FAILED :
+                    bt_service_busy() ? FEATHERTALK_QUICK_RESULT_PENDING : FEATHERTALK_QUICK_RESULT_OK;
             }
             else
 #endif

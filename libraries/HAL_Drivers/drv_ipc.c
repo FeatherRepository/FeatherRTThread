@@ -163,25 +163,6 @@ static cy_stc_ipc_pipe_config_t g_edge_ipc1_config = {
     .userPipeIsrHandler = &edge_ipc1_pipe_isr
 };
 
-static rt_bool_t edge_ipc_lock_sema(struct edge_ipc_device* dev)
-{
-    uint32_t retry = 0;
-
-    while (retry++ < EDGE_IPC_SEMA_RETRY_MAX) {
-        if (Cy_IPC_Sema_Set(IPC_DEMO_SEMA_NUM, false) == CY_IPC_SEMA_SUCCESS) {
-            return RT_TRUE;
-        }
-    }
-
-    dev->stats_sema_fail++;
-    return RT_FALSE;
-}
-
-static void edge_ipc_unlock_sema(void)
-{
-    (void)Cy_IPC_Sema_Clear(IPC_DEMO_SEMA_NUM, false);
-}
-
 static void edge_ipc_rx_callback_common(struct edge_ipc_device* dev, uint32_t* msg_data)
 {
     edge_rc_frame_t* rx = (edge_rc_frame_t*)msg_data;
@@ -190,6 +171,11 @@ static void edge_ipc_rx_callback_common(struct edge_ipc_device* dev, uint32_t* m
         dev->stats_rx_err++;
         return;
     }
+#if CY_IPC_DRV_CACHE_PRESENT
+    /* PDL invalidates the pointer-sized header, not this complete frame.
+     * Frames can cross a cache-line boundary; consume the entire payload. */
+    SCB_InvalidateDCache_by_Addr((uint32_t *)rx, (int32_t)sizeof(*rx));
+#endif
 
     if (rx->client_id != dev->local_client_id
         || rx->magic != RC_MAGIC_WORD
@@ -274,16 +260,21 @@ static cy_ipc_pipe_relcallback_ptr_t edge_ipc_get_release_callback(struct edge_i
 static cy_en_ipc_pipe_status_t edge_ipc_send_once(struct edge_ipc_device* dev, edge_rc_frame_t* tx)
 {
     cy_en_ipc_pipe_status_t status;
-
-    if (!edge_ipc_lock_sema(dev)) {
-        return CY_IPC_PIPE_ERROR_SEND_BUSY;
-    }
-
+    /* PDL atomically acquires the destination IPC HW channel. The source
+     * endpoint busy flag/callback are local to this core and need only a
+     * short local critical section (including the release ISR).
+     * Do NOT add a global software semaphore: Clear() can itself return
+     * LOCKED, and the old ignored failure stranded semaphore 48 forever
+     * under dual-core contention, stopping BT status/audio IPC traffic. */
+    rt_base_t level = rt_hw_interrupt_disable();
+#if CY_IPC_DRV_CACHE_PRESENT
+    SCB_CleanDCache_by_Addr((uint32_t *)tx, (int32_t)sizeof(*tx));
+#endif
     status = Cy_IPC_Pipe_SendMessage(dev->peer_ep_addr,
                                      dev->local_ep_addr,
                                      (void*)tx,
                                      edge_ipc_get_release_callback(dev));
-    edge_ipc_unlock_sema();
+    rt_hw_interrupt_enable(level);
 
     return status;
 }

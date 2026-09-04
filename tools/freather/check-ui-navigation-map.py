@@ -22,8 +22,8 @@ DOCUMENT = REPO / "projects/FeatherTalk_M55/applications/ui/UI_NAVIGATION_MAP_zh
 
 def fail(messages: list[str]) -> int:
     for message in messages:
-        print(f"UI navigation map error: {message}", file=sys.stderr)
-    print(f"Update {DOCUMENT.relative_to(REPO)} with the UI change.", file=sys.stderr)
+        print(f"UI contract error: {message}", file=sys.stderr)
+    print(f"Check the UI implementation and {DOCUMENT.relative_to(REPO)}.", file=sys.stderr)
     return 1
 
 
@@ -36,6 +36,21 @@ def main() -> int:
         document = DOCUMENT.read_text(encoding="utf-8")
     except OSError as exc:
         return fail([str(exc)])
+
+    # New product pages must inherit the common keyboard default, not LVGL's
+    # parent-relative 50% height or another page-local flex-grow workaround.
+    keyboard_factory = PAGES.parent / "feathertalk_ui_keyboard.c"
+    raw_calls = 0
+    for source in PAGES.parent.parent.rglob("*"):
+        if source.suffix not in (".c", ".h"):
+            continue
+        code = re.sub(r"/\*.*?\*/|//[^\n]*", "", source.read_text(encoding="utf-8"), flags=re.DOTALL)
+        count = len(re.findall(r"\blv_keyboard_create\s*\(", code))
+        raw_calls += count
+        if count and source != keyboard_factory:
+            errors.append(f"{source.relative_to(REPO)} must use ft_ui_keyboard_create()")
+    if raw_calls != 1:
+        errors.append("expected one raw LVGL keyboard constructor in the shared keyboard factory")
 
     enum = re.search(r"typedef\s+enum\s*\{(?P<body>.*?)\}\s*ft_page_id_t\s*;",
                      header, re.DOTALL)
@@ -89,7 +104,7 @@ def main() -> int:
     if errors:
         return fail(errors)
     print(f"UI navigation map is current: {len(page_ids)} pages, "
-          f"{len(scene_ids)} benchmark scenes.")
+          f"{len(scene_ids)} benchmark scenes; shared keyboard factory enforced.")
     return 0
 
 

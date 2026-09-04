@@ -43,6 +43,7 @@ if rtconfig.PLATFORM in ['iccarm']:
 
 Export('RTT_ROOT')
 Export('rtconfig')
+Export('env')
 
 SDK_ROOT = os.path.abspath('./')
 if os.path.exists(SDK_ROOT + '/libraries/components'):

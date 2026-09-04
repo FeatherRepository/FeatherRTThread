@@ -33,13 +33,17 @@ path += [whd_src_path + '/src/bus_protocols']
 path += [whd_src_path + '/resources/resource_imp']
 
 # Add wifi host driver porting source and header files
+path += [cwd + '/porting/inc']
 src += Glob('porting/src/bsp/*.c')
 src += Glob('porting/src/wlan/*.c')
 src += Glob('porting/src/resources/*.c')
 
 if GetDepend(['WHD_RESOURCES_IN_MEMORY']):
     if GetDepend(['WHD_USING_CHIP_CYW55500']):
-        resources_dir = os.path.abspath(os.path.join(cwd, '..', '..', '..', 'resources'))
+        # The generated resource object is authoritative. Do not also compile
+        # the legacy weak .incbin object with project-relative paths/sizes.
+        src = [item for item in src if os.path.basename(str(item)) != 'whd_project_resources.c']
+        resources_dir = os.path.abspath(os.path.join(os.path.realpath(cwd), '..', '..', '..', 'resources'))
         firmware_file = os.path.join(resources_dir, '55500A1.trxcse')
         clm_file = os.path.join(resources_dir, '55500A1.clm_blob')
         nvram_file = os.path.join(resources_dir, 'cyw55513modpse84som_rev3.txt')

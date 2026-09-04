@@ -46,7 +46,9 @@ try {
         $dstRow = $y * $bits.Stride
         for ($x = 0; $x -lt $Width; $x++) {
             $src = $srcRow + $x * 2
-            $value = $raw[$src] -bor ($raw[$src + 1] -shl 8)
+            # Promote before shifting: a Byte left operand truncates the high
+            # byte in PowerShell and falsely makes RGB565 captures look blue.
+            $value = [int]$raw[$src] -bor ([int]$raw[$src + 1] -shl 8)
             $dst = $dstRow + $x * 3
             $pixels[$dst] = [byte]((($value -band 0x1f) * 255 + 15) / 31)
             $pixels[$dst + 1] = [byte](((($value -shr 5) -band 0x3f) * 255 + 31) / 63)

@@ -35,6 +35,17 @@ source "$RTT_DIR/../libraries/components/CherryUSB-1.6.0/Kconfig.rtt"
 
 menu "FeatherTalk Product"
 
+config FEATHERTALK_USING_WIFI
+    bool "Enable FeatherTalk asynchronous Wi-Fi service"
+    select RT_USING_WIFI_HOST_DRIVER
+    select RT_USING_LWIP
+    select BSP_USING_FREERTOS
+    default y
+    help
+        Use the SDK CYW55500 WHD port on SDIO0. Select embedded resources,
+        never the demo FAL partitions which overlap the product Flash disk.
+
+
 config FEATHERTALK_USING_GPU_UI
     bool "Enable FeatherUI GPU-native shell"
     depends on BSP_USING_LCD

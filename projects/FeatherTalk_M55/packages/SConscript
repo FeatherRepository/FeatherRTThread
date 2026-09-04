@@ -9,4 +9,13 @@ for item in list:
     if os.path.isfile(os.path.join(cwd, item, 'SConscript')):
         objs = objs + SConscript(os.path.join(item, 'SConscript'))
 
+# Reuse the SDK's already-vendored package sources (no out-of-repository input).
+if GetDepend('BSP_USING_FREERTOS'):
+    demo_packages = os.path.normpath(os.path.join(cwd, '..', '..', 'Edgi_Talk_M55_WIFI', 'packages'))
+    objs += SConscript(os.path.join(demo_packages, 'FreeRTOS_Wrapper-latest', 'SConscript'),
+                       variant_dir='../build/wifi-packages/FreeRTOS_Wrapper', duplicate=0)
+    if GetDepend('PKG_USING_NETUTILS'):
+        objs += SConscript(os.path.join(demo_packages, 'netutils-latest', 'SConscript'),
+                           variant_dir='../build/wifi-packages/netutils', duplicate=0)
+
 Return('objs')

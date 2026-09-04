@@ -38,6 +38,25 @@ static volatile rt_bool_t  s_initialized;
 static volatile rt_bool_t  s_rx_irq_on;
 static uint32_t            s_cur_baud;
 
+/* Owner-thread only: no ISR may reference H4 buffers after return. Also used
+ * after a failed HCD attempt, before another raw download starts. */
+void bt_uart_shutdown(void)
+{
+    NVIC_DisableIRQ(CYBSP_BT_UART_IRQ);
+    if (s_initialized) {
+        mtb_hal_uart_enable_event(&s_obj, MTB_HAL_UART_IRQ_RX_DONE, false);
+        (void)mtb_hal_uart_read_abort(&s_obj);
+    }
+    s_rx_irq_on = RT_FALSE;
+    s_block_received = RT_NULL;
+    s_block_sent = RT_NULL;
+    Cy_SCB_UART_Disable(CYBSP_BT_UART_HW, &s_uart_context);
+    Cy_SCB_UART_DeInit(CYBSP_BT_UART_HW);
+    NVIC_ClearPendingIRQ(CYBSP_BT_UART_IRQ);
+    s_initialized = RT_FALSE;
+    s_cur_baud = 0;
+}
+
 /* h4 TX 观测 (GDB 可读): 调用数 / CTS 超时数 */
 volatile uint32_t g_h4_tx_calls;
 volatile uint32_t g_h4_tx_timeout;
@@ -88,6 +107,8 @@ void hal_uart_dma_init(void)
     Cy_SCB_UART_Disable(CYBSP_BT_UART_HW, &s_uart_context);
     Cy_SCB_UART_DeInit(CYBSP_BT_UART_HW);
     memset(&s_uart_context, 0, sizeof(s_uart_context));
+    memset(&s_async_ctx, 0, sizeof(s_async_ctx));
+    memset(&s_obj, 0, sizeof(s_obj));
     cy_en_scb_uart_status_t uart_status;
     uart_status = Cy_SCB_UART_Init(CYBSP_BT_UART_HW, &CYBSP_BT_UART_config, &s_uart_context);
     if (uart_status != CY_SCB_UART_SUCCESS)

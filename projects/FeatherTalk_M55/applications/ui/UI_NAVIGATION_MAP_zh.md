@@ -1,6 +1,6 @@
 # FeatherTalk UI 功能导航图
 
-> 导航图版本：2026-09-03
+> 导航图版本：2026-09-04
 >
 > 对应工程：`projects/FeatherTalk_M55`
 >
@@ -108,9 +108,11 @@ flowchart TD
     Open -->|向上滑、遮罩、Back、Home| Closed
 ```
 
-- Wi-Fi、蓝牙和旋转读取 M33 IPC 的 capability/enabled/connected 状态；驱动未接入时显示
+- Wi-Fi 读取 M55 WLAN 服务，蓝牙和旋转读取 M33 IPC 的 capability/enabled/connected 状态；驱动未接入时显示
   “不可用”且保持禁用，不允许 UI 假切换。
 - Wi-Fi 根据实际信号值显示断开、弱、中、强；状态栏同时显示 Wi-Fi/蓝牙连接状态。
+- 两个无线开关分别显示真实处理中/完成/失败；处理期间只禁用自身，另一项仍可操作。蓝牙
+  PENDING 来自 M33 异步生命周期，Wi-Fi busy 来自本核后台队列；不乐观翻转硬件状态。
 - 亮度由 M55 `pwm18` 实际读写，UI 0%～100% 映射硬件 50%～100% 占空比。
 - 通知队列固定容量 8，具有稳定 ID、未读数、打开后标记已读、单条滑动删除和全部清除。
 - 拖动期间暂停一秒状态刷新、Live Tile 刷新和快捷状态刷新；相同触摸坐标不会重复重绘。
@@ -121,6 +123,14 @@ flowchart TD
 - 设置搜索只过滤 10 个设置入口，匹配标题、摘要和关键词。
 - 搜索框获得焦点后，键盘固定覆盖底部键盘区域，不推动页面到屏幕外；可使用收起键关闭，
   再次点击输入框重新打开。
+- 统一键盘按键区高度为屏幕高度的 30%，最多占去除状态栏/导航栏后内容区的一半，不由字体
+  缩放或页面剩余空间决定。480×800 时所有按键区均为 240 px；搜索/设置的收起栏额外显示，
+  不挤压按键区。所有入口只使用 `ft_ui_keyboard_create()`，未来新页面也默认继承。
+- 构建检查禁止产品应用绕开公共组件直接调用 LVGL 键盘构造器；调整默认比例只需修改
+  `feathertalk_ui_layout.c` 的 `FT_KEYBOARD_SCREEN_PERCENT`，不逐页修改尺寸。
+- Wi-Fi 密码表单和键盘是独立的滚动区与底部停靠区：只滚动上方表单，隐藏/重新展开键盘
+  或切换字母/符号模式不改变键盘高度。文件新建/重命名框按内容收紧、停靠导航栏上方，
+  内部键盘使用同一比例高度，不再把 88% 屏高的弹窗剩余空间全部撑满。
 - Alert、格式化确认、删除确认、文件上下文菜单、文件名编辑器和音乐文件夹选择器均为覆盖层，
   不增加路由深度。
 
@@ -155,8 +165,8 @@ flowchart TD
 | 音频主页 | 选择默认输出/输入；点击箭头进入属性 | `sound0`、`mic0` 默认注册；AMIC2 无驱动时不可选 | 默认设备/音量/增益 |
 | 输出属性 | 测试、音量、采样率、位深、声道数 | 只开放 `sound0`、TDM0、ES8388 整链路接受的组合；失败回滚 | 输出格式与音量 |
 | 输入属性 | 增益；显示输入格式 | `mic0` 当前固定 16 kHz、16 bit、双声道；没有伪造格式选择 | 输入增益 |
-| Wi-Fi | 开关、连接和信号状态 | 依赖 M33 无线 capability；未接入时禁用 | 不伪造硬件状态 |
-| 蓝牙 | 开关和连接状态 | 依赖 M33 蓝牙 capability；未接入时禁用 | 不伪造硬件状态 |
+| Wi-Fi | 总开关、被动扫描列表、密码连接、断开、SSID/IP/网关/MAC/RSSI | M55 WHD + SDIO0；后台串行操作；初始化/忙时禁用相应操作 | 本阶段不落盘保存密码；退出表单清空密码 |
+| 蓝牙 | 独立开关、处理中/失败、BLE 或 Classic 连接状态 | 依赖 M33 蓝牙 capability；未接入或本项处理中禁用按钮 | 异步请求后回读真实状态；页面 200 ms 监视随 pop 释放 |
 | 存储 | 选择 Internal Flash/SD、容量视图、刷新、格式化、进入文件 | 分别显示两个介质；格式化采用两阶段确认；SD 缺失仍显示设备槽 | 文件系统自身持久化 |
 | USB 主页 | 总开关；Device/Host；MSC/UAC2 单选；属性入口 | Host 因无受控 5 V VBUS 禁用；关闭真正 deinit USB；运行中切换执行 stop-old/start-new | 记住待启动功能 |
 | USB 存储属性 | LUN0 Flash、LUN1 SD 状态；进入存储管理 | 固定末尾 2 MiB Flash + SD 双 LUN；SD 不可导出时 MSC 不能开启 | 无独立 UI 偏好 |
@@ -267,7 +277,7 @@ flowchart TD
 | FT_PAGE_ABOUT | 关于 FeatherTalk | 设置入口 | 产品、固件、IPC 版本 | pop 设置；只读 | SCENE-08 |
 | FT_PAGE_SETTINGS_DISPLAY | 显示和亮度 | 设置入口 | PWM 亮度、面板信息 | pop 设置 | SCENE-09 |
 | FT_PAGE_SETTINGS_AUDIO | 音频 | 设置入口 | 输出/输入设备单选与属性箭头 | pop 设置 | SCENE-10 |
-| FT_PAGE_SETTINGS_WIFI | Wi-Fi | 设置入口 | 能力、开关、连接、信号 | pop 设置 | SCENE-11 |
+| FT_PAGE_SETTINGS_WIFI | Wi-Fi | 设置入口 | 总开关、扫描、选择网络、密码键盘、连接/断开、IP/RSSI | Back 先关闭密码表单，再 pop 设置；删除页释放 timer | SCENE-11 |
 | FT_PAGE_SETTINGS_BLUETOOTH | 蓝牙 | 设置入口 | 能力、开关、连接 | pop 设置 | SCENE-12 |
 | FT_PAGE_SETTINGS_STORAGE | 存储 | 设置、USB 存储属性 | Flash/SD 选择、容量、格式化、文件入口 | leave 关闭介质监视器 | SCENE-13 |
 | FT_PAGE_SETTINGS_USB | USB | 设置入口 | 总开关、Device/Host、MSC/UAC2、属性箭头 | leave 关闭 USB UI 监视器 | SCENE-14 |
@@ -302,7 +312,9 @@ flowchart TD
 | 通知队列 | `feathertalk_ui_notifications.c` | RAM，固定 8 条；与 LVGL 对象寿命解耦 |
 | Tile 布局和编辑态 | `feathertalk_ui_tiles.c` | 运行期模型；默认布局可恢复 |
 | 强调色、透明度、语言、时间、背景、壁纸 | preferences + store | Flash 末尾 2 MiB 文件系统中的 CRC A/B 记录，掉电保持 |
-| Wi-Fi/蓝牙/旋转 | M33 IPC | 硬件是真实来源；UI 只发送请求并显示回读 |
+| Wi-Fi | M55 Wi-Fi service + WHD/RT-Thread WLAN | 后台请求队列；本地状态合入快捷状态，不被 M33 心跳覆盖 |
+| 蓝牙/旋转 | M33 IPC | 硬件是真实来源；UI 只发送请求并显示回读。蓝牙由单 owner 执行启停，PENDING/OK/FAILED 区分接受与完成 |
+| 无线共享资源 | FeatherTalk Common Radio Manager | 两功能独立占用/状态/错误；Wi-Fi 关闭只停 WLAN MAC，蓝牙关闭只回收 HCI/UART/BT_REG_ON；保留公共供电，普通 UI 不提供整模组复位 |
 | 背光 | M55 PWM | 实时读写 `pwm18`，偏好保存用户值 |
 | 存储容量/挂载/占用 | storage service | Flash/SD 和 USB 所有权实时探测 |
 | USB class 与 UAC 格式 | USB/UAC service | 驱动是真实来源；UI 与 Host 双向同步 |
@@ -312,7 +324,8 @@ flowchart TD
 ## 9. 当前能力边界
 
 - USB Host：硬件没有受控 5 V VBUS source，显示但不可选择。
-- Wi-Fi/蓝牙：需要 M33 对应驱动和 IPC capability；缺失时不能由 UI 模拟开启。
+- Wi-Fi：依赖 M55 WHD 初始化成功；当前首轮只做 STA，不提供 AP、配网持久化或自动重连承诺。
+- 蓝牙：需要 M33 对应驱动和 IPC capability；缺失时不能由 UI 模拟开启。
 - 自动旋转：需要 M33/传感器能力；缺失时快捷按钮禁用。
 - AMIC2：没有注册 RT-Thread Audio 输入驱动，录音机中显示但不可选。
 - PDM 输入格式：当前驱动固定 16 kHz、16 bit、双声道，UI 只读显示。
@@ -342,3 +355,13 @@ flowchart TD
 
 构建会自动执行第二条检查。检查通过只证明页面和场景没有从文档中遗漏；功能文字、边、
 硬件门控和生命周期是否准确，仍由改动者结合 `feathertalk_ui_test.c` 和实板结果审查。
+
+
+## 2026-09-04 Wi-Fi 接入与回归入口
+
+- 设置 → Wi-Fi → 扫描网络 → 网络行 → 密码表单 → 连接 / 取消。
+- 密码键盘固定在页面底部比例区域（屏高 30%），不参与表单 flex-grow；可收起、再次点击输入框展开；Back 关闭表单并清空密码。
+- 首轮使用被动扫描；国家码需要与实物所在地确认，未确认前不进行主动连接测试。
+- `feather_wifi_ui_test`：5 次页面创建/销毁；使用真实扫描结果检查密码遮蔽、键盘收起/展开、范围、Back 清除密码，不发送连接请求。
+- `feather_keyboard_test`：五轮搜索/设置键盘与文件名弹窗测试；检查比例、边界、反复展开、错误文案变化和释放，不执行文件写入。Wi-Fi 测试同时检查固定高度、符号模式和表单滚动不移动键盘。
+- `ft_wifi` / `ft_wifi scan` / `ft_wifi on|off|disconnect`：真实后台状态与驱动测试；证据和限制见 `../WIFI_BRINGUP_zh.md`。

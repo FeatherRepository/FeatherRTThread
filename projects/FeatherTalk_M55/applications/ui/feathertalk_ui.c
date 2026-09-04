@@ -13,6 +13,7 @@
 #include "feathertalk_ui_notifications.h"
 #include "feathertalk_ui_platform.h"
 #include "feathertalk_ui_preferences_store.h"
+#include "feathertalk_wifi.h"
 #include "lv_image_cache.h"
 #include "lv_os.h"
 
@@ -31,12 +32,14 @@ typedef struct
     bool available;
     bool enabled;
     bool connected;
+    bool busy, error;
     uint8_t value;
     uint8_t signal_percent;
     bool rendered;
     bool rendered_available;
     bool rendered_enabled;
     bool rendered_connected;
+    bool rendered_busy, rendered_error;
     uint8_t rendered_value;
     uint8_t rendered_signal_percent;
 } ft_quick_view_t;
@@ -653,6 +656,7 @@ static void quick_view_apply(feathertalk_quick_control_t control)
     if (view->rendered && view->rendered_available == view->available &&
         view->rendered_enabled == view->enabled &&
         view->rendered_connected == view->connected &&
+        view->rendered_busy == view->busy && view->rendered_error == view->error &&
         view->rendered_value == view->value &&
         view->rendered_signal_percent == view->signal_percent) return;
 
@@ -677,7 +681,12 @@ static void quick_view_apply(feathertalk_quick_control_t control)
         }
     }
 
-    if (!view->available)
+    if (view->available && view->busy)
+    {
+        lv_obj_add_state(view->button, LV_STATE_DISABLED);
+        lv_label_set_text(view->state_label, ft_preferences_text("处理中", "Working..."));
+    }
+    else if (!view->available)
     {
         lv_obj_add_state(view->button, LV_STATE_DISABLED);
         lv_obj_set_style_bg_color(view->button, lv_color_hex(0x242424), LV_PART_MAIN);
@@ -692,7 +701,9 @@ static void quick_view_apply(feathertalk_quick_control_t control)
                                   view->enabled ? s_accent : lv_color_hex(0x343434),
                                   LV_PART_MAIN);
         lv_obj_set_style_image_recolor(view->icon, lv_color_white(), LV_PART_MAIN);
-        if (control == FEATHERTALK_QUICK_BRIGHTNESS)
+        if (view->error)
+            lv_label_set_text(view->state_label, ft_preferences_text("操作失败", "Failed"));
+        else if (control == FEATHERTALK_QUICK_BRIGHTNESS)
         {
             lv_snprintf(state, sizeof(state), "%u%%", view->value);
             lv_label_set_text(view->state_label, state);
@@ -741,6 +752,8 @@ static void quick_view_apply(feathertalk_quick_control_t control)
     view->rendered_available = view->available;
     view->rendered_enabled = view->enabled;
     view->rendered_connected = view->connected;
+    view->rendered_busy = view->busy;
+    view->rendered_error = view->error;
     view->rendered_value = view->value;
     view->rendered_signal_percent = view->signal_percent;
 }
@@ -754,6 +767,13 @@ static void quick_views_refresh(void)
     {
         ft_quick_view_t *view = &s_quick_views[i];
         uint8_t bit = (uint8_t)(1U << i);
+        view->busy = remote_valid && status.last_control == i && status.result == FEATHERTALK_QUICK_RESULT_PENDING;
+        view->error = remote_valid && status.last_control == i && status.result == FEATHERTALK_QUICK_RESULT_FAILED;
+        if (i == FEATHERTALK_QUICK_WIFI) {
+            ft_wifi_status_t wifi;
+            feathertalk_wifi_status(&wifi);
+            view->busy = wifi.busy; view->error = wifi.error != 0;
+        }
         if (i == FEATHERTALK_QUICK_BRIGHTNESS)
         {
             view->available = ft_platform_brightness_available();
@@ -785,7 +805,7 @@ static void quick_button_cb(lv_event_t *event)
     uint8_t target;
     if (control >= FEATHERTALK_QUICK_COUNT) return;
     view = &s_quick_views[control];
-    if (!view->available) return;
+    if (!view->available || view->busy) return;
     if (control == FEATHERTALK_QUICK_BRIGHTNESS)
     {
         target = view->value > 45U ? 30U : 100U;

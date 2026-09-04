@@ -26,3 +26,12 @@ int bt_service_connected(void)
     /* The AIROC reference path currently supports scan/advertising only. */
     return 0;
 }
+
+rt_err_t bt_service_set_enabled(int on)
+{
+    if (on != 0 && on != 1) return -RT_EINVAL;
+    return on ? bt_service_start() : -RT_ENOSYS;
+}
+int bt_service_busy(void) { return 0; }
+int bt_service_target(void) { return bt_service_enabled(); }
+int bt_service_error(void) { return 0; }

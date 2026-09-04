@@ -14,6 +14,8 @@
 #include "feathertalk_ui_platform.h"
 #include "feathertalk_ui_preferences_store.h"
 #include "feathertalk_ui_recorder.h"
+#include "feathertalk_ui_wifi.h"
+#include "feathertalk_ui_keyboard.h"
 
 #define FT_ACCENT_COUNT      5U
 #define FT_OPACITY_COUNT     3U
@@ -266,7 +268,7 @@ static const ft_page_definition_t s_pages[] =
     {FT_PAGE_ABOUT, "About", create_about_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_DISPLAY, "Display & brightness", create_settings_display_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_AUDIO, "Audio", create_settings_audio_page, RT_NULL, RT_NULL, RT_NULL},
-    {FT_PAGE_SETTINGS_WIFI, "Wi-Fi", create_settings_wifi_page, RT_NULL, RT_NULL, RT_NULL},
+    {FT_PAGE_SETTINGS_WIFI, "Wi-Fi", create_settings_wifi_page, RT_NULL, ft_wifi_page_back, RT_NULL},
     {FT_PAGE_SETTINGS_BLUETOOTH, "Bluetooth", create_settings_bluetooth_page, RT_NULL, RT_NULL, RT_NULL},
     {FT_PAGE_SETTINGS_STORAGE, "Storage", create_settings_storage_page,
      settings_storage_page_enter, RT_NULL, settings_storage_page_leave},
@@ -940,7 +942,7 @@ static lv_obj_t *create_search_page(lv_obj_t *parent)
     }
     track_object(&s_search_keyboard_tray, lv_obj_create(root));
     ft_ui_style_panel(s_search_keyboard_tray);
-    lv_obj_set_size(s_search_keyboard_tray, lv_pct(100), layout->keyboard_height);
+    lv_obj_set_size(s_search_keyboard_tray, lv_pct(100), ft_ui_keyboard_tray_height());
     lv_obj_align(s_search_keyboard_tray, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_pad_all(s_search_keyboard_tray, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_row(s_search_keyboard_tray, 0, LV_PART_MAIN);
@@ -957,15 +959,9 @@ static lv_obj_t *create_search_page(lv_obj_t *parent)
                                     keyboard_hide_cb, RT_NULL));
     hide_button = s_search_keyboard_hide;
     lv_obj_set_width(hide_button, lv_pct(100));
-    lv_obj_set_height(hide_button, ft_layout_px(36));
+    lv_obj_set_height(hide_button, ft_ui_keyboard_toolbar_height());
 
-    track_object(&s_search_keyboard, lv_keyboard_create(s_search_keyboard_tray));
-    lv_obj_set_width(s_search_keyboard, lv_pct(100));
-    lv_obj_set_height(s_search_keyboard, 0);
-    lv_obj_set_flex_grow(s_search_keyboard, 1);
-    lv_obj_set_style_radius(s_search_keyboard, 0, LV_PART_MAIN);
-    lv_obj_set_style_border_width(s_search_keyboard, 0, LV_PART_MAIN);
-    lv_keyboard_set_textarea(s_search_keyboard, s_search_box);
+    track_object(&s_search_keyboard, ft_ui_keyboard_create(s_search_keyboard_tray, s_search_box));
     lv_obj_add_event_cb(s_search_keyboard, keyboard_done_cb, LV_EVENT_READY, RT_NULL);
     lv_obj_add_event_cb(s_search_keyboard, keyboard_done_cb, LV_EVENT_CANCEL, RT_NULL);
     lv_obj_add_flag(s_search_keyboard_tray, LV_OBJ_FLAG_HIDDEN);
@@ -1743,7 +1739,7 @@ static lv_obj_t *create_settings_page(lv_obj_t *parent)
 
     track_object(&s_settings_keyboard_tray, lv_obj_create(root));
     ft_ui_style_panel(s_settings_keyboard_tray);
-    lv_obj_set_size(s_settings_keyboard_tray, lv_pct(100), layout->keyboard_height);
+    lv_obj_set_size(s_settings_keyboard_tray, lv_pct(100), ft_ui_keyboard_tray_height());
     lv_obj_align(s_settings_keyboard_tray, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_pad_all(s_settings_keyboard_tray, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_row(s_settings_keyboard_tray, 0, LV_PART_MAIN);
@@ -1758,14 +1754,8 @@ static lv_obj_t *create_settings_page(lv_obj_t *parent)
                                                         LV_SYMBOL_DOWN "  Hide keyboard"),
                                     settings_keyboard_hide_cb, RT_NULL));
     lv_obj_set_width(s_settings_keyboard_hide, lv_pct(100));
-    lv_obj_set_height(s_settings_keyboard_hide, ft_layout_px(36));
-    track_object(&s_settings_keyboard, lv_keyboard_create(s_settings_keyboard_tray));
-    lv_obj_set_width(s_settings_keyboard, lv_pct(100));
-    lv_obj_set_height(s_settings_keyboard, 0);
-    lv_obj_set_flex_grow(s_settings_keyboard, 1);
-    lv_obj_set_style_radius(s_settings_keyboard, 0, LV_PART_MAIN);
-    lv_obj_set_style_border_width(s_settings_keyboard, 0, LV_PART_MAIN);
-    lv_keyboard_set_textarea(s_settings_keyboard, s_settings_search_box);
+    lv_obj_set_height(s_settings_keyboard_hide, ft_ui_keyboard_toolbar_height());
+    track_object(&s_settings_keyboard, ft_ui_keyboard_create(s_settings_keyboard_tray, s_settings_search_box));
     lv_obj_add_event_cb(s_settings_keyboard, settings_keyboard_hide_cb,
                         LV_EVENT_READY, RT_NULL);
     lv_obj_add_event_cb(s_settings_keyboard, settings_keyboard_hide_cb,
@@ -2523,6 +2513,40 @@ static lv_obj_t *create_settings_audio_input_page(lv_obj_t *parent)
     return page;
 }
 
+static void settings_radio_refresh(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!s_settings_radio_status || !s_settings_radio_button) return;
+    feathertalk_quick_status_t status;
+    bool valid = feathertalk_ipc_get_quick_status(&status) == RT_EOK;
+    bool available = valid && (status.capabilities & FEATHERTALK_QUICK_CAP_BLUETOOTH);
+    bool busy = valid && status.last_control == FEATHERTALK_QUICK_BLUETOOTH &&
+                status.result == FEATHERTALK_QUICK_RESULT_PENDING;
+    bool failed = valid && status.last_control == FEATHERTALK_QUICK_BLUETOOTH &&
+                  status.result == FEATHERTALK_QUICK_RESULT_FAILED;
+    bool enabled = available && (status.enabled & FEATHERTALK_QUICK_CAP_BLUETOOTH);
+    bool connected = enabled && (status.connected & FEATHERTALK_QUICK_CAP_BLUETOOTH);
+    char text[160];
+    lv_snprintf(text, sizeof(text), ft_preferences_text("无线：%s\n连接：%s", "Radio: %s\nConnection: %s"),
+        !available ? ft_preferences_text("不可用", "Unavailable") :
+        busy ? ft_preferences_text("处理中", "Working...") :
+        failed ? ft_preferences_text("操作失败", "Failed") :
+        enabled ? ft_preferences_text("开启", "On") : ft_preferences_text("关闭", "Off"),
+        connected ? ft_preferences_text("已连接", "Connected") : ft_preferences_text("未连接", "Not connected"));
+    if (strcmp(lv_label_get_text(s_settings_radio_status), text))
+        lv_label_set_text(s_settings_radio_status, text);
+    lv_obj_t *label = lv_obj_get_child(s_settings_radio_button, 0);
+    const char *action = busy ? ft_preferences_text("处理中", "Working...") :
+        enabled ? ft_preferences_text("关闭蓝牙", "Turn Bluetooth off") : ft_preferences_text("开启蓝牙", "Turn Bluetooth on");
+    if (strcmp(lv_label_get_text(label), action)) lv_label_set_text(label, action);
+    if (!available || busy) lv_obj_add_state(s_settings_radio_button, LV_STATE_DISABLED);
+    else lv_obj_remove_state(s_settings_radio_button, LV_STATE_DISABLED);
+}
+static void settings_radio_deleted(lv_event_t *event)
+{
+    lv_timer_delete((lv_timer_t *)lv_event_get_user_data(event));
+}
+
 static void settings_radio_toggle_cb(lv_event_t *event)
 {
     feathertalk_quick_control_t control =
@@ -2532,6 +2556,7 @@ static void settings_radio_toggle_cb(lv_event_t *event)
     uint8_t target;
     if (feathertalk_ipc_get_quick_status(&status) != RT_EOK ||
         (status.capabilities & bit) == 0U) return;
+    if (status.last_control == control && status.result == FEATHERTALK_QUICK_RESULT_PENDING) return;
     target = (status.enabled & bit) != 0U ? 0U : 1U;
     if (feathertalk_ipc_set_quick_control((uint8_t)control, target) == RT_EOK &&
         s_settings_radio_status != RT_NULL && lv_obj_is_valid(s_settings_radio_status))
@@ -2610,12 +2635,17 @@ static lv_obj_t *create_settings_radio_page(lv_obj_t *parent,
                                     (void *)(uintptr_t)control));
     lv_obj_set_width(s_settings_radio_button, lv_pct(100));
     if (!available) lv_obj_add_state(s_settings_radio_button, LV_STATE_DISABLED);
+    if (!wifi) {
+        lv_timer_t *timer = lv_timer_create(settings_radio_refresh, 200, NULL);
+        lv_obj_add_event_cb(page, settings_radio_deleted, LV_EVENT_DELETE, timer);
+        settings_radio_refresh(timer);
+    }
     return page;
 }
 
 static lv_obj_t *create_settings_wifi_page(lv_obj_t *parent)
 {
-    return create_settings_radio_page(parent, FEATHERTALK_QUICK_WIFI);
+    return ft_wifi_page_create(parent);
 }
 
 static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
@@ -5696,15 +5726,19 @@ static void files_show_name_editor(bool rename_item, const char *target,
                sizeof(s_files_name_target) - 1U);
     s_files_name_target[sizeof(s_files_name_target) - 1U] = '\0';
     s_files_name_box = lv_msgbox_create(RT_NULL);
-    lv_obj_set_size(s_files_name_box, lv_pct(94), lv_pct(88));
+    lv_obj_set_size(s_files_name_box, lv_pct(94), LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_files_name_box,
+        ft_layout_get()->screen_height - ft_layout_get()->status_bar_height -
+        ft_layout_get()->nav_bar_height, LV_PART_MAIN);
+    lv_obj_align(s_files_name_box, LV_ALIGN_BOTTOM_MID, 0, -ft_layout_get()->nav_bar_height);
     title = lv_msgbox_add_title(
         s_files_name_box,
         rename_item ? ft_preferences_text("重命名", "Rename") :
                       ft_preferences_text("新建文件夹", "New folder"));
     lv_obj_set_style_text_font(title, ft_layout_font(18), LV_PART_MAIN);
     content = lv_msgbox_get_content(s_files_name_box);
-    lv_obj_set_height(content, 0);
-    lv_obj_set_flex_grow(content, 1);
+    lv_obj_set_height(content, LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(content, 0);
     lv_obj_set_style_pad_row(content, ft_layout_px(5), LV_PART_MAIN);
     s_files_name_textarea = lv_textarea_create(content);
     lv_obj_set_size(s_files_name_textarea, lv_pct(100),
@@ -5727,11 +5761,7 @@ static void files_show_name_editor(bool rename_item, const char *target,
                                 lv_color_hex(0xFF6B6B), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_files_name_error, ft_layout_font(12),
                                LV_PART_MAIN);
-    s_files_name_keyboard = lv_keyboard_create(content);
-    lv_obj_set_width(s_files_name_keyboard, lv_pct(100));
-    lv_obj_set_height(s_files_name_keyboard, 0);
-    lv_obj_set_flex_grow(s_files_name_keyboard, 1);
-    lv_keyboard_set_textarea(s_files_name_keyboard, s_files_name_textarea);
+    s_files_name_keyboard = ft_ui_keyboard_create(content, s_files_name_textarea);
     lv_obj_add_event_cb(s_files_name_keyboard, files_name_keyboard_cb,
                         LV_EVENT_READY, RT_NULL);
     lv_obj_add_event_cb(s_files_name_keyboard, files_name_keyboard_cb,
@@ -6901,6 +6931,74 @@ bool ft_pages_benchmark_open_file_action(void)
     return s_files_action_box != RT_NULL && lv_obj_is_valid(s_files_action_box);
 }
 
+/* Focused non-destructive geometry regression; no file operation is submitted. */
+static bool keyboard_geometry_ok(lv_obj_t *keyboard, lv_obj_t *bounds, bool bottom)
+{
+    lv_area_t area, limit;
+    if (!keyboard || !bounds) return false;
+    lv_obj_update_layout(bounds);
+    lv_obj_get_coords(keyboard, &area);
+    lv_obj_get_coords(bounds, &limit);
+    return lv_obj_get_height(keyboard) == (bottom ? ft_ui_keyboard_tray_height() : ft_layout_get()->keyboard_height) &&
+           area.x1 >= limit.x1 && area.x2 <= limit.x2 &&
+           area.y1 >= limit.y1 && area.y2 <= limit.y2 &&
+           (!bottom || area.y2 >= limit.y2 - 2);
+}
+static void keyboard_geometry_test_async(void *argument)
+{
+    unsigned checks = 0, failures = 0;
+    (void)argument;
+#define KB_CHECK(condition) do { checks++; if (!(condition)) { failures++; \
+    rt_kprintf("[KEYBOARD-TEST] failed line=%d\n", __LINE__); } } while (0)
+    KB_CHECK(ft_layout_profiles_self_test());
+    for (unsigned pass = 0; pass < 5; pass++) {
+        ft_router_home();
+        KB_CHECK(ft_router_push(FT_PAGE_SEARCH) == RT_EOK);
+        search_keyboard_set_visible(true);
+        KB_CHECK(keyboard_geometry_ok(s_search_keyboard_tray, lv_obj_get_parent(s_search_keyboard_tray), true));
+        search_keyboard_set_visible(false);
+        search_keyboard_set_visible(true);
+        KB_CHECK(keyboard_geometry_ok(s_search_keyboard_tray, lv_obj_get_parent(s_search_keyboard_tray), true));
+        lv_keyboard_set_mode(s_search_keyboard, LV_KEYBOARD_MODE_SPECIAL);
+        lv_obj_update_layout(s_search_keyboard_tray);
+        KB_CHECK(lv_obj_get_height(s_search_keyboard) == ft_layout_get()->keyboard_height);
+        ft_router_home();
+        KB_CHECK(ft_router_push(FT_PAGE_SETTINGS) == RT_EOK);
+        settings_keyboard_set_visible(true);
+        KB_CHECK(keyboard_geometry_ok(s_settings_keyboard_tray, lv_obj_get_parent(s_settings_keyboard_tray), true));
+        settings_keyboard_set_visible(false);
+        settings_keyboard_set_visible(true);
+        KB_CHECK(keyboard_geometry_ok(s_settings_keyboard_tray, lv_obj_get_parent(s_settings_keyboard_tray), true));
+        lv_keyboard_set_mode(s_settings_keyboard, LV_KEYBOARD_MODE_NUMBER);
+        lv_obj_update_layout(s_settings_keyboard_tray);
+        KB_CHECK(lv_obj_get_height(s_settings_keyboard) == ft_layout_get()->keyboard_height);
+        ft_router_home();
+        for (unsigned rename_item = 0; rename_item < 2; rename_item++) {
+            files_show_name_editor(rename_item != 0, FT_STORAGE_FLASH_MOUNT_PATH,
+                                   rename_item ? "keyboard-test.txt" : "");
+            KB_CHECK(keyboard_geometry_ok(s_files_name_keyboard, s_files_name_box, false));
+            KB_CHECK(lv_obj_get_height(s_files_name_box) < ft_layout_get()->screen_height -
+                     ft_layout_get()->status_bar_height - ft_layout_get()->nav_bar_height);
+            files_name_set_error("The name is invalid or already exists. Please choose another name.");
+            KB_CHECK(keyboard_geometry_ok(s_files_name_keyboard, s_files_name_box, false));
+            files_close_name_editor();
+            KB_CHECK(!s_files_name_box && !s_files_name_keyboard);
+        }
+    }
+    ft_router_home();
+    rt_kprintf("[KEYBOARD-TEST] checks=%u failures=%u height=%ld (no filesystem writes)\n",
+               checks, failures, (long)ft_layout_get()->keyboard_height);
+#undef KB_CHECK
+}
+static void feather_keyboard_test(void)
+{
+    lv_lock();
+    lv_result_t result = lv_async_call(keyboard_geometry_test_async, NULL);
+    lv_unlock();
+    rt_kprintf("[KEYBOARD-TEST] queued=%d\n", result == LV_RESULT_OK);
+}
+MSH_CMD_EXPORT(feather_keyboard_test, Verify proportional keyboards without file writes);
+
 #ifdef FEATHERTALK_UI_TEST_MODE
 bool ft_pages_test_icon_assignments_unique(void)
 {
@@ -6982,7 +7080,8 @@ bool ft_pages_test_settings_keyboard_overlay_ok(void)
            tray_area.y1 > root_area.y1 &&
            tray_area.y2 >= root_area.y2 - 2 &&
            tray_area.y2 <= root_area.y2 + 2 &&
-           lv_obj_get_height(s_settings_keyboard_tray) == ft_layout_get()->keyboard_height;
+           lv_obj_get_height(s_settings_keyboard_tray) == ft_ui_keyboard_tray_height() &&
+           lv_obj_get_height(s_settings_keyboard) == ft_layout_get()->keyboard_height;
 }
 lv_obj_t *ft_pages_test_get_settings_result(size_t i)
 { return i < FT_SETTINGS_COUNT ? s_settings_results[i] : RT_NULL; }
@@ -7343,7 +7442,8 @@ bool ft_pages_test_search_keyboard_overlay_ok(void)
            tray_area.y1 > root_area.y1 &&
            tray_area.y2 >= root_area.y2 - 2 &&
            tray_area.y2 <= root_area.y2 + 2 &&
-           lv_obj_get_height(s_search_keyboard_tray) == ft_layout_get()->keyboard_height;
+           lv_obj_get_height(s_search_keyboard_tray) == ft_ui_keyboard_tray_height() &&
+           lv_obj_get_height(s_search_keyboard) == ft_layout_get()->keyboard_height;
 }
 lv_obj_t *ft_pages_test_get_search_result(size_t i)
 { return i < sizeof(s_apps) / sizeof(s_apps[0]) ? s_search_results[i] : RT_NULL; }

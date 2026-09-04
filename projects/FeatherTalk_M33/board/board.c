@@ -10,11 +10,9 @@
  */
 
 #include "board.h"
+#include <feathertalk/radio_manager.h>
 #define ES8388_CTRL             GET_PIN(16, 2)
 #define SPEAKER_OE_CTRL         GET_PIN(21, 6)
-#define WIFI_OE_CTRL            GET_PIN(16, 3)
-#define WIFI_WL_REG_OE_CTRL     GET_PIN(11, 6)
-#define CTRL                    GET_PIN(7, 2)
 
 void cy_bsp_all_init(void)
 {
@@ -37,6 +35,10 @@ void cy_bsp_all_init(void)
         Cy_SysPm_TriggerXRes();
 
     }
+    /* Board-resource initialization does not depend on either radio feature.
+     * Complete shared power setup before the other application core starts. */
+    ft_radio_board_boot();
+    ft_radio_attach(FT_RADIO_CORE_M33);
 #ifdef SOC_Enable_CM55
     Cy_SysEnableCM55(MXCM55, CY_CM55_APP_BOOT_ADDR, 10);
 #ifdef SOC_Enable_CM33_DeepSleep
@@ -59,21 +61,14 @@ void _start(void)
 
 void poweroff(void)
 {
-    rt_pin_mode(WIFI_OE_CTRL, PIN_MODE_OUTPUT);
-    rt_pin_write(WIFI_OE_CTRL, PIN_LOW);
-
-    rt_pin_mode(WIFI_WL_REG_OE_CTRL, PIN_MODE_OUTPUT);
-    rt_pin_write(WIFI_WL_REG_OE_CTRL, PIN_LOW);
-
     rt_pin_mode(ES8388_CTRL, PIN_MODE_OUTPUT);
     rt_pin_write(ES8388_CTRL, PIN_LOW);
 
     rt_pin_mode(SPEAKER_OE_CTRL, PIN_MODE_OUTPUT);
     rt_pin_write(SPEAKER_OE_CTRL, PIN_LOW);
 
-    rt_pin_mode(CTRL, PIN_MODE_OUTPUT);
-    rt_pin_write(CTRL, PIN_LOW);
-
+    /* Disable audio loads before removing the shared baseboard supply. */
+    ft_radio_system_poweroff();
     Cy_SysClk_PllDisable(SRSS_DPLL_LP_0_PATH_NUM);
     Cy_SysPm_SystemEnterHibernate();
 }
@@ -81,27 +76,3 @@ void poweroff(void)
 #ifdef RT_USING_MSH
     MSH_CMD_EXPORT(poweroff, The software enables the system to shut down. Simply press the button to restart it.);
 #endif
-
-//Mos管控制
-#define ES8388_CTRL                 GET_PIN(16, 2)  //ES8388 电源 Enable引脚
-#define SPEAKER_OE_CTRL             GET_PIN(21, 6)  //功放 Enable引脚
-#define WIFI_OE_CTRL                GET_PIN(16, 3)  //WIFI Enable引脚
-#define WIFI_WL_REG_OE_CTRL         GET_PIN(11, 6)  //WiFi寄存器开关
-#define CTRL                        GET_PIN(7, 2)   //底板 3V3 DCDC电源控制
-static int disable_external_peripherals(void)
-{
-    rt_pin_mode(WIFI_OE_CTRL, PIN_MODE_OUTPUT);
-    rt_pin_write(WIFI_OE_CTRL, PIN_LOW);
-
-    rt_pin_mode(WIFI_WL_REG_OE_CTRL, PIN_MODE_OUTPUT);
-    rt_pin_write(WIFI_WL_REG_OE_CTRL, PIN_LOW);
-
-    rt_pin_mode(ES8388_CTRL, PIN_MODE_OUTPUT);
-    rt_pin_write(ES8388_CTRL, PIN_LOW);
-
-    rt_pin_mode(SPEAKER_OE_CTRL, PIN_MODE_OUTPUT);
-    rt_pin_write(SPEAKER_OE_CTRL, PIN_LOW);
-
-    return 0;
-}
-INIT_BOARD_EXPORT(disable_external_peripherals);

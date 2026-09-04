@@ -34,11 +34,30 @@
 #include "rtdevice.h"
 
 #include "cybsp.h"
+#include "whd_radio_platform.h"
 
 #define DBG_TAG           "whd.bsp"
 #define DBG_LVL           DBG_INFO
 #include "rtdbg.h"
 
+
+rt_weak int whd_platform_prepare_radio(rt_base_t pin_number)
+{
+    /* configure the wl_reg_on pin */
+    rt_pin_mode(pin_number, PIN_MODE_OUTPUT);
+
+    /* Reset WLAN only, never the shared module supply or BT_REG_ON. */
+    rt_pin_write(pin_number, PIN_LOW);
+    rt_thread_mdelay(2);
+    rt_pin_write(pin_number, PIN_HIGH);
+    rt_thread_mdelay(10); /* wait for the module to be ready */
+
+    return RT_EOK;
+}
+rt_weak rt_bool_t whd_platform_same_core_bt(void) { return RT_TRUE; }
+rt_weak void whd_platform_radio_result(int result) { (void)result; }
+static int radio_prepare_result = -RT_ERROR;
+int whd_bsp_radio_result(void) { return radio_prepare_result; }
 
 static int whd_bsp_init(void)
 {
@@ -47,16 +66,10 @@ static int whd_bsp_init(void)
 #else
     rt_base_t pin_number = rt_pin_get(CYBSP_REG_ON_PIN_NAME);
 #endif
-    /* configure the wl_reg_on pin */
-    rt_pin_mode(pin_number, PIN_MODE_OUTPUT);
-
-    /* reset modules */
-    rt_pin_write(pin_number, PIN_LOW);
-    rt_thread_mdelay(2);
-    rt_pin_write(pin_number, PIN_HIGH);
-    rt_thread_mdelay(10); /* wait for the module to be ready */
-
-    return RT_EOK;
+    int result = whd_platform_prepare_radio(pin_number);
+    radio_prepare_result = result;
+    if (result != RT_EOK) whd_platform_radio_result(result);
+    return result;
 }
 INIT_PREV_EXPORT(whd_bsp_init);
 

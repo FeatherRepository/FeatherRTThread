@@ -6,6 +6,7 @@
 #include <feathertalk/ipc_protocol.h>
 
 #include "feathertalk_ipc.h"
+#include "feathertalk_wifi.h"
 
 #define FEATHERTALK_REPORT_INTERVAL_MS 10000U
 
@@ -299,6 +300,7 @@ static const char *feathertalk_quick_result_name(uint8_t result)
     case FEATHERTALK_QUICK_RESULT_UNAVAILABLE: return "unavailable";
     case FEATHERTALK_QUICK_RESULT_INVALID:     return "invalid";
     case FEATHERTALK_QUICK_RESULT_FAILED:      return "failed";
+    case FEATHERTALK_QUICK_RESULT_PENDING:     return "pending";
     default:                                   return "unknown";
     }
 }
@@ -315,7 +317,7 @@ static int bt_status(int argc, char **argv)
         return 0;
     }
 
-    rt_kprintf("Bluetooth (M33 AIROC host, IPC quick seq=%lu age=%lums):\n",
+    rt_kprintf("Bluetooth (M33 host, IPC quick seq=%lu age=%lums):\n",
                (unsigned long)status.sequence,
                (unsigned long)(rt_tick_get_millisecond() - status.received_ms));
     rt_kprintf("  available : %s\n",
@@ -323,10 +325,10 @@ static int bt_status(int argc, char **argv)
                "yes" : "no");
     rt_kprintf("  enabled   : %s\n",
                (status.enabled & FEATHERTALK_QUICK_CAP_BLUETOOTH) != 0U ?
-               "yes (host READY)" : "no");
+               "yes (host enabled; not a live HCI probe)" : "no");
     rt_kprintf("  connected : %s\n",
                (status.connected & FEATHERTALK_QUICK_CAP_BLUETOOTH) != 0U ?
-               "yes" : "no (connections not supported yet)");
+               "yes" : "no");
     rt_kprintf("  last cmd  : control=%u result=%s\n",
                status.last_control,
                feathertalk_quick_result_name(status.result));
@@ -354,7 +356,7 @@ static int bt_off(int argc, char **argv)
     (void)argc;
     (void)argv;
     rc = feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BLUETOOTH, 0U);
-    rt_kprintf("bt_off: quick command %s (stop not implemented on M33 yet)\n",
+    rt_kprintf("bt_off: quick command %s (check bt_status until off and result=ok)\n",
                (rc == RT_EOK) ? "queued" : "rejected (busy)");
     return 0;
 }
@@ -439,6 +441,17 @@ int feathertalk_ipc_get_system_status(feathertalk_system_status_t *status)
     }
     while ((before != after) || ((after & 1U) != 0U));
 
+    {
+        ft_wifi_radio_t radio;
+        feathertalk_wifi_radio(&radio);
+        if (radio.available) {
+            status->flags |= FEATHERTALK_SYSTEM_NETWORK_PRESENT;
+            status->network_state = radio.ready ? FEATHERTALK_NETWORK_CONNECTED :
+                (radio.associated || radio.busy) ? FEATHERTALK_NETWORK_CONNECTING :
+                FEATHERTALK_NETWORK_DISCONNECTED;
+            status->signal_percent = radio.associated ? radio.signal : FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
+        }
+    }
     return (status->sequence != 0U) ? RT_EOK : -RT_EEMPTY;
 }
 
@@ -457,6 +470,22 @@ int feathertalk_ipc_get_quick_status(feathertalk_quick_status_t *status)
         after = g_quick_generation;
     }
     while ((before != after) || ((after & 1U) != 0U));
+    {
+        ft_wifi_radio_t radio;
+        feathertalk_wifi_radio(&radio);
+        /* M33 owns BT/rotation; replace only the locally owned Wi-Fi fields. */
+        status->capabilities &= ~FEATHERTALK_QUICK_CAP_WIFI;
+        status->enabled &= ~FEATHERTALK_QUICK_CAP_WIFI;
+        status->connected &= ~FEATHERTALK_QUICK_CAP_WIFI;
+        status->wifi_signal_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
+        if (radio.available) {
+            status->capabilities |= FEATHERTALK_QUICK_CAP_WIFI;
+            if (radio.enabled) status->enabled |= FEATHERTALK_QUICK_CAP_WIFI;
+            if (radio.associated) status->connected |= FEATHERTALK_QUICK_CAP_WIFI;
+            if (radio.associated) status->wifi_signal_percent = radio.signal;
+            return RT_EOK;
+        }
+    }
     return status->sequence != 0U ? RT_EOK : -RT_EEMPTY;
 }
 
@@ -464,6 +493,11 @@ int feathertalk_ipc_set_quick_control(uint8_t control, uint8_t value)
 {
     rt_base_t level;
     if (control >= FEATHERTALK_QUICK_COUNT) return -RT_EINVAL;
+    if (control == FEATHERTALK_QUICK_BLUETOOTH && value > 1U) return -RT_EINVAL;
+    if (control == FEATHERTALK_QUICK_WIFI) {
+        if (value > 1U) return -RT_EINVAL;
+        return feathertalk_wifi_enable(value != 0U);
+    }
     level = rt_hw_interrupt_disable();
     if (g_quick_command_pending)
     {

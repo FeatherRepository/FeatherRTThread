@@ -1,0 +1,6 @@
+import os
+from building import *
+cwd = GetCurrentDir()
+group = DefineGroup('FeatherTalkRadio', Glob('*.c'), depend=[''],
+                    CPPPATH=[os.path.join(cwd, '..', 'include')])
+Return('group')

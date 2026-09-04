@@ -1359,27 +1359,25 @@ static void ui_test_timer_cb(lv_timer_t *timer)
                     "quick.brightness", "real PWM available");
         test_record(ft_ui_test_brightness() == 60U,
                     "quick.brightness.initial", "80% duty maps to UI 60%");
-        test_record(!ft_ui_test_quick_available(FEATHERTALK_QUICK_WIFI) &&
-                    !ft_ui_test_quick_available(FEATHERTALK_QUICK_BLUETOOTH) &&
-                    !ft_ui_test_quick_available(FEATHERTALK_QUICK_ROTATION),
-                    "quick.capabilities", "M33 drivers unavailable");
-        test_record(!ft_ui_test_quick_connected(FEATHERTALK_QUICK_WIFI) &&
-                    !ft_ui_test_quick_connected(FEATHERTALK_QUICK_BLUETOOTH) &&
-                    ft_ui_test_quick_signal() == FEATHERTALK_SYSTEM_VALUE_UNKNOWN,
-                    "quick.connections", "no fabricated link or signal state");
+        /* Services may now be available. Do not assume the old all-disabled
+         * bring-up fixture or switch off a real connection during UI tests. */
+        for (unsigned control = 0; control < FEATHERTALK_QUICK_COUNT; control++) {
+            if (control == FEATHERTALK_QUICK_BRIGHTNESS) continue;
+            test_record(ft_ui_test_quick_available(control) ||
+                        !ft_ui_test_quick_connected(control),
+                        "quick.capabilities", "unavailable radios cannot report a connection");
+        }
         s_test_phase = FT_TEST_QUICK_UNAVAILABLE_CLICK;
         break;
     case FT_TEST_QUICK_UNAVAILABLE_CLICK:
-        (void)test_click(ft_ui_test_get_quick_button(FEATHERTALK_QUICK_WIFI),
-                         "quick.wifi", "disabled/unavailable");
-        (void)test_click(ft_ui_test_get_quick_button(FEATHERTALK_QUICK_BLUETOOTH),
-                         "quick.bluetooth", "disabled/unavailable");
-        (void)test_click(ft_ui_test_get_quick_button(FEATHERTALK_QUICK_ROTATION),
-                         "quick.rotation", "disabled/unavailable");
-        test_record(!ft_ui_test_quick_enabled(FEATHERTALK_QUICK_WIFI) &&
-                    !ft_ui_test_quick_enabled(FEATHERTALK_QUICK_BLUETOOTH) &&
-                    !ft_ui_test_quick_enabled(FEATHERTALK_QUICK_ROTATION),
-                    "quick.unavailable.state", "all unchanged");
+        for (unsigned control = 0; control < FEATHERTALK_QUICK_COUNT; control++) {
+            if (control == FEATHERTALK_QUICK_BRIGHTNESS ||
+                ft_ui_test_quick_available(control)) continue;
+            (void)test_click(ft_ui_test_get_quick_button(control),
+                             "quick.unavailable", "disabled service");
+            test_record(!ft_ui_test_quick_enabled(control),
+                        "quick.unavailable.state", "unchanged");
+        }
         s_test_phase = FT_TEST_QUICK_BRIGHTNESS_CLICK;
         break;
     case FT_TEST_QUICK_BRIGHTNESS_CLICK:

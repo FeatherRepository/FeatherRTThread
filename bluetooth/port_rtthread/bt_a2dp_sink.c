@@ -38,6 +38,7 @@
 #include "classic/sdp_util.h"
 
 #include <feathertalk/audio_link.h>
+#include "bt_service.h"
 
 /* audio_link_m33.c 的 producer 写入口 (写 ring + 门铃) */
 extern rt_uint32_t ft_audio_produce(const rt_uint8_t *data, rt_uint32_t len);
@@ -118,7 +119,7 @@ static void bt_a2dp_media_handler(uint8_t seid, uint8_t *packet, uint16_t size)
     rt_uint32_t pos, payload_len, total, written;
 
     (void)seid;
-    if (s_stream_state != FT_A2DP_STATE_PLAYING)
+    if (!bt_service_target() || !bt_service_enabled() || s_stream_state != FT_A2DP_STATE_PLAYING)
     {
         return;   /* 仅在 stream started 状态产出 */
     }
@@ -217,6 +218,7 @@ static void bt_a2dp_sink_packet_handler(uint8_t packet_type, uint16_t channel,
         break;
 
     case A2DP_SUBEVENT_STREAM_STARTED:
+        if (!bt_service_target() || !bt_service_enabled()) break;
         s_stream_state = FT_A2DP_STATE_PLAYING;
         s_media_packets = 0;
         s_media_bytes = 0;
@@ -340,6 +342,14 @@ static void bt_avrcp_controller_packet_handler(uint8_t packet_type, uint16_t cha
 }
 
 /* ---- setup: bt_main.c 在 sdp_init 之后调用 ---- */
+void bt_a2dp_sink_quiesce(void)
+{
+    s_stream_state = FT_A2DP_STATE_CLOSED; /* Drop any media received while halting. */
+    bt_a2dp_ring_publish_format(0);       /* M55 drains/releases its own audio device. */
+    s_a2dp_cid = s_avrcp_cid = 0;
+    s_negotiated_rate = s_negotiated_channels = s_negotiated_bitpool_max = 0;
+}
+
 int bt_a2dp_sink_setup(void)
 {
     avdtp_stream_endpoint_t *local_stream_endpoint;
@@ -424,6 +434,13 @@ static void bt_a2dp_dump_sdp(void)
     de_dump_data_element(s_sdp_device_id_buffer);
 }
 
+static void bt_a2dp_connect_owned(void)
+{
+    if (s_stream_state != FT_A2DP_STATE_CLOSED || s_a2dp_cid) return;
+    uint8_t rc = a2dp_sink_establish_stream(s_peer_addr, &s_a2dp_cid);
+    rt_kprintf("[A2DP] establish -> %s rc=0x%02x cid=0x%x\n",
+               bd_addr_to_str(s_peer_addr), rc, s_a2dp_cid);
+}
 static int bt_a2dp(int argc, char **argv)
 {
     static const char *const state_names[] = { "closed", "open", "playing", "paused" };
@@ -443,10 +460,9 @@ static int bt_a2dp(int argc, char **argv)
             rt_kprintf("[A2DP] busy, state=%s cid=0x%x\n", state_names[state & 3], s_a2dp_cid);
             return 0;
         }
-        uint8_t rc = a2dp_sink_establish_stream(s_peer_addr, &s_a2dp_cid);
-        rt_kprintf("[A2DP] establish -> %s rc=0x%02x cid=0x%x\n",
-                   bd_addr_to_str(s_peer_addr), rc, s_a2dp_cid);
-        return 0;
+        int rc = bt_service_run_callback(bt_a2dp_connect_owned);
+        rt_kprintf("[A2DP] connect queued rc=%d\n", rc);
+        return rc;
     }
     rt_kprintf("[A2DP] state=%s a2dp_cid=0x%x avrcp_cid=0x%x peer=%s\n",
                state_names[state & 3], s_a2dp_cid, s_avrcp_cid,

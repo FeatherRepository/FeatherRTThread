@@ -4,6 +4,10 @@ This directory owns the source-compatible contract shared by the FeatherTalk
 M33 and M55 firmware projects. Keep hardware handles and RT-Thread kernel
 objects out of this interface.
 
+The runtime radio resource manager and its coexistence rules are documented in
+[RADIO_COEXISTENCE_zh.md](RADIO_COEXISTENCE_zh.md). Wi-Fi and Bluetooth are
+independent clients; shared supply ownership is not a feature-macro decision.
+
 The initial contract contains:
 
 - independent M33 and M55 firmware versions;

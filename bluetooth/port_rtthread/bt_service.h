@@ -10,9 +10,11 @@
 #include "bt_service_api.h"
 
 /* 开/关蓝牙电源与 HCI (value: 1=on, 0=off)
- * 返回 0 = 成功 (执行或已是目标状态) */
+ * 返回 0 = 请求已接受或已是目标状态；完成需查询 busy/enabled/error。 */
 int bt_service_quick_control(uint8_t on);
 
 /* 最近一次 bring-up 失败码 (0=正常/未启动, 9x=各阶段失败, 见 bt_main.c) */
 int bt_service_error(void);
+/* Queue a nonblocking stack diagnostic on the sole HCI owner thread. */
+int bt_service_run_callback(void (*callback)(void));
 #endif

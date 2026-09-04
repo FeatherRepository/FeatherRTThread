@@ -6,6 +6,8 @@
 #define FT_LAYOUT_DESIGN_HEIGHT  800
 #define FT_LAYOUT_SCALE_MIN       65
 #define FT_LAYOUT_SCALE_MAX      150
+/* UI policy, independent of page content and font scaling. */
+#define FT_KEYBOARD_SCREEN_PERCENT 30
 
 static ft_ui_layout_t s_layout;
 
@@ -53,9 +55,9 @@ static bool calculate_layout(int32_t width, int32_t height, ft_ui_layout_t *layo
     layout->notification_height = clamp_i32(scaled_px(460, layout->scale_percent),
                                              180, height - layout->status_bar_height -
                                                   layout->nav_bar_height - scaled_px(16, layout->scale_percent));
-    layout->keyboard_height = clamp_i32(scaled_px(235, layout->scale_percent),
-                                         140, (height - layout->status_bar_height -
-                                               layout->nav_bar_height) / 2);
+    layout->keyboard_height = clamp_i32(height * FT_KEYBOARD_SCREEN_PERCENT / 100,
+                                         1, (height - layout->status_bar_height -
+                                             layout->nav_bar_height) / 2);
     if (width < 360)
         layout->tile_columns = 2U;
     else if (width < 640)
@@ -127,13 +129,17 @@ bool ft_layout_profiles_self_test(void)
 {
     static const int32_t profiles[][2] =
     {
-        {240, 320}, {320, 480}, {480, 800}, {720, 1280}, {800, 480}
+        {200, 240}, {240, 320}, {320, 480}, {480, 800}, {720, 1280}, {800, 480}
     };
     ft_ui_layout_t layout;
     size_t i;
     for (i = 0U; i < sizeof(profiles) / sizeof(profiles[0]); i++)
     {
         if (!calculate_layout(profiles[i][0], profiles[i][1], &layout)) return false;
+        int32_t available = layout.screen_height - layout.status_bar_height - layout.nav_bar_height;
+        if (layout.keyboard_height != LV_MIN(layout.screen_height * FT_KEYBOARD_SCREEN_PERCENT / 100,
+                                             available / 2) ||
+            layout.keyboard_height <= 0 || layout.keyboard_height > available / 2) return false;
         if (layout.tile_column_width * layout.tile_columns +
             ((int32_t)layout.tile_columns - 1) * layout.tile_gap >
             layout.screen_width - 2 * layout.home_padding) return false;

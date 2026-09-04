@@ -48,6 +48,14 @@
 #include <rthw.h>
 #include <rtthread.h>
 
+#ifdef FEATHERTALK_USING_WIFI
+/* Product packet pools use dedicated HyperRAM, not DTCM or the UI heap.
+ * memp_init()/mem_init() initialize them. SDIO retains its DMA/cache handling. */
+#define LWIP_DECLARE_MEMORY_ALIGNED(name, size) \
+    unsigned char name[LWIP_MEM_ALIGN_BUFFER(size)] \
+        __attribute__((section(".feathertalk_wifi_pools"), aligned(32)))
+#endif
+
 #ifndef BYTE_ORDER
     #ifdef ARCH_CPU_BIG_ENDIAN
         #define BYTE_ORDER BIG_ENDIAN

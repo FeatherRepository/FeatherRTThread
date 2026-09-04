@@ -42,7 +42,9 @@
 #include "whd_wifi_api.h"
 #include "whd_buffer_api.h"
 #include "whd_resource_api.h"
+#include "whd_wlioctl.h"
 #include "whd_network_types.h"
+#include "whd_radio_platform.h"
 #include "wiced_resource.h"
 
 #define DBG_TAG           "whd.wlan"
@@ -84,6 +86,25 @@ struct drv_wifi
 };
 
 static struct drv_wifi wifi_sta, wifi_ap;
+
+#ifdef FEATHERTALK_USING_WIFI
+static volatile rt_bool_t product_wifi_ready;
+rt_bool_t feathertalk_whd_ready(void)
+{
+    return product_wifi_ready;
+}
+
+/* Stop/start the WLAN MAC without resetting the combo chip or BT domain.
+ * Called only by the serialized product Wi-Fi worker, after disconnect. */
+int feathertalk_whd_enable(rt_bool_t enabled)
+{
+    whd_result_t result;
+    if (!product_wifi_ready) return -RT_EBUSY;
+    result = whd_wifi_set_ioctl_buffer(wifi_sta.whd_itf,
+                                      enabled ? WLC_UP : WLC_DOWN, NULL, 0);
+    return result == WHD_SUCCESS ? RT_EOK : -RT_ERROR;
+}
+#endif
 
 
 /* rt-thread wlan interface */
@@ -209,6 +230,21 @@ static rt_err_t drv_wlan_scan(struct rt_wlan_device *wlan, struct rt_scan_info *
         return -RT_ENOMEM;
     }
 
+#ifdef FEATHERTALK_USING_WIFI
+    /* One passive scan: no probe-request transmissions and no synchronous
+     * active->passive handoff while the WLAN management lock is held. */
+    whd_scan->whd_scan_type = WHD_SCAN_TYPE_PASSIVE;
+    if (whd_wifi_scan(wifi->whd_itf, WHD_SCAN_TYPE_PASSIVE, WHD_BSS_TYPE_ANY,
+                     NULL, NULL, NULL, NULL, whd_scan_callback,
+                     &whd_scan->scan_result, whd_scan) != WHD_SUCCESS)
+    {
+        rt_sem_delete(whd_scan->active_sem);
+        rt_free(whd_scan);
+        return -RT_ERROR;
+    }
+    return RT_EOK;
+#endif
+
     /* Execute an active type scan */
     if (whd_wifi_scan(wifi->whd_itf, whd_scan->whd_scan_type, WHD_BSS_TYPE_ANY,
                             NULL, NULL, NULL, NULL, whd_scan_callback, &whd_scan->scan_result, whd_scan) != WHD_SUCCESS)
@@ -246,7 +282,7 @@ static rt_err_t drv_wlan_join(struct rt_wlan_device *wlan, struct rt_sta_info *s
 
     memcpy(whd_ssid.value, sta_info->ssid.val, whd_ssid.length);
 
-    ret = whd_wifi_join(get_drv_wifi(wlan)->whd_itf, &whd_ssid, WHD_SECURITY_WPA2_AES_PSK,
+    ret = whd_wifi_join(get_drv_wifi(wlan)->whd_itf, &whd_ssid, (whd_security_t)sta_info->security,
                             (const uint8_t *)sta_info->key.val, sta_info->key.len);
 
     if (ret != WHD_SUCCESS)
@@ -583,7 +619,8 @@ rt_weak void whd_bt_startup (void)
      */
 }
 
-static void whd_init_thread (void *parameter)
+static int whd_start_result = -RT_ERROR;
+static void whd_init_run (void *parameter)
 {
     static struct rt_wlan_device wlan_ap, wlan_sta;
     whd_oob_config_t oob_config =
@@ -649,7 +686,11 @@ static void whd_init_thread (void *parameter)
 #endif /* WPRINT_ENABLE_WHD_INFO */
 
     /* Initialize WiFi host drivers */
-    whd_init(&whd_driver, &whd_config, &resource_ops, &whd_buffer_ops, &netif_if_ops);
+    if (whd_init(&whd_driver, &whd_config, &resource_ops, &whd_buffer_ops, &netif_if_ops) != WHD_SUCCESS)
+    {
+        LOG_E("Unable to initialize WHD!");
+        return;
+    }
 
     /* Attach a bus SDIO */
     if (whd_bus_sdio_attach(whd_driver, &whd_sdio_config, &cyhal_sdio) != WHD_SUCCESS)
@@ -671,8 +712,9 @@ static void whd_init_thread (void *parameter)
         return;
     }
 
-    /* Bluetooth startup */
-    whd_bt_startup();
+    /* Consult runtime platform ownership, not the presence of a BT macro.
+     * An independent controller host must never be restarted by WLAN. */
+    if (whd_platform_same_core_bt()) whd_bt_startup();
 
 #ifdef CY_WIFI_DEFAULT_ENABLE_POWERSAVE_MODE
     uint32_t value = 0;
@@ -755,6 +797,21 @@ static void whd_init_thread (void *parameter)
         LOG_E("Failed to set %s to ap mode!", RT_WLAN_DEVICE_AP_NAME);
         return;
     }
+    whd_start_result = RT_EOK;
+#ifdef FEATHERTALK_USING_WIFI
+    product_wifi_ready = RT_TRUE;
+    rt_kprintf("[wifi] WHD ready: SDIO0, firmware embedded, country=%s\n", WHD_COUNTRY_CODE);
+#endif
+}
+
+static void whd_init_thread(void *parameter)
+{
+    if (whd_bsp_radio_result() != RT_EOK) {
+        whd_platform_radio_result(whd_bsp_radio_result());
+        return;
+    }
+    whd_init_run(parameter);
+    whd_platform_radio_result(whd_start_result);
 }
 
 static int rt_hw_wifi_init (void)
