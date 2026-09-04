@@ -16,6 +16,7 @@
 #endif
 
 extern rt_bool_t feathertalk_whd_ready(void);
+extern rt_bool_t feathertalk_whd_start_finished(int *result);
 extern int feathertalk_whd_enable(rt_bool_t enabled);
 enum { WIFI_ENABLE = 1, WIFI_DISABLE, WIFI_SCAN, WIFI_CONNECT, WIFI_DISCONNECT };
 typedef struct {
@@ -98,9 +99,62 @@ static void scan_report(int event, struct rt_wlan_buff *buff, void *parameter)
         memcpy(out->ssid, info->ssid.val, info->ssid.len);
         memcpy(out->bssid, info->bssid, 6);
         out->rssi = info->rssi; out->channel = info->channel;
+        out->band = info->band;
         out->security = info->security;
     }
     rt_mutex_release(&s_lock);
+}
+
+static int scan_networks(void)
+{
+    int result;
+    rt_mutex_take(&s_lock, RT_WAITING_FOREVER);
+    s_status.count = 0;
+    rt_mutex_release(&s_lock);
+    result = rt_wlan_scan_with_info(RT_NULL);
+    rt_mutex_take(&s_lock, RT_WAITING_FOREVER);
+    s_status.scan_revision++;
+    rt_mutex_release(&s_lock);
+    return result;
+}
+
+static bool find_network(const char *ssid, struct rt_wlan_info *info)
+{
+    int best = -1;
+    rt_mutex_take(&s_lock, RT_WAITING_FOREVER);
+    for (unsigned i = 0; i < s_status.count; ++i) {
+        const ft_wifi_network_t *network = &s_status.networks[i];
+        if (!strcmp(network->ssid, ssid) &&
+            (best < 0 || network->rssi > s_status.networks[best].rssi)) best = (int)i;
+    }
+    if (best >= 0) {
+        const ft_wifi_network_t *network = &s_status.networks[best];
+        memset(info, 0, sizeof(*info));
+        info->ssid.len = strlen(network->ssid);
+        memcpy(info->ssid.val, network->ssid, info->ssid.len);
+        memcpy(info->bssid, network->bssid, sizeof(info->bssid));
+        info->security = (rt_wlan_security_t)network->security;
+        info->channel = network->channel;
+        info->band = (rt_802_11_band_t)network->band;
+        info->rssi = network->rssi;
+    }
+    rt_mutex_release(&s_lock);
+    return best >= 0;
+}
+
+static int connect_network(const char *ssid, const char *key)
+{
+    struct rt_wlan_info info;
+    /* This SDK's rt_wlan_connect() leaves security UNKNOWN unless MGNT
+     * performs another join scan. Use the actual scan descriptor instead;
+     * never guess WPA2 from the presence of a password. */
+    if (!find_network(ssid, &info)) {
+        int result = scan_networks();
+        if (result != RT_EOK) return result;
+        if (!find_network(ssid, &info)) return -RT_ENOENT;
+    }
+    if (info.security == SECURITY_UNKNOWN) return -RT_ENOSYS;
+    return rt_wlan_connect_adv(&info, key);
 }
 
 /* Only the worker calls WLAN/ioctl APIs. UI and IPC only read a short snapshot. */
@@ -148,8 +202,18 @@ static void update_connection(void)
 static void worker(void *parameter)
 {
     wifi_request_t item;
+    int start_result;
     (void)parameter;
-    while (!feathertalk_whd_ready()) rt_thread_mdelay(200);
+    while (!feathertalk_whd_start_finished(&start_result)) rt_thread_mdelay(200);
+    if (start_result != RT_EOK || !feathertalk_whd_ready()) {
+        rt_mutex_take(&s_lock, RT_WAITING_FOREVER);
+        s_status.state = FT_WIFI_ERROR;
+        s_status.error = start_result ? start_result : -RT_ERROR;
+        s_status.revision++;
+        rt_mutex_release(&s_lock);
+        rt_kprintf("[wifi] initialization failed result=%d; radio unavailable\n", s_status.error);
+        return;
+    }
     rt_wlan_config_autoreconnect(RT_FALSE);
     rt_wlan_register_event_handler(RT_WLAN_EVT_SCAN_REPORT, scan_report, RT_NULL);
     rt_mutex_take(&s_lock, RT_WAITING_FOREVER);
@@ -172,16 +236,10 @@ static void worker(void *parameter)
                 if (result == RT_EOK) result = feathertalk_whd_enable(RT_FALSE);
                 break;
             case WIFI_SCAN:
-                rt_mutex_take(&s_lock, RT_WAITING_FOREVER);
-                s_status.count = 0;
-                rt_mutex_release(&s_lock);
-                result = rt_wlan_scan_with_info(RT_NULL);
-                rt_mutex_take(&s_lock, RT_WAITING_FOREVER);
-                s_status.scan_revision++;
-                rt_mutex_release(&s_lock);
+                result = scan_networks();
                 break;
             case WIFI_CONNECT:
-                result = rt_wlan_connect(item.ssid, item.key);
+                result = connect_network(item.ssid, item.key);
                 break;
             case WIFI_DISCONNECT:
                 rt_wlan_config_autoreconnect(RT_FALSE);

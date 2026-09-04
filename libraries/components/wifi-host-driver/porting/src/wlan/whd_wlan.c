@@ -89,6 +89,14 @@ static struct drv_wifi wifi_sta, wifi_ap;
 
 #ifdef FEATHERTALK_USING_WIFI
 static volatile rt_bool_t product_wifi_ready;
+static volatile rt_bool_t product_wifi_start_done;
+static int product_wifi_start_result = -RT_EBUSY;
+rt_bool_t feathertalk_whd_start_finished(int *result)
+{
+    if (!product_wifi_start_done) return RT_FALSE;
+    *result = product_wifi_start_result;
+    return RT_TRUE;
+}
 rt_bool_t feathertalk_whd_ready(void)
 {
     return product_wifi_ready;
@@ -279,6 +287,9 @@ static rt_err_t drv_wlan_join(struct rt_wlan_device *wlan, struct rt_sta_info *s
 {
     rt_err_t ret;
     whd_ssid_t whd_ssid = { .length = sta_info->ssid.len };
+
+    if (sta_info->security == SECURITY_UNKNOWN)
+        return WHD_UNKNOWN_SECURITY_TYPE;
 
     memcpy(whd_ssid.value, sta_info->ssid.val, whd_ssid.length);
 
@@ -620,6 +631,27 @@ rt_weak void whd_bt_startup (void)
 }
 
 static int whd_start_result = -RT_ERROR;
+#ifdef FEATHERTALK_USING_WIFI
+/* Read the loaded firmware's regulatory table, never substitute another
+ * country's rules or modify the signed CLM to make initialization succeed. */
+static void report_supported_countries(whd_interface_t interface)
+{
+    struct {
+        uint32_t buflen, band_set, band, count;
+        char countries[64][WLC_CNTRY_BUF_SZ];
+    } list = {0};
+    if (!interface) return;
+    list.buflen = sizeof(list);
+    whd_result_t result = whd_wifi_get_ioctl_buffer(interface, WLC_GET_COUNTRY_LIST,
+                                                    (uint8_t *)&list, sizeof(list));
+    rt_kprintf("[wifi] country-list result=%lu count=%lu:",
+               (unsigned long)result, (unsigned long)list.count);
+    if (result == WHD_SUCCESS && list.count <= 64)
+        for (uint32_t i = 0; i < list.count; i++)
+            rt_kprintf(" %.2s", list.countries[i]);
+    rt_kprintf("\n");
+}
+#endif
 static void whd_init_run (void *parameter)
 {
     static struct rt_wlan_device wlan_ap, wlan_sta;
@@ -706,9 +738,15 @@ static void whd_init_run (void *parameter)
 #endif
 
     /* Switch on Wifi, download firmware and create a primary interface, returns whd_interface_t */
-    if (whd_wifi_on(whd_driver, &wifi_sta.whd_itf) != WHD_SUCCESS)
+    whd_result_t start_result = whd_wifi_on(whd_driver, &wifi_sta.whd_itf);
+    if (start_result != WHD_SUCCESS)
     {
-        LOG_E("Unable to start the WiFi module!");
+        whd_start_result = (int)start_result;
+        LOG_E("Unable to start WiFi: result=%lu", (unsigned long)start_result);
+#ifdef FEATHERTALK_USING_WIFI
+        rt_kprintf("[wifi] requested country=%s\n", WHD_COUNTRY_CODE);
+        report_supported_countries(wifi_sta.whd_itf);
+#endif
         return;
     }
 
@@ -808,10 +846,18 @@ static void whd_init_thread(void *parameter)
 {
     if (whd_bsp_radio_result() != RT_EOK) {
         whd_platform_radio_result(whd_bsp_radio_result());
+#ifdef FEATHERTALK_USING_WIFI
+        product_wifi_start_result = whd_bsp_radio_result();
+        product_wifi_start_done = RT_TRUE;
+#endif
         return;
     }
     whd_init_run(parameter);
     whd_platform_radio_result(whd_start_result);
+#ifdef FEATHERTALK_USING_WIFI
+    product_wifi_start_result = whd_start_result;
+    product_wifi_start_done = RT_TRUE;
+#endif
 }
 
 static int rt_hw_wifi_init (void)

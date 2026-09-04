@@ -1269,3 +1269,31 @@
 - M55 HEX SHA-256：`AC6C36F27B0C3644E743F95DDD196310092623805F4A0052885371CBC525F6FF`；
   未改动的 M33 HEX：`8585D6215E82CB0387587DA8AF10E44DD3397F4E6EDBB50C0BAFEF06B5E2FC3D`。
   日志：`tmp/keyboard-proportion-{m55-build,flash,test,wifi-ui,final}.log`。
+
+## 2026-09-04 Wakaka 双频认证前的 CN 资源阻塞
+
+- 被动扫描确认 `Wakaka` ch6 和 `Wakaka_5G` ch48；用户确认中国大陆后，产品国家码由 AU 改为 CN。
+- 已构建、烧录并直接查询无线固件：`country-list result=0 count=2: AU US`；设置 CN 返回
+  `33556434 / WHD_WLAN_BADARG`。当前 SDK 配套 CLM 不支持 CN，不回退国家码或混用其他模组资源。
+- 修复初始化失败不通知 UI、无限“正在初始化”的问题：保留原始错误码、发布 FT_WIFI_ERROR，
+  实际 LVGL 标签及禁用按钮均通过在线对象回读检查。导航图同步失败状态。
+- 蓝牙在 Wi-Fi 初始化失败时仍有实时 HCI/广告应答进展，无新增硬件/UART/IPC 错误，用户盘未改动。
+- 已准备脱敏 `test-wifi-ap.py`，但本轮 AP 认证/DHCP/ping/吞吐尚未执行；需板厂/Infineon 提供
+  匹配本板且支持 CN 的 CLM。资源哈希、请求条件、固件哈希和实板证据见 `../WIFI_BRINGUP_zh.md` 文末。
+
+## 2026-09-04 用户指定 AU 后完成 Wakaka 双频联网
+
+- 按用户后续明确要求恢复 AU，保留 CN 失败诊断，不自动回退地区，不混用其他模组资源。
+- 首轮实际连接暴露 SDK `rt_wlan_connect()` 未填扫描描述符的问题：UNKNOWN security 导致
+  `WHD_WEP_NOT_ALLOWED`。产品 worker 改用真实扫描 security/band/channel/BSSID 调用
+  `rt_wlan_connect_adv()`，缺缓存时后台补扫描；WHD 边界显式拒绝未知类型，不写死 WPA2。
+- M55 重新构建、烧录校验后，Wakaka ch6 / Wakaka_5G ch48 各连接两次，通过 38 项检查；
+  DHCP 均为 192.168.0.109，网关 ping 共 16/16，7–10 ms。连接态扫描、off 清地址、off 拒绝
+  扫描、on 不自动重连及再次连接通过；BT 实时 HCI/广播应答保持，复位和错误计数未增加。
+- 5 GHz DNS/外网 ping 4/4；短时 TCP 收包 1.149 Mbps，同时 UI 全屏 60 帧为 31.41 FPS，
+  一帧一次 GPU 提交，无 overflow/scanout timeout。吞吐仍偏低，保留专项优化待办，不当作性能达标。
+- Wi-Fi UI 55 项回归通过；实际 LVGL 文本/开关/断开按钮在线回读通过。M33 固件未变，Flash
+  偏好和壁纸校验未变。结束保持 Wakaka_5G 已连接、设置 → Wi-Fi 页面。
+- 新增脱敏 AP 回归与限时 TCP 工具；详细结果、固件哈希、复现命令见 `../WIFI_BRINGUP_zh.md`。
+  未测试 WPA3、CN 配置联网、双向吞吐上限或蓝牙音频/USB/SD 全业务并发；代码、测试入口与
+  验收记录随本次版本一并纳入 `product/edgi-talk`，临时日志和网络密码不提交。

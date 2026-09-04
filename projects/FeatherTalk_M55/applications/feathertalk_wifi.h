@@ -13,6 +13,7 @@ typedef enum {
 typedef struct {
     char ssid[FT_WIFI_SSID_BYTES];
     int16_t rssi, channel;
+    uint8_t band;
     uint8_t bssid[6];
     uint32_t security;
 } ft_wifi_network_t;
