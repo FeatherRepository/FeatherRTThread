@@ -33,6 +33,10 @@ typedef struct
     uint32_t output_sound_write_calls;
     uint64_t output_sound_write_bytes;
     uint8_t output_worker_state;
+    uint32_t output_ring_min;      /* M5 排障: 流期间 ring 低水位 (0=见底) */
+    uint32_t output_gap_min_us;    /* M5 排障: USB OUT 相邻包最小间隔 */
+    uint32_t output_gap_max_us;    /* M5 排障: 最大间隔 (成堆抖动证据) */
+    uint32_t output_gap_over2ms;   /* M5 排障: 间隔 >2ms 的次数 */
     int last_error;
 } ft_usb_uac_status_t;
 
@@ -47,5 +51,12 @@ bool ft_usb_uac_output_format_supported(uint32_t sample_rate,
 bool ft_usb_uac_input_format_supported(uint32_t sample_rate,
                                        uint8_t sample_bits,
                                        uint8_t channels);
+
+/* M5: A3 契约 §2 tap —— BT Source 模式消费 UAC OUT (host->device) PCM,
+ * 返回实际读出字节数 (48k/16/2ch 帧对齐); 互斥由 ft_audio_claim_output 仲裁 */
+uint32_t ft_usb_uac_output_read(uint8_t *data, uint32_t capacity);
+
+/* M5: BT Source 激活时本地播放让位 (不再上 sound0, 防双消费同一 ring) */
+void ft_usb_uac_set_bt_tap(rt_bool_t active);
 
 #endif /* FEATHERTALK_USB_UAC_H */

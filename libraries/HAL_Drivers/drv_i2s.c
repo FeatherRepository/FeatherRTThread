@@ -52,6 +52,7 @@ static volatile rt_uint32_t i2s_irq_count;
 static volatile rt_uint32_t i2s_irq_trigger_count;
 static volatile rt_uint32_t i2s_frame_complete_count;
 static volatile rt_uint32_t i2s_irq_underflow_count;
+static volatile rt_uint32_t i2s_supply_stall_ms;   /* replay 队列空转累计 ms (供给断档) */
 static volatile rt_uint32_t i2s_transmit_count;
 static volatile rt_uint32_t i2s_transmit_fail_count;
 static volatile rt_uint32_t i2s_last_transmit_size;
@@ -902,6 +903,9 @@ void i2s_playback_task(void *arg)
         first_frame = false;
         while (audio->replay->queue.is_empty == 1)
         {
+            /* 供给断档统计: 队列空转 1ms/次 (≈一次可听爆音的起点),
+             * UAC/BT 共用此路径, feather_i2s_diag 可读 */
+            i2s_supply_stall_ms++;
             rt_thread_mdelay(1);
 #if defined(PKG_USING_WAVPLAYER) && !defined(BSP_USING_XiaoZhi)
             if(count>=50){
@@ -1178,14 +1182,15 @@ static int feather_i2s_diag(int argc, char **argv)
                (unsigned long)i2s_irq_underflow_count,
                snd_dev.tx_sem != RT_NULL ? snd_dev.tx_sem->value : 0U,
                snd_dev.tx_mq != RT_NULL ? snd_dev.tx_mq->entry : 0U);
-    rt_kprintf("I2S transmit=%lu fail=%lu last=%lu replay-buffer=%u/%u\n",
+    rt_kprintf("I2S transmit=%lu fail=%lu last=%lu replay-buffer=%u/%u supply-stall=%lu ms\n",
                (unsigned long)i2s_transmit_count,
                (unsigned long)i2s_transmit_fail_count,
                (unsigned long)i2s_last_transmit_size,
                snd_dev.audio.replay != RT_NULL ?
                    snd_dev.audio.replay->buf_info.block_size : 0U,
                snd_dev.audio.replay != RT_NULL ?
-                   snd_dev.audio.replay->buf_info.total_size : 0U);
+                   snd_dev.audio.replay->buf_info.total_size : 0U,
+               (unsigned long)i2s_supply_stall_ms);
     return RT_EOK;
 }
 MSH_CMD_EXPORT(feather_i2s_diag, Show FeatherTalk I2S playback diagnostics.);

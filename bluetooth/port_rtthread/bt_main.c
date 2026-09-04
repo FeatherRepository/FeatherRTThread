@@ -51,6 +51,7 @@
 extern int bt_a2dp_sink_setup(void);
 extern void bt_a2dp_sink_quiesce(void);
 extern void bt_uart_shutdown(void);
+extern int bt_a2dp_source_setup(void);
 
 /* FT Data CCCD 使能值 (Bluetooth 规范) */
 #define FT_GATT_CCCD_NOTIFICATION   0x0001U
@@ -694,6 +695,9 @@ static int bt_bringup(void)
     /* HCI 抓包走 ACL/NOP 过滤包装 (见上; 全量 dump 会拖死媒体流) */
     s_dump_stdout = hci_dump_embedded_stdout_get_instance();
     hci_dump_init(&s_dump_filtered);
+    /* 再关掉 DEBUG 级日志: hci.c 发送路径每包 3 行 log_debug, 115200 控制台
+     * 每行阻塞 ~5ms, 实测把 A2DP Source 发送节流到了 27 pkt/s (带宽 1/4) */
+    hci_dump_enable_log_level(HCI_DUMP_LOG_LEVEL_DEBUG, false);
     /* btstack_memory_init 必须在 hci_init 之前: 连接对象/L2CAP 通道都来自
      * 静态内存池。漏调时池为空 (BSS 全零), 首个连接到来时
      * btstack_memory_hci_connection_get 返回 NULL, hci.c:3763 提前 return,
@@ -729,6 +733,9 @@ static int bt_bringup(void)
         s_stack_setup_failed = RT_TRUE;
         return -96; /* Partial profile setup must not be registered a second time. */
     }
+
+    /* M5: A2DP Source (反向 ring 媒体泵, 静态登记; 连接由 msh bt_src 驱动) */
+    bt_a2dp_source_setup();
 
     feathertalk_ipc_send_event(10);
     s_hci_event_handler.callback = &packet_handler;

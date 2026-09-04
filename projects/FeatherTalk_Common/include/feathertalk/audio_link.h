@@ -22,6 +22,11 @@ extern "C" {
 #define FT_ALINK_BASE       0x261C0000UL   /* m33_m55_shared 起始 (双核链接脚本同址) */
 #define FT_ALINK_RING_BYTES 32768U         /* 8 x 4096B ≈ 85ms @48k/16/2ch */
 
+/* M5: 反向 ring (M55 producer -> M33 consumer, A2DP Source 用)。
+ * 控制块 128B + 数据 32768B = 32896B, 32B 对齐; 两 ring 同构, 仅方向相反。
+ * 初始化纪律与正向一致: M33 启动早期一次铺好, M55 等 magic。 */
+#define FT_ALINK2_BASE      (FT_ALINK_BASE + 32896UL)
+
 /* cache line (32B) 对齐的控制块; wr/rd 分居独立 line 防伪共享 */
 typedef struct
 {
@@ -51,6 +56,7 @@ typedef struct
 } ft_audio_link_t;
 
 #define FT_ALINK    ((ft_audio_link_t *)FT_ALINK_BASE)
+#define FT_ALINK2   ((ft_audio_link_t *)FT_ALINK2_BASE)   /* M5: M55->M33 */
 
 #if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1)
 #define FT_ALINK_DCACHE_CLEAN(addr, size)     SCB_CleanDCache_by_Addr((uint32_t *)(addr), (int32_t)(size))
@@ -64,22 +70,32 @@ typedef struct
 #define FT_ALINK_ALIGN_DOWN(v)  ((v) & ~31U)
 #define FT_ALINK_ALIGN_UP(v)    (((v) + 31U) & ~31U)
 
-/* producer 初始化 (仅 M33 启动早期调用一次) */
-static inline void ft_alink_init(void)
+/* producer 初始化 (仅 M33 启动早期调用一次; ring2 同此纪律) */
+static inline void ft_alink_init_at(ft_audio_link_t *r)
 {
-    ft_audio_link_t *r = FT_ALINK;
     memset((void *)r, 0, sizeof(*r));
     r->capacity = FT_ALINK_RING_BYTES;
     r->volume_percent = 0xFFU;   /* 0xFF=无变化哨兵: 0 会被 M55 当"音量 0"应用导致静音 */
     __DMB();
     r->magic = FT_ALINK_MAGIC;
-    FT_ALINK_DCACHE_CLEAN(FT_ALINK_BASE, 128);
+    FT_ALINK_DCACHE_CLEAN((uint32_t *)r, 128);
+}
+
+static inline void ft_alink_init(void)
+{
+    ft_alink_init_at(FT_ALINK);
+    ft_alink_init_at(FT_ALINK2);   /* M5: 反向 ring 一并铺好 */
+}
+
+static inline int ft_alink_ready_at(const ft_audio_link_t *r)
+{
+    FT_ALINK_DCACHE_INVALID((uint32_t)r, 32);
+    return r->magic == FT_ALINK_MAGIC;
 }
 
 static inline int ft_alink_ready(void)
 {
-    FT_ALINK_DCACHE_INVALID(FT_ALINK_BASE, 32);
-    return FT_ALINK->magic == FT_ALINK_MAGIC;
+    return ft_alink_ready_at(FT_ALINK);
 }
 
 /* 可读/可写字节数 (wr/rd 单调递增, 差值即占用) */

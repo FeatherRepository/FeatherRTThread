@@ -646,7 +646,7 @@ static void usb_shell_print_status(void)
                    (unsigned long)status.uac_device_update_count,
                    status.uac_format_pending ? 1U : 0U);
         rt_kprintf("UAC2 diag cb=%lu ring=%luB read=%luB wake=%lu open=%lu "
-                   "write=%lu/%luB worker=%u\n",
+                   "write=%lu/%luB worker=%u ring_min=%luB\n",
                    (unsigned long)uac.output_callback_count,
                    (unsigned long)uac.output_ring_used,
                    (unsigned long)uac.output_ring_read_bytes,
@@ -654,7 +654,12 @@ static void usb_shell_print_status(void)
                    (unsigned long)uac.output_sound_open_count,
                    (unsigned long)uac.output_sound_write_calls,
                    (unsigned long)uac.output_sound_write_bytes,
-                   uac.output_worker_state);
+                   uac.output_worker_state,
+                   (unsigned long)uac.output_ring_min);
+        rt_kprintf("UAC2 jitter: gap min=%lu us max=%lu us, >2ms x%lu\n",
+                   (unsigned long)uac.output_gap_min_us,
+                   (unsigned long)uac.output_gap_max_us,
+                   (unsigned long)uac.output_gap_over2ms);
     }
 }
 

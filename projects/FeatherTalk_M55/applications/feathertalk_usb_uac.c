@@ -25,7 +25,9 @@
 #define FT_UAC_VENDOR_ID              0xFFFFU
 #define FT_UAC_PRODUCT_ID             0xF502U
 #define FT_UAC_MAX_POWER_MA           100U
-#define FT_UAC_OUT_ALT_COUNT          2U
+/* M5: 删掉 24bit packed alt (该通路在 sound0/I2S 侧不通, 主机选上即纯爆音),
+ * 只保留 16bit —— 与全系统 A3 契约 (48k/16/2ch) 一致 */
+#define FT_UAC_OUT_ALT_COUNT          1U
 #define FT_UAC_MAX_PACKET             576U
 #define FT_UAC_INPUT_PACKET           64U
 #define FT_UAC_RING_SIZE              16384U
@@ -110,8 +112,8 @@ static const uint8_t s_config_descriptor[] =
         0x08, AUDIO_TERMINAL_STREAMING, FT_UAC_IN_FEATURE_ID,
         FT_UAC_IN_CLOCK_ID, 0x0000),
 
-    /* Host playback: the USB terminal has a fixed stereo cluster, then
-     * alternate settings select 16-bit or packed 24-bit samples. */
+    /* Host playback: the USB terminal has a fixed stereo cluster;
+     * 只有 16bit 一个 alt (24bit packed 通路不通已删, 见 FT_UAC_OUT_ALT_COUNT)。 */
     0x09, USB_DESCRIPTOR_TYPE_INTERFACE, FT_UAC_OUT_INTERFACE, 0x00,
     0x00, USB_DEVICE_CLASS_AUDIO, AUDIO_SUBCLASS_AUDIOSTREAMING,
     AUDIO_PROTOCOLv20, 0x00,
@@ -119,10 +121,6 @@ static const uint8_t s_config_descriptor[] =
         FT_UAC_OUT_INTERFACE, 0x01, 0x02, 2,
         FT_UAC_CHANNEL_CONFIG_STEREO, 2, 16, FT_UAC_OUT_EP, 0x09,
         384, FT_UAC_EP_INTERVAL),
-    AUDIO_V2_AS_ALTSETTING_DESCRIPTOR_INIT(
-        FT_UAC_OUT_INTERFACE, 0x02, 0x02, 2,
-        FT_UAC_CHANNEL_CONFIG_STEREO, 3, 24, FT_UAC_OUT_EP, 0x09,
-        576, FT_UAC_EP_INTERVAL),
 
     /* The current PDM driver is genuinely fixed at 16 kHz / 16 bit /
      * stereo, so USB must not advertise formats it cannot produce. */
@@ -186,6 +184,16 @@ static volatile bool s_output_device_open;
 static struct rt_event s_uac_event;
 static bool s_primitives_ready;
 static rt_thread_t s_output_thread;
+static rt_bool_t  s_out_ring_min_reset = RT_TRUE;   /* M5 排障: 流起始重置低水位 */
+static rt_bool_t  s_out_dwt_ready;                  /* DWT CYCCNT 已使能 */
+static volatile rt_uint32_t s_out_cb_last_cyc;      /* 上一个 OUT 包到达周期数 */
+static volatile rt_bool_t s_bt_tap_active;          /* M5: BT Source 持有音源 */
+
+/* M5: BT Source 模式开关本地播放让位 (sbc_encode_m55.c 随 M33 流状态调用) */
+void ft_usb_uac_set_bt_tap(rt_bool_t active)
+{
+    s_bt_tap_active = active;
+}
 static rt_thread_t s_input_thread;
 static ft_usb_uac_status_t s_status;
 static uint32_t s_requested_generation;
@@ -255,7 +263,9 @@ bool ft_usb_uac_output_format_supported(uint32_t sample_rate,
                                         uint8_t sample_bits,
                                         uint8_t channels)
 {
-    return channels == 2U &&
+    /* M5 实测: 24bit packed 样本在 sound0/I2S 通路不通 (音乐变纯爆音),
+     * 描述符已删 24bit alt; 这里同步钉死 16bit, 防止异常主机配置进来 */
+    return channels == 2U && sample_bits == 16U &&
            ft_audio_output_format_supported(sample_rate, sample_bits,
                                              channels);
 }
@@ -329,6 +339,14 @@ static uint32_t output_ring_read(uint8_t *data, uint32_t capacity,
     return length;
 }
 
+/* M5: A3 契约 §2 的 tap 接口 —— BT Source 模式消费 UAC OUT 数据。
+ * 与本地播放互斥由 ft_audio_claim_output 仲裁 (Source 模式持 claim 时
+ * UAC worker 拿不到 sound0, s_out_ring 由本接口抽干)。 */
+uint32_t ft_usb_uac_output_read(uint8_t *data, uint32_t capacity)
+{
+    return output_ring_read(data, capacity, 4U);   /* 48k/16/2ch 帧对齐 */
+}
+
 static void queue_output_format(uint32_t rate, uint8_t bits,
                                 uint8_t channels, bool from_host)
 {
@@ -355,6 +373,30 @@ static void output_endpoint_callback(uint8_t busid, uint8_t ep,
     RT_UNUSED(ep);
     if (!s_status.active || !s_status.output_streaming) return;
     s_status.output_callback_count++;
+
+    /* USB 到达抖动测量 (M5 排障): DWT 测相邻包间隔。同步字 1ms 一包,
+     * 间隔远大于 1ms 即成堆 (host 调度抖动), 配合 ring_min 判读吸收能力 */
+    {
+        uint32_t now;
+        if (!s_out_dwt_ready)
+        {
+            CoreDebug->DEMCR |= 0x01000000U;   /* TRCENA */
+            DWT->CYCCNT = 0U;
+            DWT->CTRL |= 1U;                   /* CYCCNTENA */
+            s_out_dwt_ready = RT_TRUE;
+        }
+        now = DWT->CYCCNT;
+        if (s_out_cb_last_cyc != 0U)
+        {
+            uint32_t gap_us = (now - s_out_cb_last_cyc) /
+                              (SystemCoreClock / 1000000U);
+            if (gap_us < s_status.output_gap_min_us) s_status.output_gap_min_us = gap_us;
+            if (gap_us > s_status.output_gap_max_us) s_status.output_gap_max_us = gap_us;
+            if (gap_us > 2000U) s_status.output_gap_over2ms++;
+        }
+        s_out_cb_last_cyc = now;
+    }
+
     if (s_status.output_sample_rate != s_negotiated_output_rate ||
         s_status.output_sample_bits != s_negotiated_output_bits ||
         s_status.output_channels != s_negotiated_output_channels)
@@ -400,6 +442,11 @@ static void audio_interface_notify(uint8_t busid, uint8_t event, void *arg)
         {
             s_negotiated_output_bits = 16U;
             s_negotiated_output_channels = 2U;
+            s_out_ring_min_reset = RT_TRUE;   /* 新流: 低水位重新统计 */
+            s_status.output_gap_min_us = 0xFFFFFFFFU;  /* 抖动统计同步重置 */
+            s_status.output_gap_max_us = 0U;
+            s_status.output_gap_over2ms = 0U;
+            s_out_cb_last_cyc = 0U;
         }
         else if (alternate == 2U)
         {
@@ -561,14 +608,23 @@ static void output_worker(void *parameter)
             RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR, 20U, &received);
         s_status.output_worker_wakeups++;
         s_status.output_worker_state = 2U;
+        /* M5 排障: 流期间 ring 低水位 (见底即离供给断档不远) */
+        if (s_status.output_streaming &&
+            (s_out_ring_min_reset || s_out_ring_used < s_status.output_ring_min))
+        {
+            s_status.output_ring_min = s_out_ring_used;
+            s_out_ring_min_reset = false;
+        }
         if (applied_control_generation != s_output_control_generation)
         {
             (void)ft_audio_set_output_volume(s_output_mute ?
                                              0U : s_output_volume);
             applied_control_generation = s_output_control_generation;
         }
-        if (!s_status.active || !s_status.output_streaming)
+        if (!s_status.active || !s_status.output_streaming || s_bt_tap_active)
         {
+            /* BT Source 模式抢音源 (A3 §2): 本地播放让位, 放 claim + 关 sound0,
+             * ring 数据只走 tap -> 蓝牙, 不再双消费 */
             if (device != RT_NULL)
             {
                 s_status.output_worker_state = 7U;
@@ -627,6 +683,21 @@ static void output_worker(void *parameter)
             }
             s_status.output_sound_open_count++;
             s_output_device_open = true;
+
+            /* M5 实测爆音修复: 开流先把 ring 垫到 8KB (~42ms) 再开始供给。
+             * 否则 replay 池 (8KB) 从零起步、供给被块门控钉在实时率,
+             * 相位余量≈0, 任何调度抖动都击穿成零帧爆音 (BT 侧同款教训,
+             * 见故障档案-M4b卡顿与断连根因)。USB 输入实测恒 192B/ms 无丢包,
+             * 预充 ~42ms 即可注满池。 */
+            {
+                rt_tick_t t0 = rt_tick_get();
+                while (s_status.output_streaming &&
+                       s_out_ring_used < 8192U &&
+                       (rt_tick_get() - t0) < rt_tick_from_millisecond(500U))
+                {
+                    rt_thread_mdelay(5);
+                }
+            }
         }
         while (s_out_ring_used >= FT_UAC_AUDIO_BLOCK &&
                s_status.output_streaming)

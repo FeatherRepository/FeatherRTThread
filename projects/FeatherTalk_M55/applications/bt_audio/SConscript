@@ -14,6 +14,7 @@ build_dir = os.path.normpath(os.path.join(cwd, '..', '..', 'build', 'bt_audio'))
 
 bt_src = [os.path.join(btstack_root, 'src', f) for f in
           ('classic/btstack_sbc_decoder_bluedroid.c',
+           'classic/btstack_sbc_encoder_bluedroid.c',   # M5: Source 模式编码
            'classic/btstack_sbc_bluedroid.c',
            'classic/btstack_sbc_plc.c',
            'btstack_util.c')]          # btstack_min
@@ -22,6 +23,11 @@ bt_src += [os.path.join(btstack_root, '3rd-party', 'bluedroid', 'decoder', 'srce
             'decoder-oina.c', 'decoder-private.c', 'decoder-sbc.c', 'dequant.c',
             'framing-sbc.c', 'framing.c', 'oi_codec_version.c',
             'synthesis-8-generated.c', 'synthesis-dct8.c', 'synthesis-sbc.c')]
+# M5: bluedroid SBC 编码器底层 (Source 模式, 与 M33 A0-2 同款清单)
+bt_src += [os.path.join(btstack_root, '3rd-party', 'bluedroid', 'encoder', 'srce', f) for f in
+           ('sbc_analysis.c', 'sbc_dct.c', 'sbc_dct_coeffs.c',
+            'sbc_enc_bit_alloc_mono.c', 'sbc_enc_bit_alloc_ste.c',
+            'sbc_enc_coeffs.c', 'sbc_encoder.c', 'sbc_packing.c')]
 
 # 文件名在这些源里均唯一, 可平铺到同一目录;
 # decoder-sbc.c 相对包含 readsamplesjoint.inc, 一并拷入 (不编译)

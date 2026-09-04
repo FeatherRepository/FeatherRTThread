@@ -45,7 +45,8 @@ src = [os.path.join(bt_root, f) for f in
        ('bt_main.c', 'bt_hcd_download.c', 'bt_uart_block_rtthread.c',
         'hal_uart_dma_rtthread.c', 'hal_cpu_rtthread.c', 'hal_time_ms_rtthread.c',
         'sm_stubs_m2.c',
-        'bt_a2dp_sink.c')]    # M4b: A2DP sink + AVRCP + 媒体包 -> 跨核 ring
+        'bt_a2dp_sink.c',    # M4b: A2DP sink + AVRCP + 媒体包 -> 跨核 ring
+        'bt_a2dp_source.c')]    # M5: A2DP source + 反向 ring -> 蓝牙耳机
 src += [os.path.join(btstack_root, 'src', f) for f in
         ('hci.c', 'hci_transport_h4.c', 'hci_cmd.c', 'hci_dump.c',
          'btstack_linked_list.c', 'btstack_memory.c', 'btstack_memory_pool.c',
@@ -58,8 +59,9 @@ src += [os.path.join(btstack_root, 'src', f) for f in
          'classic/btstack_link_key_db_memory.c',
          # A0-4 Classic 音频: A2DP sink + AVDTP + AVRCP + SBC 编解码
          # (仅编入/链接, A2DP 初始化在后续里程碑)
-         'classic/a2dp.c', 'classic/a2dp_sink.c',
+         'classic/a2dp.c', 'classic/a2dp_sink.c', 'classic/a2dp_source.c',
          'classic/avdtp.c', 'classic/avdtp_acceptor.c', 'classic/avdtp_sink.c',
+         'classic/avdtp_source.c',   # M5: A2DP Source 依赖
          'classic/avdtp_util.c',
          'classic/avrcp.c', 'classic/avrcp_target.c', 'classic/avrcp_controller.c',
          'classic/btstack_sbc_bluedroid.c', 'classic/btstack_sbc_encoder_bluedroid.c',

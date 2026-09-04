@@ -214,3 +214,67 @@ static int ft_audio_sbc_test(int argc, char **argv)
 MSH_CMD_EXPORT_ALIAS(ft_audio_sbc_test, ft_audio_sbc_test,
                      A0-2: encode 1kHz sine to SBC frames into cross-core ring);
 #endif /* FEATHERTALK_BT_STACK_BK */
+
+/* ---- M5-1 msh: ft_audio2_test [seconds] ----
+ * 反向 ring (FT_ALINK2: M55 producer -> M33 consumer) 收验:
+ * 抽干 ring2 并按 [2B LE len + SBC 帧] 帧化校验 (长度合法 + 载荷 0x9C 同步字),
+ * 统计帧数/字节/错块; 结束时打印速率。用于验证 M55 编码 + 反向链路。 */
+static int ft_audio2_test(int argc, char **argv)
+{
+    static rt_uint8_t buf[1200];
+    rt_uint32_t seconds = 5;
+    rt_uint32_t blocks = 0, bytes = 0, frames = 0, errors = 0;
+    rt_tick_t t0;
+
+    if (!ft_alink_ready_at(FT_ALINK2))
+    {
+        rt_kprintf("ft_audio2_test: ring2 not ready\n");
+        return -1;
+    }
+    if (argc > 1) seconds = (rt_uint32_t)strtoul(argv[1], RT_NULL, 0);
+
+    rt_kprintf("ft_audio2_test: drain ring2 %lu s ...\n", (unsigned long)seconds);
+    t0 = rt_tick_get();
+    while ((rt_tick_get() - t0) < rt_tick_from_millisecond(seconds * 1000U))
+    {
+        rt_uint32_t got = ft_alink_read(FT_ALINK2, buf, sizeof(buf));
+        if (got == 0U)
+        {
+            rt_thread_mdelay(2);
+            continue;
+        }
+        /* 帧化扫描: 块内可含多个 [len + SBC 帧] */
+        rt_uint32_t pos = 0;
+        while (pos + 2U <= got)
+        {
+            rt_uint32_t flen = (rt_uint32_t)buf[pos] | ((rt_uint32_t)buf[pos + 1] << 8);
+            if (flen < 4U || flen > 512U || pos + 2U + flen > got)
+            {
+                errors++;
+                break;   /* 失步即弃本轮余量 (自测只测对齐流) */
+            }
+            if (buf[pos + 2] != 0x9CU)   /* SBC 同步字 */
+            {
+                errors++;
+            }
+            else
+            {
+                frames++;
+            }
+            pos += 2U + flen;
+        }
+        blocks++;
+        bytes += got;
+    }
+    rt_uint32_t ms = rt_tick_get() - t0;
+    rt_kprintf("ft_audio2_test: blocks=%lu bytes=%lu sbc_frames=%lu errors=%lu, %lu ms -> %lu B/s\n",
+               (unsigned long)blocks, (unsigned long)bytes, (unsigned long)frames,
+               (unsigned long)errors, (unsigned long)ms,
+               ms ? (unsigned long)(bytes * 1000UL / ms) : 0UL);
+    rt_kprintf("ft_audio2_test: ring2 fmt gen=%lu rate=%lu, used=%lu\n",
+               (unsigned long)FT_ALINK2->fmt_gen, (unsigned long)FT_ALINK2->fmt_rate,
+               (unsigned long)ft_alink_used(FT_ALINK2));
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(ft_audio2_test, ft_audio2_test,
+                     M5: drain reverse ring2 and verify framed SBC stream);
