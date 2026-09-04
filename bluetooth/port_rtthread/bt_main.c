@@ -59,6 +59,12 @@ extern int bt_a2dp_sink_setup(void);
 
 #define FT_BT_MODULE_POWER_PIN      GET_PIN(16, 3)   /* 载板无线电源轨 FET */
 #define FT_BT_DOWNLOAD_BAUD         3000000UL
+/* 运行时波特率: A2DP 媒体流需要 ~50KB/s, 115200 (≈11.5KB/s) 根本喂不饱,
+ * 实测手机播放时 ACL 到达仅 ~0.2KB/s 突发 (控制器缓冲溢出丢包) -> 全程断音。
+ * HCD 打补丁后模组回默认 115200, 用厂商命令 FC18 切 3M (命令完成事件
+ * 在旧波特率返回, 之后模组即切; 主机随后切同速)。 */
+#define FT_BT_RUNTIME_BAUD          3000000UL
+#define HCI_VSC_UPDATE_BAUD         0xFC18U
 #define FT_BT_AUTOBAUD_RESET_MS     100U
 #define FT_BT_CTS_TIMEOUT_MS        2000U
 
@@ -112,13 +118,46 @@ volatile uint32_t g_lb_result;
 /* 裸路径 Reset 在 h4 open 前的应答码 (二分定位用) */
 volatile int g_raw_reset_rc = -99;
 
-/* h4 传输配置: hci_init 必须携带, 否则 btstack_uart_embedded_open 会
- * 解引用 NULL 的 btstack_uart_block_configuration (addr 0 总线错误, 实测) */
-static const btstack_uart_config_t s_uart_config = {
-    .baudrate = FEATHERTALK_BT_UART_BAUD,
+/* h4 传输配置: 必须是 hci_transport_config_uart_t (首字段 type=
+ * HCI_TRANSPORT_CONFIG_UART)。之前误传 btstack_uart_config_t: 该工程
+ * -fshort-enums, type 仅读首字段低 1B —— 115200 低字节恰为 0x00 混过
+ * 检查, 切 3M (低字节 0xC0) 后暴露, 传输层静默失效不广播。
+ * baudrate_init 在 S4b 切速成功后改 3M, 失败保持 115200 (与模组一致)。 */
+static hci_transport_config_uart_t s_uart_config = {
+    .type = HCI_TRANSPORT_CONFIG_UART,
+    .baudrate_init = FEATHERTALK_BT_UART_BAUD,
+    .baudrate_main = 0,                    /* 0 = 与 init 同速 */
     .flowcontrol = 0,
     .device_name = FEATHERTALK_BT_UART_DEV,
     .parity = 0,
+};
+
+/* 抓包减负 (A2DP 媒体流必需): 3M HCI + ~45KB/s 媒体流下, 全量 ACL 十六进制
+ * dump 远超 115200 控制台带宽, rt_kprintf 同步发送会反过来拖死 btloop。
+ * 过滤包装: 丢 ACL 数据帧与高频 NOP(Number Of Completed Packets, 0x13)事件,
+ * 其余事件/日志原样保留 (排障能力不降)。 */
+static const hci_dump_t *s_dump_stdout;
+static void ft_dump_log_packet(uint8_t packet_type, uint8_t in,
+                               uint8_t *packet, uint16_t len)
+{
+    if (packet_type == HCI_ACL_DATA_PACKET)
+    {
+        return;
+    }
+    if ((packet_type == HCI_EVENT_PACKET) && (len >= 1) && (packet[0] == 0x13U))
+    {
+        return;
+    }
+    s_dump_stdout->log_packet(packet_type, in, packet, len);
+}
+static void ft_dump_log_message(int log_level, const char *format, va_list argptr)
+{
+    s_dump_stdout->log_message(log_level, format, argptr);
+}
+static const hci_dump_t s_dump_filtered = {
+    .reset = RT_NULL,
+    .log_packet = ft_dump_log_packet,
+    .log_message = ft_dump_log_message,
 };
 
 /* ---- GATT 服务状态 (att_server, M2) ---- */
@@ -573,11 +612,38 @@ static void bt_loop_thread_entry(void *param)
     }
     BT_CP(42);
 
+    /* S4b: 运行时波特率 115200 -> 3M (A2DP 媒体流带宽刚需)。
+     * FC18 载荷: [00 00][baud LE 4B]; 命令完成事件仍在旧波特率返回,
+     * 收到后模组立即切速, 主机随即切同速。失败则保持 115200 继续
+     * (BLE 够用, A2DP 会断音 —— 打日志明示, 不静默降级)。 */
+    {
+        uint8_t fc18[6] = { 0x00U, 0x00U,
+                            (uint8_t)(FT_BT_RUNTIME_BAUD & 0xFFU),
+                            (uint8_t)((FT_BT_RUNTIME_BAUD >> 8) & 0xFFU),
+                            (uint8_t)((FT_BT_RUNTIME_BAUD >> 16) & 0xFFU),
+                            (uint8_t)((FT_BT_RUNTIME_BAUD >> 24) & 0xFFU) };
+        rc = bt_hcd_send_raw_command(HCI_VSC_UPDATE_BAUD, sizeof(fc18), fc18);
+        if (rc == 0)
+        {
+            rt_kprintf("[BT] S4b runtime baud -> %lu\n", (unsigned long)FT_BT_RUNTIME_BAUD);
+            bt_uart_raw_set_baud(FT_BT_RUNTIME_BAUD);
+            s_uart_config.baudrate_init = FT_BT_RUNTIME_BAUD;
+            rt_thread_mdelay(20);
+        }
+        else
+        {
+            rt_kprintf("[BT] S4b FC18 baud switch FAILED rc=%d, stay @115200 (A2DP 会断音!)\n", rc);
+            feathertalk_ipc_send_event(95);
+        }
+        BT_CP(43);
+    }
+
     s_bt_err = 0;
     rt_kprintf("[BT] S5 btstack init\n");
     feathertalk_ipc_send_event(8);
-    /* 全量 HCI 抓包到控制台 (排障期) */
-    hci_dump_init(hci_dump_embedded_stdout_get_instance());
+    /* HCI 抓包走 ACL/NOP 过滤包装 (见上; 全量 dump 会拖死媒体流) */
+    s_dump_stdout = hci_dump_embedded_stdout_get_instance();
+    hci_dump_init(&s_dump_filtered);
     /* btstack_memory_init 必须在 hci_init 之前: 连接对象/L2CAP 通道都来自
      * 静态内存池。漏调时池为空 (BSS 全零), 首个连接到来时
      * btstack_memory_hci_connection_get 返回 NULL, hci.c:3763 提前 return,

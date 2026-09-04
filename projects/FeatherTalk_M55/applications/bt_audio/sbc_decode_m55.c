@@ -35,6 +35,23 @@
 /* 单块最大输入 128 帧 -> 输出上界 141 帧, 留余量 */
 #define FT_RS_OUT_CAP_FRAMES    160U
 
+/* ---- 水位管理 (M4b 防卡顿核心) ----
+ * 消费线程被 sound0 写阻塞 (replay 池满 rt_mp_alloc RT_WAITING_FOREVER) 钉在
+ * 1x 实时速率, ring 水位从开流起全程保持 —— 所以开流前必须先把水位垫起来:
+ *   sound0 replay 池 2x4096B (RT_AUDIO_REPLAY_MP_*, 42.7ms) + 攒块 4096B
+ *   (21.3ms) ≈ 64ms 下游缓冲, 无预缓冲时蓝牙投递停顿超过它即欠载 ->
+ *   框架对 sound0 插零帧 (audio.c underrun memset 0) = 听感卡顿。
+ * 12KB SBC @48k bitpool53 (≈39.7KB/s) ≈ 300ms, 加下游 64ms 抖动容限。
+ * 注意稳态时预缓冲水会迁移进 sound0 池 (消费线程放空 drain 到池满阻塞),
+ * ring 稳态保持 ~5-7KB —— 见空即离欠载不远。 */
+#define FT_PREBUF_BYTES         12288U
+#define FT_PREBUF_TIMEOUT_MS    800U    /* 源发得慢/超短流: 超时照常开声 */
+/* 饥饿分级: ring 首空时下游还有 <=64ms, holdoff 取保守的 50ms: 短断流静默
+ * 容忍; 超过则下游大概率已插零帧 (可听卡顿) —— 计数并等恢复水位。
+ * 恢复水位 4KB≈100ms: 长断流后按滴喂会串成连续卡顿, 宁可多等一次干净重启 */
+#define FT_STARVE_HOLDOFF_MS    50U
+#define FT_REPREBUF_BYTES       4096U
+
 /* DWT 使能 (兼容新旧 CMSIS 宏名) */
 #if defined(CoreDebug_DEMCR_TRCENA_Msk)
 #define FT_TRCENA_Msk       CoreDebug_DEMCR_TRCENA_Msk
@@ -64,6 +81,12 @@ static rt_uint8_t       s_cur_volume = 0xFFU;
 static int16_t          s_out_buf[FT_OUT_BLOCK_SAMPLES];
 static rt_uint32_t      s_out_fill;     /* int16 数 */
 
+/* 水位状态 */
+static rt_bool_t        s_out_active;        /* 已向 sound0 写出首块 */
+static rt_tick_t        s_empty_since;       /* 0 = ring 非空; 非 0 = 首空时刻 */
+static rt_bool_t        s_starve_counted;    /* 本场断流已计数并进入恢复水位 */
+static rt_uint32_t      s_cur_gen;           /* 本流 fmt_gen (预缓冲期间监测换代) */
+
 /* 重采样状态 (相位累加, 跨块连续) */
 static int16_t          s_rs_prev[2];
 static rt_uint32_t      s_rs_phase;     /* 16.16, 相对当前输入块起点 */
@@ -84,6 +107,20 @@ static rt_uint32_t      s_last_ch;
 static rt_uint32_t      s_stat_out_blocks;  /* sound0 写块数 */
 static rt_uint32_t      s_stat_out_bytes;   /* sound0 写字节数 */
 static rt_uint32_t      s_stat_streams;     /* stream_begin 次数 */
+static rt_uint32_t      s_stat_starves;     /* 饥饿次数 (每次≈一次可听卡顿) */
+static rt_uint32_t      s_stat_prebuf_ms;   /* 最近一次开流预缓冲耗时 */
+
+/* 解码停滞看门狗: 实测出现"ring 数据照流、解码器零产出零报错"的死状态
+ * (bad=0 frames 冻结), 根因在 OI 解码器内部状态机。有输入而无产出超时即
+ * 整器重init + 拼帧状态清零, 并留下最近一次喂入字节的 hex 快照供排障。 */
+static rt_uint32_t      s_stat_feed_bytes;      /* 喂给解码器的总字节 */
+static rt_uint32_t      s_wd_prev_frames;       /* 看门狗: 上轮帧数 */
+static rt_uint32_t      s_wd_prev_feed;         /* 看门狗: 上轮喂入字节 */
+static rt_tick_t        s_wd_last_progress;     /* 看门狗: 最近帧产出时刻 */
+static rt_uint32_t      s_stat_stalls;          /* 看门狗触发次数 */
+static rt_uint8_t       s_last_feed[32];        /* 最近喂入字节快照 */
+static rt_uint32_t      s_last_feed_len;
+#define FT_STALL_TIMEOUT_MS     1000U
 
 static void ft_dwt_init_once(void)
 {
@@ -113,6 +150,7 @@ static void ft_sound_push(const int16_t *data, rt_uint32_t samples)
         {
             if (s_sound_open)
             {
+                s_out_active = RT_TRUE;   /* 首块起输出在跑, 饥饿检测生效 */
                 rt_device_write(s_sound_dev, 0, s_out_buf, FT_OUT_BLOCK_BYTES);
             }
             s_stat_out_blocks++;
@@ -206,7 +244,18 @@ void ft_sbc_stream_begin(void)
     s_stat_out_blocks = 0U;
     s_stat_out_bytes = 0U;
     s_stat_streams++;
+    s_stat_starves = 0U;
+    s_stat_prebuf_ms = 0U;
     s_out_fill = 0U;
+    s_out_active = RT_FALSE;
+    s_empty_since = 0;
+    s_starve_counted = RT_FALSE;
+    s_stat_feed_bytes = 0U;
+    s_wd_prev_frames = 0U;
+    s_wd_prev_feed = 0U;
+    s_wd_last_progress = rt_tick_get();
+    s_stat_stalls = 0U;
+    s_last_feed_len = 0U;
 
     /* 协商格式 (M33 换代前已写入 ring 控制块) */
     FT_ALINK_DCACHE_INVALID(FT_ALINK_BASE, 32);
@@ -231,6 +280,29 @@ void ft_sbc_stream_begin(void)
         }
     }
     s_cur_volume = 0xFFU;   /* 等 M33 报 AVRCP 音量 */
+
+    /* 预缓冲: 首块出声前把 ring 水位垫到 FT_PREBUF_BYTES (≈300ms)。
+     * 消费速率被写阻塞钉在 1x 实时, 此水位即全程抖动容限。源发得慢或
+     * 流被叫停 (gen 换代) 时提前退出, 不影响后续状态机。 */
+    s_cur_gen = FT_ALINK->fmt_gen;
+    if (s_sound_open)
+    {
+        rt_tick_t t0 = rt_tick_get();
+        while ((rt_tick_get() - t0) < rt_tick_from_millisecond(FT_PREBUF_TIMEOUT_MS))
+        {
+            FT_ALINK_DCACHE_INVALID(FT_ALINK_BASE, 32);
+            if (FT_ALINK->fmt_gen != s_cur_gen)
+            {
+                break;
+            }
+            if (ft_alink_used(FT_ALINK) >= FT_PREBUF_BYTES)
+            {
+                break;
+            }
+            rt_thread_mdelay(10);
+        }
+        s_stat_prebuf_ms = (rt_uint32_t)(rt_tick_get() - t0);
+    }
     s_dec_ready = RT_TRUE;
     rt_kprintf("[SBC] decoder ready (stream #%lu, rate=%lu%s, sound0 %s)\n",
                (unsigned long)s_stat_streams, (unsigned long)s_stream_rate,
@@ -254,6 +326,9 @@ void ft_sbc_stream_end(void)
                    (unsigned long)s_stat_out_blocks);
     }
     s_dec_ready = RT_FALSE;
+    s_out_active = RT_FALSE;
+    s_empty_since = 0;
+    s_starve_counted = RT_FALSE;
     if (s_sound_open && (s_sound_dev != RT_NULL))
     {
         rt_device_close(s_sound_dev);
@@ -330,11 +405,15 @@ void ft_sbc_feed(const rt_uint8_t *data, rt_uint32_t len)
 
         /* 完整块: 计时解码 (解码器内部流式分帧, 一块可多帧;
          * CYCCNT 32bit 回绕由无符号减法吸收) */
+        rt_uint32_t blk_len = s_frame_want - FT_SBC_HDR_LEN;
         rt_uint32_t c0 = DWT->CYCCNT;
         btstack_sbc_decoder_process_data(&s_sbc_dec, 0,
                                          s_frame_buf + FT_SBC_HDR_LEN,
-                                         (int)(s_frame_want - FT_SBC_HDR_LEN));
+                                         (int)blk_len);
         rt_uint32_t c1 = DWT->CYCCNT;
+        s_stat_feed_bytes += blk_len;
+        s_last_feed_len = (blk_len < 32U) ? blk_len : 32U;
+        memcpy(s_last_feed, s_frame_buf + FT_SBC_HDR_LEN, s_last_feed_len);
         rt_uint32_t dc = c1 - c0;
         s_stat_dec_cycles += dc;
         if (dc > s_stat_dec_max)
@@ -350,6 +429,86 @@ void ft_sbc_feed(const rt_uint8_t *data, rt_uint32_t len)
         s_frame_have = 0U;
         s_frame_want = 0U;
     }
+}
+
+/* ---- 水位管理 (audio_link_m55.c 每轮调用) ----
+ * 返回 RT_FALSE = 本轮暂缓消费。断流按时长分级:
+ *  - 首空前下游还有 <=64ms (sound0 replay 池 42.7ms + s_out_buf 21.3ms),
+ *    短断流 (<FT_STARVE_HOLDOFF_MS) 数据一到立即续播 —— 不计数不加保持,
+ *    下游缓冲大概率扛过去了, 听感无感
+ *  - 超过 holdoff 仍未恢复: 下游必然已欠载插零帧 = 一次可听卡顿,
+ *    计数 (验收硬指标) 并暂缓消费, 等 ring 回 FT_REPREBUF_BYTES 干净续播,
+ *    避免按滴喂把一场长断流串成连续卡顿 */
+rt_bool_t ft_sbc_watermark_tick(void)
+{
+    /* 解码停滞看门狗: 喂入在涨但帧数冻结超 1s -> 解码器内部状态机死掉,
+     * 整器重 init + 拼帧清零, 留下喂入快照 (验证其是 SBC 同步字 0x9C 开头
+     * 即为解码器锅; 是乱码则为链路数据损坏)。 */
+    if (s_dec_ready)
+    {
+        rt_tick_t now = rt_tick_get();
+        if (s_stat_frames != s_wd_prev_frames)
+        {
+            s_wd_prev_frames = s_stat_frames;
+            s_wd_last_progress = now;
+        }
+        else if ((s_stat_feed_bytes != s_wd_prev_feed) &&
+                 (now - s_wd_last_progress) >= rt_tick_from_millisecond(FT_STALL_TIMEOUT_MS))
+        {
+            s_stat_stalls++;
+            rt_kprintf("[SBC] decoder STALL #%lu: fed=%lu B, frames frozen %lu ms, "
+                       "last block[%lu] =", (unsigned long)s_stat_stalls,
+                       (unsigned long)s_stat_feed_bytes,
+                       (unsigned long)(now - s_wd_last_progress),
+                       (unsigned long)s_last_feed_len);
+            for (rt_uint32_t i = 0; i < s_last_feed_len; i++)
+            {
+                rt_kprintf(" %02x", s_last_feed[i]);
+            }
+            rt_kprintf("\n");
+            btstack_sbc_decoder_init(&s_sbc_dec, SBC_MODE_STANDARD,
+                                     ft_sbc_pcm_cb, RT_NULL);
+            s_frame_have = 0U;
+            s_frame_want = 0U;
+            s_wd_last_progress = now;
+        }
+        s_wd_prev_feed = s_stat_feed_bytes;
+    }
+
+    if (!s_dec_ready || !s_sound_open || !s_out_active)
+    {
+        return RT_TRUE;
+    }
+
+    rt_uint32_t used = ft_alink_used(FT_ALINK);
+    if (s_empty_since == 0)
+    {
+        if (used != 0U)
+        {
+            return RT_TRUE;
+        }
+        s_empty_since = rt_tick_get();
+        return RT_TRUE;   /* 刚见空: 继续走 (consume 恰好无数据可读) */
+    }
+    if (used >= FT_REPREBUF_BYTES)
+    {
+        /* 断流结束 (含短断流直接回满): 清状态, 立即恢复消费 */
+        s_empty_since = 0;
+        s_starve_counted = RT_FALSE;
+        return RT_TRUE;
+    }
+    if (!s_starve_counted &&
+        (rt_tick_get() - s_empty_since) >= rt_tick_from_millisecond(FT_STARVE_HOLDOFF_MS))
+    {
+        s_starve_counted = RT_TRUE;
+        s_stat_starves++;
+        rt_kprintf("[SBC] starve #%lu: ring empty %lu ms (audible glitch), "
+                   "hold until %lu B\n",
+                   (unsigned long)s_stat_starves,
+                   (unsigned long)FT_STARVE_HOLDOFF_MS,
+                   (unsigned long)FT_REPREBUF_BYTES);
+    }
+    return s_starve_counted ? RT_FALSE : RT_TRUE;
 }
 
 static int ft_sbc_stats(int argc, char **argv)
@@ -370,6 +529,10 @@ static int ft_sbc_stats(int argc, char **argv)
                (int)s_claim_ok, (int)s_sound_open, (int)s_resample_active,
                (unsigned long)s_stat_out_blocks, (unsigned long)s_stat_out_bytes,
                (unsigned)((s_cur_volume == 0xFFU) ? 0U : s_cur_volume));
+    rt_kprintf("[SBC] starves=%lu (acceptance metric, 1 starve ~= 1 audible glitch), prebuf=%lu ms\n",
+               (unsigned long)s_stat_starves, (unsigned long)s_stat_prebuf_ms);
+    rt_kprintf("[SBC] fed=%lu B, decoder stalls=%lu (watchdog reinits)\n",
+               (unsigned long)s_stat_feed_bytes, (unsigned long)s_stat_stalls);
     if (s_stat_frames > 0U && mhz > 0U)
     {
         rt_uint32_t us_avg = s_stat_dec_cycles / s_stat_frames / mhz;

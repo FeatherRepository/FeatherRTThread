@@ -1,7 +1,9 @@
 /* audio_link_m55.c - A0 跨核音频数据面 M55 侧 (consumer)
  *
- * 职责: 等 M33 铺好 ring (magic) -> 门铃唤醒/50ms 兜底轮询 drain ->
- * A0 阶段逐字节校验测试图案并统计 (M4b 起此处换成 SBC 解码 -> sound0)。
+ * 职责: 等 M33 铺好 ring (magic) -> 门铃唤醒/10ms 兜底轮询 drain ->
+ * A0 阶段逐字节校验测试图案并统计 (M4b 起此处换成 SBC 解码 -> sound0),
+ * M4b 防卡顿: 流播放中经 ft_sbc_watermark_tick() 做水位管理
+ * (短断流静默容忍, 长断流计数+等恢复水位干净续播)。
  *
  * 线程约定沿用音频源 worker: 优先级 12 (低于 sound_thread 的 6),
  * drain 在任务上下文, 门铃处理只投递事件 (ISR 不做重活)。
@@ -14,7 +16,9 @@
 
 #define FT_ALINK_EVT_DBELL   0x01U
 #define FT_ALINK_CHUNK       4096U
-#define FT_ALINK_POLL_MS     50U
+/* M4b: 10ms 兜底轮询 —— A0 图案回环时代 50ms 足够, 但音频流 ring 空 50ms
+ * 必致 sound0 欠载插零帧 (听感卡顿), 门铃丢失时它就是恢复及时性的下限 */
+#define FT_ALINK_POLL_MS     10U
 
 static struct rt_event  s_alink_event;
 static rt_thread_t      s_alink_thread;
@@ -101,8 +105,10 @@ static void ft_alink_thread_entry(void *parameter)
         {
             s_stat_doorbell_wake++;
         }
-        else
+        else if (s_last_fmt_gen == 0U)
         {
+            /* 10ms 轮询只在图案校验模式下计入 poll_wake;
+             * SBC 流模式本就该靠门铃, 轮询唤醒不是异常指标 */
             s_stat_poll_wake++;
         }
 
@@ -134,6 +140,15 @@ static void ft_alink_thread_entry(void *parameter)
             else if (s_last_fmt_gen != 0U)
             {
                 ft_sbc_stream_end();
+            }
+        }
+        /* M4b 防卡顿水位管理 (仅 SBC 流模式): 短断流静默容忍, 长断流计数
+         * (可听卡顿, 验收指标) 并等恢复水位干净续播; 详见 ft_sbc_decode.h */
+        if (s_last_fmt_gen != 0U)
+        {
+            if (!ft_sbc_watermark_tick())
+            {
+                continue;
             }
         }
         ft_alink_consume();

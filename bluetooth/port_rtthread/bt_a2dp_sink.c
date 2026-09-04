@@ -42,8 +42,13 @@
 /* audio_link_m33.c 的 producer 写入口 (写 ring + 门铃) */
 extern rt_uint32_t ft_audio_produce(const rt_uint8_t *data, rt_uint32_t len);
 
-/* 与 demo 相同: 声明支持全部采样率/声道模式/块长/子带/分配方式组合,
- * bitpool 2-53 (对端在范围内自选; 双 mandatory 采样率 44.1k+48k 由对端决定) */
+/* 采样率自适应决策 (实测修正): 恢复声明全部采样率+声道模式, bitpool 2-53。
+ * 曾试 48k-only (0x1F) 想省掉 44.1k->48k 重采样, 实测手机 (Android) 看到
+ * 48k-only 能力后会发畸形的 SET_CONFIGURATION (Media Codec capability 长度
+ * 为 0), 被我们按 BAD_CODEC_FORMAT 拒绝 -> 手机直接放弃连接 (两次重试均同),
+ * 见 worklog/pulls/m4b_phone_conn_*.log。结论: 不能靠收窄能力集选采样率。
+ * 自适应路径: 对端任选 44.1k/48k -> M33 把协商采样率写 ring 控制块 fmt_rate
+ * -> M55 按 fmt_rate 自动直通(48k)或线性重采样(44.1k->48k), sound0 恒 48k。 */
 static uint8_t s_media_sbc_codec_capabilities[] = { 0xFF, 0xFF, 2, 53 };
 
 static uint8_t s_sdp_a2dp_sink_buffer[150];
@@ -117,13 +122,16 @@ static void bt_a2dp_media_handler(uint8_t seid, uint8_t *packet, uint16_t size)
     {
         return;   /* 仅在 stream started 状态产出 */
     }
-    /* RTP 头 12B + 4B/CSRC; SBC 载荷前还有 1B 帧数等字段 */
+    /* RTP 头 12B + 4B/CSRC; SBC 载荷前还有 1B 帧数等字段。
+     * CSRC 数取首字节低 4 位 (RFC3550: V|P|X|CC) —— 曾误取高 4 位,
+     * 0x80 -> CC 算成 8, 每包多跳 32B 载荷, 解码器拿到的全是错位帧
+     * (卡顿/断音根因之一, 与 HCI 带宽问题叠加) */
     if (size < 13U)
     {
         s_media_hdr_err++;
         return;
     }
-    pos = 12U + 4U * ((packet[0] >> 4) & 0x0FU);   /* CSRC 扩展 */
+    pos = 12U + 4U * (packet[0] & 0x0FU);   /* CSRC 扩展 */
     if ((rt_uint32_t)size <= pos)
     {
         s_media_hdr_err++;
@@ -132,6 +140,13 @@ static void bt_a2dp_media_handler(uint8_t seid, uint8_t *packet, uint16_t size)
     pos += 1U;   /* SBC codec 头 (fragmentation/starting/last/num_frames) */
     payload_len = (rt_uint32_t)size - pos;
     if (payload_len > 1024U)
+    {
+        s_media_hdr_err++;
+        return;
+    }
+    /* 载荷必须以 SBC 同步字 0x9C 开头, 否则说明头解析错位 —— 丢包计数,
+     * 不往 ring 塞错位数据 (错位帧会让解码器陷入长期失同步) */
+    if (packet[pos] != 0x9CU)
     {
         s_media_hdr_err++;
         return;
@@ -185,8 +200,12 @@ static void bt_a2dp_sink_packet_handler(uint8_t packet_type, uint16_t channel,
     case A2DP_SUBEVENT_STREAM_ESTABLISHED:
         if (a2dp_subevent_stream_established_get_status(packet) != ERROR_CODE_SUCCESS)
         {
+            /* 失败必须清 cid —— establish 时 btstack 已预分配 cid 写入
+             * s_a2dp_cid, 页面超时/对端拒收等失败路径若不清零,
+             * bt_a2dp connect 会永远报 busy (实测卡 20 分钟无超时事件) */
             rt_kprintf("[A2DP] stream establish failed, status 0x%02x\n",
                        a2dp_subevent_stream_established_get_status(packet));
+            s_a2dp_cid = 0;
             break;
         }
         a2dp_subevent_stream_established_get_bd_addr(packet, s_peer_addr);
@@ -383,7 +402,7 @@ int bt_a2dp_sink_setup(void)
     rc = sdp_register_service(s_sdp_device_id_buffer);
     if (rc != 0U) rt_kprintf("[A2DP] SDP device_id register FAILED rc=%u\n", rc);
 
-    rt_kprintf("[A2DP] sink ready (seid %u, SBC 44.1k/48k bitpool 2-53)\n",
+    rt_kprintf("[A2DP] sink ready (seid %u, SBC 44.1k/48k bitpool 2-53, auto-rate)\n",
                s_stream_endpoint.a2dp_local_seid);
     return 0;
 }
