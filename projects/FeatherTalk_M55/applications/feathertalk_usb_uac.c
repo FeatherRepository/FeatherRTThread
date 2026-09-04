@@ -1,6 +1,7 @@
 #include <rtthread.h>
 #include <rtdevice.h>
 #include <string.h>
+#include <math.h>
 
 #include <board.h>
 #include <drivers/audio.h>
@@ -221,6 +222,12 @@ static uint32_t  s_rate_win_dup;                    /* 窗口内已补帧数 */
 static uint32_t  s_rate_win_skip;                   /* 窗口内已跳帧数 */
 static int32_t   s_rate_frac_ppm;                   /* 待修正积分器 (ppm x 块) */
 static rt_bool_t s_rate_first_window;               /* 首个窗口丢弃 (预填充瞬态) */
+/* PCM 客观探针 (写 sound0 的数字输出 RMS) */
+static int64_t   s_pcm_sq_acc;
+static uint32_t  s_pcm_samples;
+static uint32_t  s_pcm_blocks;
+static uint32_t  s_pcm_pct_min;
+static uint32_t  s_pcm_pct_max;
 static volatile rt_bool_t s_bt_tap_active;          /* M5: BT Source 持有音源 */
 
 /* M5: BT Source 模式开关本地播放让位 (sbc_encode_m55.c 随 M33 流状态调用) */
@@ -435,17 +442,42 @@ static uint32_t uac_rate_correct_block(uint8_t *block, uint32_t count,
     if (frames < -1) frames = -1;
     if (frames == 0) return count;
     s_rate_frac_ppm -= frames * (int32_t)FT_UAC_RATE_FRAME_PPM;
-    if (frames > 0)
+
+    /* 过零点对齐修正: 在块尾 128 帧内找 |L|+|R| 最小 (最接近零) 的帧
+     * 做插入/删除——不连续点落在信号过零处无台阶, 而块尾硬修正会落在
+     * 波形任意位置, 陡峭处即咔哒 (用户实测"偶发咔哒")。 */
     {
-        /* 补帧: 重复块尾帧 (保持最后波形, 单样本台阶不可闻) */
-        rt_memcpy(block + count, block + count - 4U, 4U);
-        s_rate_win_dup++;
-        s_status.rate_dup++;
-        return count + 4U;
+        uint32_t total = count / 4U;
+        uint32_t base = total > 128U ? total - 128U : 0U;
+        uint32_t best = base, i;
+        int32_t best_mag = INT32_MAX;
+        for (i = base; i < total; i++)
+        {
+            const int16_t *f = (const int16_t *)(block + i * 4U);
+            int32_t l = f[0], r = f[1];
+            int32_t mag = (l < 0 ? -l : l) + (r < 0 ? -r : r);
+            if (mag < best_mag)
+            {
+                best_mag = mag;
+                best = i;
+            }
+        }
+        if (frames > 0)
+        {
+            /* 补帧 @过零帧: 该帧右移复制一份 (memmove 后 best+1 即为其副本) */
+            memmove(block + (best + 1) * 4U, block + best * 4U,
+                    count - (best + 1) * 4U);
+            s_rate_win_dup++;
+            s_status.rate_dup++;
+            return count + 4U;
+        }
+        /* 跳帧 @过零帧: 删除该帧, 尾部左移一帧 */
+        memmove(block + best * 4U, block + (best + 1) * 4U,
+                count - (best + 1) * 4U);
+        s_rate_win_skip++;                  /* 跳帧: 丢弃过零帧 */
+        s_status.rate_skip++;
+        return count - 4U;
     }
-    s_rate_win_skip++;                  /* 跳帧: 丢弃块尾帧 */
-    s_status.rate_skip++;
-    return count - 4U;
 }
 
 static void queue_output_format(uint32_t rate, uint8_t bits,
@@ -889,6 +921,37 @@ static void output_worker(void *parameter)
             }
             s_status.output_sound_write_bytes += count;
             s_status.output_worker_state = 6U;
+            /* PCM 客观探针: 写入 sound0 的数字输出数据逐块 RMS。
+             * PC 播恒幅测试音时此值应恒定——波动即数字域损伤
+             * (丢帧/重复/格式错), 恒定则损伤在模拟/声学域。 */
+            if (count == FT_UAC_AUDIO_BLOCK && frame_bytes == 4U)
+            {
+                const int16_t *pcm = (const int16_t *)s_output_worker_block;
+                for (uint32_t i = 0; i < count / 2U; i++)
+                {
+                    int32_t v = pcm[i];
+                    s_pcm_sq_acc += (int64_t)v * v;
+                }
+                s_pcm_samples += count / 2U;
+                if (++s_pcm_blocks >= 64U)   /* ~1.4s 打印一次 */
+                {
+                    uint32_t rms = (uint32_t)sqrtf((float)
+                        (s_pcm_sq_acc / s_pcm_samples));
+                    uint32_t pct = rms * 10000U / 32768U;   /* 0.01% 单位 */
+                    if (s_pcm_pct_min == 0U || pct < s_pcm_pct_min)
+                        s_pcm_pct_min = pct;
+                    if (pct > s_pcm_pct_max) s_pcm_pct_max = pct;
+                    rt_kprintf("[UAC-PCM] out rms %u.%02u%% "
+                               "(min %u.%02u max %u.%02u, %lu blocks)\n",
+                               pct / 100U, pct % 100U,
+                               s_pcm_pct_min / 100U, s_pcm_pct_min % 100U,
+                               s_pcm_pct_max / 100U, s_pcm_pct_max % 100U,
+                               (unsigned long)s_pcm_blocks);
+                    s_pcm_sq_acc = 0U;
+                    s_pcm_samples = 0U;
+                    s_pcm_blocks = 0U;
+                }
+            }
         }
     }
 }
