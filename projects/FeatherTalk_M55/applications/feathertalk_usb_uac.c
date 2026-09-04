@@ -208,6 +208,11 @@ static rt_bool_t  s_out_ring_min_reset = RT_TRUE;   /* M5 排障: 流起始重�
 static rt_bool_t  s_out_dwt_ready;                  /* DWT CYCCNT 已使能 */
 static volatile rt_uint32_t s_out_cb_last_cyc;      /* 上一个 OUT 包到达周期数 */
 static volatile rt_uint32_t s_rate_ema_cyc;         /* 诊断: 包间隔 EMA (cycles) */
+/* 在线时钟校准: DWT cycles per 1ms, 由主机包间隔测得 (USB 主机帧周期为
+ * 晶振级 1ms)。SystemCoreClock 常数与 M55 实际核频实测偏差 ~1.2%,
+ * 直接用它换算会把漂移测量放大 3 倍+ -> 修正积分器饱和到每块都补帧,
+ * 块尾重复采样在 93Hz 周期上产生可闻粗糙感/杂音。 */
+static uint32_t s_rate_clk_ema_cyc;
 /* 速率闭环状态 (refill 时长窗口积分) */
 static uint64_t  s_rate_acc_cyc;                    /* 窗口累计 refill 时长 (cycles) */
 static uint32_t  s_rate_last_wdone_cyc;             /* 上次写完成时刻 (DWT) */
@@ -396,7 +401,9 @@ static void uac_rate_sample(void)
         uint64_t expected = (uint64_t)FT_UAC_RATE_WINDOW_WRITES *
                             FT_UAC_AUDIO_BLOCK +
                             4ULL * (s_rate_win_dup - s_rate_win_skip);
-        uint64_t f_cyc = (uint64_t)SystemCoreClock;
+        /* 在线校准的有效 DWT 时钟 (主机包间隔实测), 未收敛时退回常数 */
+        uint64_t f_cyc = (uint64_t)s_rate_clk_ema_cyc * 1000ULL;
+        if (f_cyc == 0U) f_cyc = (uint64_t)SystemCoreClock;
         if (!s_rate_first_window)
         {
             /* drift_ppm = (acc - expected/F*192... ) 转 ppm:
@@ -492,18 +499,37 @@ static void output_endpoint_callback(uint8_t busid, uint8_t ep,
         now = DWT->CYCCNT;
         if (s_out_cb_last_cyc != 0U)
         {
-            uint32_t gap_us = (now - s_out_cb_last_cyc) /
-                              (SystemCoreClock / 1000000U);
-            if (gap_us < s_status.output_gap_min_us) s_status.output_gap_min_us = gap_us;
-            if (gap_us > s_status.output_gap_max_us) s_status.output_gap_max_us = gap_us;
-            if (gap_us > 2000U) s_status.output_gap_over2ms++;
-            /* 诊断用: 到达间隔 EMA (含设备侧 ISR 延迟, 不用于速率闭环) */
-            if (s_rate_ema_cyc != 0U)
+            uint32_t gap_cyc = now - s_out_cb_last_cyc;
+            /* 在线时钟校准: 包周期 = nbytes/(采样率x帧字节数) 秒, 主机侧
+             * 晶振级精确; EMA(1/16) 得 DWT 有效 cycles-per-ms */
+            uint32_t b_per_ms = s_status.output_sample_rate *
+                s_status.output_channels * (s_status.output_sample_bits / 8U) /
+                1000U;
+            if (b_per_ms != 0U && nbytes >= b_per_ms / 2U &&
+                nbytes <= b_per_ms * 2U)
             {
-                rt_int32_t diff = (rt_int32_t)((now - s_out_cb_last_cyc) -
-                                               s_rate_ema_cyc);
-                s_rate_ema_cyc = (rt_uint32_t)((rt_int32_t)s_rate_ema_cyc +
-                    (diff >> FT_UAC_RATE_EMA_SHIFT));
+                uint64_t clk_sample = (uint64_t)gap_cyc * b_per_ms / nbytes;
+                if (s_rate_clk_ema_cyc == 0U)
+                    s_rate_clk_ema_cyc = (uint32_t)clk_sample;
+                else
+                    s_rate_clk_ema_cyc = (uint32_t)
+                        (((uint64_t)s_rate_clk_ema_cyc * 15U + clk_sample) >> 4);
+            }
+            /* 抖动统计用校准后的时钟换算真 us */
+            {
+                uint32_t cyc_per_us = s_rate_clk_ema_cyc / 1000U + 1U;
+                uint32_t gap_us = gap_cyc / cyc_per_us;
+                if (gap_us < s_status.output_gap_min_us) s_status.output_gap_min_us = gap_us;
+                if (gap_us > s_status.output_gap_max_us) s_status.output_gap_max_us = gap_us;
+                if (gap_us > 2000U) s_status.output_gap_over2ms++;
+                /* 诊断用: 到达间隔 EMA (含设备侧 ISR 延迟, 不用于速率闭环) */
+                if (s_rate_ema_cyc != 0U)
+                {
+                    rt_int32_t diff = (rt_int32_t)((now - s_out_cb_last_cyc) -
+                                                   s_rate_ema_cyc);
+                    s_rate_ema_cyc = (rt_uint32_t)((rt_int32_t)s_rate_ema_cyc +
+                        (diff >> FT_UAC_RATE_EMA_SHIFT));
+                }
             }
         }
         s_out_cb_last_cyc = now;
@@ -562,6 +588,8 @@ static void audio_interface_notify(uint8_t busid, uint8_t event, void *arg)
             s_out_cb_last_cyc = 0U;
             /* 速率闭环 EMA 以标称 1ms 为种子 (避免首个突发对误导) */
             s_rate_ema_cyc = SystemCoreClock / 1000U;
+            /* 时钟校准 EMA 重播种 (EMA 在 ~16 包内收敛到真实核频) */
+            s_rate_clk_ema_cyc = SystemCoreClock / 1000U;
         }
         else if (alternate == 2U)
         {
@@ -749,6 +777,21 @@ static void output_worker(void *parameter)
             }
             ft_audio_release_output(FT_AUDIO_OUTPUT_OWNER_USB_UAC);
             continue;
+        }
+        {
+            /* 纸面 vs 实况对账: s_status/negotiated 只是纸面值, 启动继承或
+             * 历史 -EBUSY 失败会让驱动实跑格式与纸面脱节 (实测纸面 48k
+             * 实跑 16k: 内容 1/3 速 + 大量 overruns + 可听卡顿杂音)。
+             * 以驱动实况为唯一事实源, 失配即强制重走下方格式应用;
+             * -EBUSY 类瞬态失败由每轮重试自然退避。 */
+            ft_audio_status_t st;
+            if (ft_audio_get_status(&st) == RT_EOK && st.output_ready &&
+                (st.output_sample_rate != s_status.output_sample_rate ||
+                 st.output_sample_bits != s_status.output_sample_bits ||
+                 st.output_channels != s_status.output_channels))
+            {
+                applied_generation = s_requested_generation - 1U;
+            }
         }
         if (applied_generation != s_requested_generation)
         {
@@ -1067,7 +1110,8 @@ void ft_usb_uac_get_status(ft_usb_uac_status_t *status)
     if (status == RT_NULL) return;
     level = rt_hw_interrupt_disable();
     *status = s_status;
-    status->rate_ema_us = s_rate_ema_cyc / (SystemCoreClock / 1000000U);
+    /* 真 us 换算用在线校准时钟 (SystemCoreClock 常数与实际核频有 ~1.2% 偏差) */
+    status->rate_ema_us = s_rate_ema_cyc / (s_rate_clk_ema_cyc / 1000U + 1U);
     rt_hw_interrupt_enable(level);
 }
 
