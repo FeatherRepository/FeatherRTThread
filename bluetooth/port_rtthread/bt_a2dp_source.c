@@ -126,6 +126,13 @@ static int bt_src_next_sbc_frame(uint8_t *out, uint32_t *olen)
 
 /* 媒体泵状态 */
 static rt_bool_t   s_can_send_pending;   /* 已请求 can_send, 等事件 */
+static rt_tick_t   s_src_last_can_send_tick;  /* 看门狗: 上次 CAN_SEND 时刻 */
+
+/* 链路静默死亡看门狗: 流开着但 3s 无 CAN_SEND 信用且暂存有货 ->
+ * 对端已死 (耳机失联但 ACL 未断/监管超时未到), 主动断开触发正常清理链
+ * (STREAM_RELEASED -> ring2 发布 0 -> M55 编码器停 -> UAC 本地播放恢复)。
+ * 有货才判: UAC 空闲 (无数据) 不误伤。 */
+#define FT_SRC_CAN_SEND_TIMEOUT_TICK  rt_tick_from_millisecond(3000)
 
 /* 从 ring2 攒帧到媒体包暂存 (载荷上限内尽量多装) */
 static void bt_src_stage_frames(void)
@@ -161,12 +168,26 @@ static void bt_src_kick(void)
     }
 }
 
+/* 前向声明: 看门狗在泵 tick 里调用 (定义在本文件后面) */
+static void bt_src_pump_stop(void);
+static void bt_src_ring2_publish(rt_uint32_t rate);
+
 /* ---- 媒体泵: 10ms 兜底节拍 (防空转后链路停摆), 主驱动在 CAN_SEND 事件 ---- */
 static void bt_src_pump_handler(btstack_timer_source_t *ts)
 {
     btstack_run_loop_set_timer(ts, 10);
     btstack_run_loop_add_timer(ts);
     bt_src_kick();
+    if (s_src_state == FT_SRC_STATE_PLAYING && s_mpkt_frames > 0U &&
+        (rt_tick_get() - s_src_last_can_send_tick) > FT_SRC_CAN_SEND_TIMEOUT_TICK)
+    {
+        rt_kprintf("[SRC] watchdog: 3s no CAN_SEND with data pending, force disconnect\n");
+        a2dp_source_disconnect(s_src_a2dp_cid);
+        s_src_a2dp_cid = 0;
+        s_src_state = FT_SRC_STATE_CLOSED;
+        bt_src_ring2_publish(0U);   /* M55 编码器停 -> UAC 本地播放恢复 */
+        bt_src_pump_stop();
+    }
 }
 
 static void bt_src_pump_start(void)
@@ -179,6 +200,7 @@ static void bt_src_pump_start(void)
     s_fhave = 0;
     s_fwant = 0;
     s_can_send_pending = RT_FALSE;
+    s_src_last_can_send_tick = rt_tick_get();   /* 看门狗基线 */
     s_stat_sent_pkts = 0;      /* 每次开流清零, 窗口测量不受旧会话污染 */
     s_stat_sent_bytes = 0;
     s_stat_frames_tx = 0;
@@ -281,6 +303,7 @@ static void bt_src_packet_handler(uint8_t packet_type, uint16_t channel,
 
     case A2DP_SUBEVENT_STREAMING_CAN_SEND_MEDIA_PACKET_NOW:
         s_can_send_pending = RT_FALSE;
+        s_src_last_can_send_tick = rt_tick_get();
         if (s_mpkt_frames > 0U)
         {
             /* [0] = SBC 媒体头: 帧数 (不分片) */

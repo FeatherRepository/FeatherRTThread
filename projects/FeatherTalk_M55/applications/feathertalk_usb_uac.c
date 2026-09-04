@@ -35,6 +35,25 @@
  * a single 192/288/384/576-byte USB packet: its replay queue would still be
  * empty when sound_start() requests the first frame. */
 #define FT_UAC_AUDIO_BLOCK            4096U
+/* UAC 本地播放卡顿修复: 写门控水位。ring 达到此水位才写 sound0 ——
+ * 实测旧门控 (=BLOCK, 4096) 让 ring 稳态在 0~4KB 贴地振荡, 主机成堆突发
+ * (实测 >2ms 间隙 ~3.5次/s, max 6ms) 随时把 ring 击穿成供给断档。
+ * 门控 8192 后 ring 稳态 4~8KB, 与 replay 池 (4KB) 合计 ~42~63ms 吸收余量。 */
+#define FT_UAC_WRITE_THRESHOLD        8192U
+/* 速率闭环 (async 端点无反馈, 主机与板载时钟长期漂移无吸收):
+ * 信号源 = DWT 累计"写后→门控 8192 到达"的 refill 时长 (64bit 精确,
+ * 写门控把 ring 钉在带内时, 字节差恒为 0 —— 字节法对稳态漂移失明;
+ * 包间隔法又被设备侧 ISR 延迟污染。refill 时长=4096B/主机速率, 唯一
+ * 无偏信号)。每 1024 个写块 (~21.9s) 结算: 实测时长 vs 标称
+ * (期望字节/192B每ms), 残差入积分器; 每块最多 ±1 帧 (4B=1 立体声帧,
+ * 保 L/R 对齐), 编辑点在块尾 (补帧=重复末帧, 跳帧=丢弃末帧, 单样本台阶
+ * 在 48k 下不可闻, 对比 I2S 下溢插零的爆音)。
+ * 死区 60ppm; 1 帧/块 = 977ppm 修正率上限; 首个窗口丢弃 (预填充瞬态)。 */
+#define FT_UAC_RATE_WINDOW_WRITES     1024U
+#define FT_UAC_RATE_DEADBAND_PPM      60U
+#define FT_UAC_RATE_FRAME_PPM         977U    /* 4096B 块 +1 帧 = +976.6ppm */
+#define FT_UAC_RATE_DRIFT_CLAMP_PPM   3000U
+#define FT_UAC_RATE_EMA_SHIFT         10U     /* 诊断用包间隔 EMA 系数 */
 #define FT_UAC_THREAD_STACK           4096U
 #define FT_UAC_THREAD_PRIORITY        12U
 #define FT_UAC_EVENT_FORMAT           0x01U
@@ -173,7 +192,8 @@ USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX
 static uint8_t s_in_buffer[FT_UAC_MAX_PACKET];
 
 static uint8_t s_out_ring[FT_UAC_RING_SIZE];
-static uint8_t s_output_worker_block[FT_UAC_AUDIO_BLOCK];
+/* +8B: 速率闭环最多在块尾补 2 帧 */
+static uint8_t s_output_worker_block[FT_UAC_AUDIO_BLOCK + 8U];
 static uint8_t s_input_worker_block[FT_UAC_AUDIO_BLOCK];
 static volatile uint32_t s_out_ring_read;
 static volatile uint32_t s_out_ring_write;
@@ -187,6 +207,16 @@ static rt_thread_t s_output_thread;
 static rt_bool_t  s_out_ring_min_reset = RT_TRUE;   /* M5 排障: 流起始重置低水位 */
 static rt_bool_t  s_out_dwt_ready;                  /* DWT CYCCNT 已使能 */
 static volatile rt_uint32_t s_out_cb_last_cyc;      /* 上一个 OUT 包到达周期数 */
+static volatile rt_uint32_t s_rate_ema_cyc;         /* 诊断: 包间隔 EMA (cycles) */
+/* 速率闭环状态 (refill 时长窗口积分) */
+static uint64_t  s_rate_acc_cyc;                    /* 窗口累计 refill 时长 (cycles) */
+static uint32_t  s_rate_last_wdone_cyc;             /* 上次写完成时刻 (DWT) */
+static rt_bool_t s_rate_waiting;                    /* ring 在门控下, 下次写前有 refill 等待 */
+static uint32_t  s_rate_win_writes;                 /* 窗口写入块数 */
+static uint32_t  s_rate_win_dup;                    /* 窗口内已补帧数 */
+static uint32_t  s_rate_win_skip;                   /* 窗口内已跳帧数 */
+static int32_t   s_rate_frac_ppm;                   /* 待修正积分器 (ppm x 块) */
+static rt_bool_t s_rate_first_window;               /* 首个窗口丢弃 (预填充瞬态) */
 static volatile rt_bool_t s_bt_tap_active;          /* M5: BT Source 持有音源 */
 
 /* M5: BT Source 模式开关本地播放让位 (sbc_encode_m55.c 随 M33 流状态调用) */
@@ -347,6 +377,80 @@ uint32_t ft_usb_uac_output_read(uint8_t *data, uint32_t capacity)
     return output_ring_read(data, capacity, 4U);   /* 48k/16/2ch 帧对齐 */
 }
 
+/* ---- 速率闭环: refill 时长窗口积分 ----
+ * 写块前调用: 若上次写后 ring 曾低于门控 (等待过 refill), 累计
+ * 写完成→本次写之间的 DWT 时长; 每 1024 块结算: 实测时长 vs 标称
+ * (期望字节/192B每ms) 得漂移 ppm, 残差入积分器, 死区 60ppm。
+ * 积分器每块最多吐 ±1 帧修正 (uac_rate_correct_block 应用)。 */
+static void uac_rate_sample(void)
+{
+    uint32_t now = DWT->CYCCNT;
+    if (s_rate_waiting)
+    {
+        s_rate_acc_cyc += (uint32_t)(now - s_rate_last_wdone_cyc);
+        s_rate_waiting = RT_FALSE;
+    }
+    s_rate_win_writes++;
+    if (s_rate_win_writes >= FT_UAC_RATE_WINDOW_WRITES)
+    {
+        uint64_t expected = (uint64_t)FT_UAC_RATE_WINDOW_WRITES *
+                            FT_UAC_AUDIO_BLOCK +
+                            4ULL * (s_rate_win_dup - s_rate_win_skip);
+        uint64_t f_cyc = (uint64_t)SystemCoreClock;
+        if (!s_rate_first_window)
+        {
+            /* drift_ppm = (acc - expected/F*192... ) 转 ppm:
+             * acc*192 - expected*F  (cycles 差), 除 expected*F 再 x1e6 */
+            int64_t diff = (int64_t)s_rate_acc_cyc * 192LL -
+                           (int64_t)expected * (int64_t)f_cyc;
+            int32_t drift_ppm = (int32_t)(diff * 1000000LL /
+                                          ((int64_t)expected *
+                                           (int64_t)f_cyc));
+            if (drift_ppm > (int32_t)FT_UAC_RATE_DRIFT_CLAMP_PPM)
+                drift_ppm = (int32_t)FT_UAC_RATE_DRIFT_CLAMP_PPM;
+            else if (drift_ppm < -(int32_t)FT_UAC_RATE_DRIFT_CLAMP_PPM)
+                drift_ppm = -(int32_t)FT_UAC_RATE_DRIFT_CLAMP_PPM;
+            if (drift_ppm > (int32_t)FT_UAC_RATE_DEADBAND_PPM ||
+                drift_ppm < -(int32_t)FT_UAC_RATE_DEADBAND_PPM)
+                s_rate_frac_ppm += drift_ppm *
+                    (int32_t)FT_UAC_RATE_WINDOW_WRITES;
+            else
+                s_rate_frac_ppm /= 2;   /* 死区内残留自然衰减 */
+            s_status.rate_drift_ppm = drift_ppm;   /* 诊断快照 */
+        }
+        s_rate_first_window = RT_FALSE;
+        s_rate_acc_cyc = 0U;
+        s_rate_win_writes = 0U;
+        s_rate_win_dup = 0U;
+        s_rate_win_skip = 0U;
+    }
+}
+
+static uint32_t uac_rate_correct_block(uint8_t *block, uint32_t count,
+                                       uint32_t frame_bytes)
+{
+    int32_t frames;
+
+    if (count != FT_UAC_AUDIO_BLOCK || frame_bytes != 4U)
+        return count;
+    frames = s_rate_frac_ppm / (int32_t)FT_UAC_RATE_FRAME_PPM;
+    if (frames > 1) frames = 1;
+    if (frames < -1) frames = -1;
+    if (frames == 0) return count;
+    s_rate_frac_ppm -= frames * (int32_t)FT_UAC_RATE_FRAME_PPM;
+    if (frames > 0)
+    {
+        /* 补帧: 重复块尾帧 (保持最后波形, 单样本台阶不可闻) */
+        rt_memcpy(block + count, block + count - 4U, 4U);
+        s_rate_win_dup++;
+        s_status.rate_dup++;
+        return count + 4U;
+    }
+    s_rate_win_skip++;                  /* 跳帧: 丢弃块尾帧 */
+    s_status.rate_skip++;
+    return count - 4U;
+}
+
 static void queue_output_format(uint32_t rate, uint8_t bits,
                                 uint8_t channels, bool from_host)
 {
@@ -393,6 +497,14 @@ static void output_endpoint_callback(uint8_t busid, uint8_t ep,
             if (gap_us < s_status.output_gap_min_us) s_status.output_gap_min_us = gap_us;
             if (gap_us > s_status.output_gap_max_us) s_status.output_gap_max_us = gap_us;
             if (gap_us > 2000U) s_status.output_gap_over2ms++;
+            /* 诊断用: 到达间隔 EMA (含设备侧 ISR 延迟, 不用于速率闭环) */
+            if (s_rate_ema_cyc != 0U)
+            {
+                rt_int32_t diff = (rt_int32_t)((now - s_out_cb_last_cyc) -
+                                               s_rate_ema_cyc);
+                s_rate_ema_cyc = (rt_uint32_t)((rt_int32_t)s_rate_ema_cyc +
+                    (diff >> FT_UAC_RATE_EMA_SHIFT));
+            }
         }
         s_out_cb_last_cyc = now;
     }
@@ -443,10 +555,13 @@ static void audio_interface_notify(uint8_t busid, uint8_t event, void *arg)
             s_negotiated_output_bits = 16U;
             s_negotiated_output_channels = 2U;
             s_out_ring_min_reset = RT_TRUE;   /* 新流: 低水位重新统计 */
+            s_status.output_ring_min = 0xFFFFFFFFU;  /* 预填充完成后才采样 */
             s_status.output_gap_min_us = 0xFFFFFFFFU;  /* 抖动统计同步重置 */
             s_status.output_gap_max_us = 0U;
             s_status.output_gap_over2ms = 0U;
             s_out_cb_last_cyc = 0U;
+            /* 速率闭环 EMA 以标称 1ms 为种子 (避免首个突发对误导) */
+            s_rate_ema_cyc = SystemCoreClock / 1000U;
         }
         else if (alternate == 2U)
         {
@@ -608,12 +723,12 @@ static void output_worker(void *parameter)
             RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR, 20U, &received);
         s_status.output_worker_wakeups++;
         s_status.output_worker_state = 2U;
-        /* M5 排障: 流期间 ring 低水位 (见底即离供给断档不远) */
-        if (s_status.output_streaming &&
-            (s_out_ring_min_reset || s_out_ring_used < s_status.output_ring_min))
+        /* M5 排障: 流期间 ring 低水位 (见底即离供给断档不远)。
+         * 预填充完成前不采样 —— 否则 192B 起步值被记成假低水位 */
+        if (s_status.output_streaming && !s_out_ring_min_reset &&
+            s_out_ring_used < s_status.output_ring_min)
         {
             s_status.output_ring_min = s_out_ring_used;
-            s_out_ring_min_reset = false;
         }
         if (applied_control_generation != s_output_control_generation)
         {
@@ -692,22 +807,46 @@ static void output_worker(void *parameter)
             {
                 rt_tick_t t0 = rt_tick_get();
                 while (s_status.output_streaming &&
-                       s_out_ring_used < 8192U &&
+                       s_out_ring_used < FT_UAC_WRITE_THRESHOLD &&
                        (rt_tick_get() - t0) < rt_tick_from_millisecond(500U))
                 {
                     rt_thread_mdelay(5);
                 }
+                /* 预填充完成: 低水位/速率闭环基线从此刻起才有效 */
+                s_out_ring_min_reset = RT_FALSE;
+                s_rate_acc_cyc = 0U;
+                s_rate_last_wdone_cyc = DWT->CYCCNT;   /* DWT 已由包回调使能 */
+                s_rate_waiting = RT_TRUE;
+                s_rate_win_writes = 0U;
+                s_rate_win_dup = 0U;
+                s_rate_win_skip = 0U;
+                s_rate_frac_ppm = 0;
+                s_rate_first_window = RT_TRUE;
             }
         }
-        while (s_out_ring_used >= FT_UAC_AUDIO_BLOCK &&
-               s_status.output_streaming)
+        while (s_out_ring_used >= FT_UAC_WRITE_THRESHOLD &&
+               s_status.output_streaming &&
+               s_status.active &&
+               applied_generation == s_requested_generation &&
+               !s_bt_tap_active)
         {
+            /* 门控 8192 + 主机速率高于消费速率时 ring 长期在门控之上:
+             * 本循环若只看水位会活锁, 外层的格式换代 / BT tap 让位逻辑
+             * 全部饿死 (实测 48k 协商后 sound0 永远停在 16k, overruns 爆表)。
+             * 换代或 tap 抢占必须立即退出, 回外层状态机处理。 */
             uint32_t frame_bytes = s_status.output_channels *
                 (s_status.output_sample_bits / 8U);
             uint32_t count = output_ring_read(s_output_worker_block,
-                                              sizeof(s_output_worker_block),
+                                              FT_UAC_AUDIO_BLOCK,
                                               frame_bytes);
             if (count == 0U) break;
+            /* 速率闭环: 仅完整块采样/修正 (refill 时长采样 + 补帧/跳帧) */
+            if (count == FT_UAC_AUDIO_BLOCK)
+            {
+                uac_rate_sample();
+                count = uac_rate_correct_block(s_output_worker_block, count,
+                                               frame_bytes);
+            }
             s_status.output_worker_state = 5U;
             s_status.output_sound_write_calls++;
             if (rt_device_write(device, 0, s_output_worker_block, count) !=
@@ -716,6 +855,9 @@ static void output_worker(void *parameter)
                 s_status.last_error = -RT_EIO;
                 break;
             }
+            s_rate_last_wdone_cyc = DWT->CYCCNT;
+            s_rate_waiting =
+                s_out_ring_used < FT_UAC_WRITE_THRESHOLD;
             s_status.output_sound_write_bytes += count;
             s_status.output_worker_state = 6U;
         }
@@ -925,6 +1067,7 @@ void ft_usb_uac_get_status(ft_usb_uac_status_t *status)
     if (status == RT_NULL) return;
     level = rt_hw_interrupt_disable();
     *status = s_status;
+    status->rate_ema_us = s_rate_ema_cyc / (SystemCoreClock / 1000000U);
     rt_hw_interrupt_enable(level);
 }
 

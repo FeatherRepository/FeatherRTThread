@@ -37,6 +37,10 @@ typedef struct
     uint32_t output_gap_min_us;    /* M5 排障: USB OUT 相邻包最小间隔 */
     uint32_t output_gap_max_us;    /* M5 排障: 最大间隔 (成堆抖动证据) */
     uint32_t output_gap_over2ms;   /* M5 排障: 间隔 >2ms 的次数 */
+    uint32_t rate_dup;             /* UAC 卡顿修复: 速率闭环补帧数 (主机偏慢) */
+    uint32_t rate_skip;            /* UAC 卡顿修复: 速率闭环跳帧数 (主机偏快) */
+    uint32_t rate_ema_us;          /* UAC 卡顿修复: 包间隔 EMA (us, 诊断) */
+    int32_t  rate_drift_ppm;       /* UAC 卡顿修复: 最近窗口实测漂移 (ppm) */
     int last_error;
 } ft_usb_uac_status_t;
 

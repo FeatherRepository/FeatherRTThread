@@ -660,6 +660,11 @@ static void usb_shell_print_status(void)
                    (unsigned long)uac.output_gap_min_us,
                    (unsigned long)uac.output_gap_max_us,
                    (unsigned long)uac.output_gap_over2ms);
+        rt_kprintf("UAC2 rate: drift=%ld ppm dup=%lu skip=%lu (gap ema=%lu us)\n",
+                   (long)uac.rate_drift_ppm,
+                   (unsigned long)uac.rate_dup,
+                   (unsigned long)uac.rate_skip,
+                   (unsigned long)uac.rate_ema_us);
     }
 }
 
