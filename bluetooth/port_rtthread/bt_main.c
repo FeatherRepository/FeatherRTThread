@@ -328,6 +328,8 @@ static void bt_adv_enable(void)
 }
 
 /* HCI 包处理器: 状态机到达 WORKING 即启动 BLE 广播 */
+static void bt_iso_probe_print(const uint8_t *mask);
+static volatile int s_iso_probe_pending;
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size)
 {
     UNUSED(channel);
@@ -337,6 +339,24 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     /* 全事件记录: 定位"连接事件到底来没来" (GDB 可读) */
     bt_evt_log(0xE000U | packet[0],
                (packet[0] == 0x3EU && size > 2U) ? packet[2] : 0xEEEEU);
+
+    /* M8.0 探针: 拦截 Read_Local_Supported_Commands 应答, 解码 LE ISO 能力 */
+    if (s_iso_probe_pending &&
+        hci_event_packet_get_type(packet) == HCI_EVENT_COMMAND_COMPLETE &&
+        hci_event_command_complete_get_command_opcode(packet) ==
+            HCI_OPCODE_HCI_READ_LOCAL_SUPPORTED_COMMANDS)
+    {
+        s_iso_probe_pending = 0;
+        const uint8_t *ret = hci_event_command_complete_get_return_parameters(packet);
+        if (ret[0] == 0U)
+        {
+            bt_iso_probe_print(ret + 1);
+        }
+        else
+        {
+            rt_kprintf("[ISO] command complete status %u\n", (unsigned)ret[0]);
+        }
+    }
 
     switch (hci_event_packet_get_type(packet))
     {
@@ -1024,3 +1044,52 @@ static int bt_find(int argc, char **argv)
     return 0;
 }
 MSH_CMD_EXPORT_ALIAS(bt_find, bt_find, diag: check if a con handle is registered in btstack);
+
+/* M8.0 探针: Read_Local_Supported_Commands 解码 LE ISO 能力位
+ * (bit = 224 + OCF - 1; CIS/BIG/ISO Data Path 在 bytes 40-41) */
+static volatile int s_iso_probe_pending;
+
+static void bt_iso_probe_print(const uint8_t *mask)
+{
+    int i;
+    rt_kprintf("[ISO] mask bytes 40-41: %02x %02x\n", mask[40], mask[41]);
+    static const struct { const char *name; uint8_t byte, bit; } items[] = {
+        { "LE Create CIS",          40, 3 },
+        { "LE Remove CIS",          40, 4 },
+        { "LE Accept CIS Request",  40, 5 },
+        { "LE Create BIG",          40, 6 },
+        { "LE BIG Create Sync",     40, 7 },
+        { "LE BIG Terminate Sync",  41, 0 },
+        { "LE Terminate BIG",       41, 1 },
+        { "LE Setup ISO Data Path", 41, 5 },
+        { "LE Remove ISO Data Path",41, 6 },
+    };
+    int fails = 0;
+    for (i = 0; i < (int)(sizeof(items) / sizeof(items[0])); i++)
+    {
+        int ok = (mask[items[i].byte] >> items[i].bit) & 1;
+        if (!ok) fails++;
+        rt_kprintf("[ISO] %-26s %s\n", items[i].name, ok ? "YES" : "NO ");
+    }
+    rt_kprintf("[ISO] verdict: %s\n", fails ? "PARTIAL/NO ISO support" : "FULL ISO support");
+}
+
+static void bt_iso_probe_send(void)
+{
+    hci_send_cmd(&hci_read_local_supported_commands);
+}
+
+static int bt_iso_probe(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (s_bt_state != BT_READY)
+    {
+        rt_kprintf("[ISO] bt not ready (state=%d), run bt_on first\n", s_bt_state);
+        return -1;
+    }
+    s_iso_probe_pending = 1;
+    int rc = bt_service_run_callback(bt_iso_probe_send);
+    rt_kprintf("[ISO] read local supported commands queued rc=%d\n", rc);
+    return rc;
+}
+MSH_CMD_EXPORT_ALIAS(bt_iso_probe, bt_iso_probe, M8.0: probe controller LE ISO command support);

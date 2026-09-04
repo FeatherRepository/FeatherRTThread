@@ -1,0 +1,36 @@
+import os
+from building import *
+
+# M8.0 探针3: liblc3 (google) 在 M55 的解码/编码基准。
+# 参考源拷到项目 build 目录再编译 (bt_audio 同款手法): btstack/3rd-party
+# 源树可能被其他工程共享, 绝对路径内联编译会留陈旧 .o (ABI 混链教训)。
+cwd = GetCurrentDir()
+repo_root = os.path.normpath(os.path.join(cwd, '..', '..', '..', '..'))
+lc3_root = os.path.join(repo_root, 'bluetooth', 'reference', 'btstack',
+                         '3rd-party', 'lc3-google')
+build_dir = os.path.normpath(os.path.join(cwd, '..', '..', 'build', 'le_audio'))
+
+lc3_src = [os.path.join(lc3_root, 'src', f) for f in
+           ('attdet.c', 'bwdet.c', 'bits.c', 'energy.c', 'lc3.c',
+            'ltpf.c', 'mdct.c', 'plc.c', 'sns.c', 'spec.c', 'tables.c',
+            'tns.c')]
+
+copied = []
+for f in lc3_src + [os.path.join(lc3_root, 'include', h) for h in
+                    ('lc3.h', 'lc3_cpp.h', 'lc3_private.h')] + \
+        [os.path.join(lc3_root, 'src', h) for h in
+         ('attdet.h', 'bwdet.h', 'bits.h', 'common.h', 'energy.h',
+          'fastmath.h', 'ltpf.h', 'ltpf_arm.h', 'ltpf_neon.h', 'mdct.h',
+          'mdct_neon.h', 'plc.h', 'sns.h', 'spec.h', 'tables.h', 'tns.h')]:
+    dst = os.path.join(build_dir, os.path.basename(f))
+    Command(dst, f, [Mkdir(build_dir), Copy('$TARGET', '$SOURCE')])
+    if f.endswith('.c'):
+        copied.append(File(dst))
+
+src = Glob('*.c') + copied
+
+CPPPATH = [build_dir]
+
+group = DefineGroup('le_audio', src, depend=[''], CPPPATH=CPPPATH)
+
+Return('group')

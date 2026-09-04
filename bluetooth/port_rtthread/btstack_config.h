@@ -34,6 +34,9 @@
 /* M4b: SDP 动态服务记录池 (sdp_register_service 走该池; 为 0 时注册全部
  * 静默失败 -> Windows 枚举不到 A2DP Sink, 实测根因) */
 #define MAX_NR_SERVICE_RECORD_ITEMS 8
+/* M8.0: LE Audio ISO 通路 (CIS/BIS)。H4 层按此宏编译 type 0x05 帧解析;
+ * 控制器侧 ISO 能力由 bt_iso_probe 探针实测裁决 */
+#define ENABLE_LE_ISOCHRONOUS_STREAMS
 
 /* logging off for P0 skeleton (avoids hci_dump dependency) */
 #define ENABLE_PRINTF_HEXDUMP
