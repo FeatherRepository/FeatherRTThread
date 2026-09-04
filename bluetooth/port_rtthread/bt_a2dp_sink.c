@@ -373,6 +373,9 @@ int bt_a2dp_sink_setup(void)
         return -1;
     }
     s_stream_endpoint.a2dp_local_seid = avdtp_local_seid(local_stream_endpoint);
+    /* AVDTP 1.3 delay reporting 类别: Windows bthA2dp 对 Sink SEP 期望此能力,
+     * 缺失时 AVDTP 信令/配置照常完成但音频端点不激活 (实测 UNPLUGGED) */
+    avdtp_register_delay_reporting_category(local_stream_endpoint);
 
     avrcp_register_packet_handler(&bt_avrcp_packet_handler);
     avrcp_controller_register_packet_handler(&bt_avrcp_controller_packet_handler);
