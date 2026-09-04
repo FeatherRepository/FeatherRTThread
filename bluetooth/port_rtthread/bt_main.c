@@ -52,6 +52,7 @@ extern int bt_a2dp_sink_setup(void);
 extern void bt_a2dp_sink_quiesce(void);
 extern void bt_uart_shutdown(void);
 extern int bt_a2dp_source_setup(void);
+extern const btstack_link_key_db_t * bt_bond_store_instance(void);
 
 /* FT Data CCCD 使能值 (Bluetooth 规范) */
 #define FT_GATT_CCCD_NOTIFICATION   0x0001U
@@ -591,6 +592,10 @@ static int bt_bringup(void)
         rt_thread_mdelay(100);
     }
 
+    /* M3: 等 M55 铺好 bond 块 (通常数百 ms; M55 慢时最多 8s), 配对信息
+     * 在连接可用之前就位, 避免连接先到而钥匙后到 */
+    bt_bond_store_wait_ready(8000);
+
     rt_kprintf("[BT] S0 prepare autobaud (P16.3 + RTS low + REG_ON toggle)\n");
     feathertalk_ipc_send_event(1);
     rc = bt_prepare_autobaud();
@@ -739,7 +744,8 @@ static int bt_bringup(void)
     /* M4a Classic: SDP server + SSP Just Works + link key 内存库。
      * NoInputNoOutput + auto accept => 手机配对无需本机交互 */
     sdp_init();
-    hci_set_link_key_db(btstack_link_key_db_memory_instance());
+    /* M3': link key 持久化库 (内存表 + 共享块, M55 托管 /flash 文件) */
+    hci_set_link_key_db(bt_bond_store_instance());
     gap_ssp_set_io_capability(SSP_IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
     gap_ssp_set_auto_accept(1);
     gap_set_default_link_policy_settings(LM_LINK_POLICY_ENABLE_ROLE_SWITCH |

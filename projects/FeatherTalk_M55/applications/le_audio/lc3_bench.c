@@ -78,59 +78,77 @@ static void lc3_bench_worker(void *param)
 
     uint8_t frames[NUM_CH][FRAME_BYTES];
 
-    rt_uint64_t enc_total = 0, dec_total = 0;
-    rt_uint32_t enc_max = 0, dec_max = 0;
-    int plc_frames = 0, enc_err = 0;
-
-    for (int f = 0; f < BENCH_FRAMES; f++)
+    /* 两轮测量: LTPF 开(默认) / LTPF 关 —— 编码占帧周期 137% 超实时,
+     * liblc3 文档注明 LTPF 分析吃大量 CPU, 量化它的占比决定 Source 可行性 */
+    for (int pass = 0; pass < 2; pass++)
     {
-        rt_uint32_t c0 = DWT->CYCCNT;
-        for (int ch = 0; ch < NUM_CH; ch++)
-        {
-            if (lc3_encode(enc[ch], LC3_PCM_FORMAT_S16,
-                           pcm_in + ch, NUM_CH, FRAME_BYTES, frames[ch]) != 0)
-                enc_err++;
-        }
-        rt_uint32_t c1 = DWT->CYCCNT;
-        rt_uint32_t e = c1 - c0;
-        enc_total += e;
-        if (e > enc_max) enc_max = e;
+        if (pass == 1)
+            for (int ch = 0; ch < NUM_CH; ch++)
+                lc3_encoder_disable_ltpf(enc[ch]);
 
-        c0 = DWT->CYCCNT;
-        for (int ch = 0; ch < NUM_CH; ch++)
+        rt_uint64_t enc_total = 0, dec_total = 0;
+        rt_uint32_t enc_max = 0, dec_max = 0;
+        int plc_frames = 0, enc_err = 0;
+
+        for (int f = 0; f < BENCH_FRAMES; f++)
         {
-            if (lc3_decode(dec[ch], frames[ch], FRAME_BYTES,
-                           LC3_PCM_FORMAT_S16, pcm_out + ch, NUM_CH) == 1)
-                plc_frames++;
+            rt_uint32_t c0 = DWT->CYCCNT;
+            for (int ch = 0; ch < NUM_CH; ch++)
+            {
+                if (lc3_encode(enc[ch], LC3_PCM_FORMAT_S16,
+                               pcm_in + ch, NUM_CH, FRAME_BYTES, frames[ch]) != 0)
+                    enc_err++;
+            }
+            rt_uint32_t c1 = DWT->CYCCNT;
+            rt_uint32_t e = c1 - c0;
+            enc_total += e;
+            if (e > enc_max) enc_max = e;
+
+            c0 = DWT->CYCCNT;
+            for (int ch = 0; ch < NUM_CH; ch++)
+            {
+                if (lc3_decode(dec[ch], frames[ch], FRAME_BYTES,
+                               LC3_PCM_FORMAT_S16, pcm_out + ch, NUM_CH) == 1)
+                    plc_frames++;
+            }
+            c1 = DWT->CYCCNT;
+            e = c1 - c0;
+            dec_total += e;
+            if (e > dec_max) dec_max = e;
         }
-        c1 = DWT->CYCCNT;
-        e = c1 - c0;
-        dec_total += e;
-        if (e > dec_max) dec_max = e;
+
+        rt_uint32_t mhz = SystemCoreClock / 1000000U;
+        rt_uint32_t dec_us = (rt_uint32_t)(dec_total / BENCH_FRAMES / mhz);
+        rt_uint32_t enc_us = (rt_uint32_t)(enc_total / BENCH_FRAMES / mhz);
+        rt_uint32_t cpu_x100 = (rt_uint32_t)((rt_uint64_t)dec_us * 10000U / DT_US);
+        rt_uint32_t enc_x100 = (rt_uint32_t)((rt_uint64_t)enc_us * 10000U / DT_US);
+        rt_kprintf("[LC3] pass%d (%s) %d frames @%luMHz: "
+                   "decode %lu us (%lu.%02lu%% frame, max %lu us) | "
+                   "encode %lu us (%lu.%02lu%% frame, max %lu us)\n",
+                   pass, pass ? "LTPF OFF" : "LTPF ON", BENCH_FRAMES,
+                   (unsigned long)mhz,
+                   (unsigned long)dec_us,
+                   (unsigned long)(cpu_x100 / 100U), (unsigned long)(cpu_x100 % 100U),
+                   (unsigned long)(dec_max / mhz),
+                   (unsigned long)enc_us,
+                   (unsigned long)(enc_x100 / 100U), (unsigned long)(enc_x100 % 100U),
+                   (unsigned long)(enc_max / mhz));
+        if (pass == 1)
+        {
+            rt_kprintf("[LC3] RAM (heap): enc %uB x2 + dec %uB x2 + io %uB = %uB | "
+                       "enc_err=%d plc=%d\n",
+                       enc_size, dec_size,
+                       (unsigned)(sizeof(int16_t) * NUM_CH * FRAME_SAMPLES * 2U),
+                       (unsigned)(enc_size * 2 + dec_size * 2 +
+                                  sizeof(int16_t) * NUM_CH * FRAME_SAMPLES * 2U),
+                       enc_err, plc_frames);
+            rt_kprintf("[LC3] Source 端判定: LTPF 关后 encode %s 10ms 帧周期 -> %s\n",
+                       pass ? "" : "",
+                       (enc_us < DT_US) ? "可实时 (Source 可行)" :
+                       (enc_us < DT_US * 3 / 2) ? "仍超实时但接近 (需再优化)" :
+                       "不可行 (需 MVE 向量化或降规格)");
+        }
     }
-
-    rt_uint32_t mhz = SystemCoreClock / 1000000U;
-    rt_uint32_t dec_us = (rt_uint32_t)(dec_total / BENCH_FRAMES / mhz);
-    rt_uint32_t enc_us = (rt_uint32_t)(enc_total / BENCH_FRAMES / mhz);
-    rt_uint32_t budget_us = DT_US;
-    rt_uint32_t cpu_x100 = (rt_uint32_t)((rt_uint64_t)dec_us * 10000U / budget_us);
-
-    rt_kprintf("[LC3] bench %d frames: 48k/10ms/stereo, frame=%dB, @%luMHz\n",
-               BENCH_FRAMES, FRAME_BYTES, (unsigned long)mhz);
-    rt_kprintf("[LC3] decode %lu us/frame (max %lu), cpu=%lu.%02lu%% of frame\n",
-               (unsigned long)dec_us, (unsigned long)(dec_max / mhz),
-               (unsigned long)(cpu_x100 / 100U), (unsigned long)(cpu_x100 % 100U));
-    rt_kprintf("[LC3] encode %lu us/frame (max %lu)\n",
-               (unsigned long)enc_us, (unsigned long)(enc_max / mhz));
-    rt_kprintf("[LC3] RAM (heap): enc %uB x2 + dec %uB x2 + io %uB = %uB\n",
-               enc_size, dec_size,
-               (unsigned)(sizeof(int16_t) * NUM_CH * FRAME_SAMPLES * 2U),
-               (unsigned)(enc_size * 2 + dec_size * 2 +
-                          sizeof(int16_t) * NUM_CH * FRAME_SAMPLES * 2U));
-    rt_kprintf("[LC3] enc_err=%d plc_frames=%d (PLC>0 = 解码器吃到了坏帧)\n",
-               enc_err, plc_frames);
-    rt_kprintf("[LC3] verdict: %s (预算: 解码 <50%% 帧周期, 留 UI/IPC 余量)\n",
-               (dec_us * 2 < budget_us && enc_err == 0) ? "PASS" : "CHECK");
     rt_free(enc_mem); rt_free(dec_mem);
     rt_free(pcm_in); rt_free(pcm_out);
 }
