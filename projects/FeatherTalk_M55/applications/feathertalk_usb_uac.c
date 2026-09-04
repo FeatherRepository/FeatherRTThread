@@ -213,10 +213,9 @@ static volatile rt_uint32_t s_rate_ema_cyc;         /* 诊断: 包间隔 EMA (cy
  * 直接用它换算会把漂移测量放大 3 倍+ -> 修正积分器饱和到每块都补帧,
  * 块尾重复采样在 93Hz 周期上产生可闻粗糙感/杂音。 */
 static uint32_t s_rate_clk_ema_cyc;
-/* 速率闭环状态 (refill 时长窗口积分) */
-static uint64_t  s_rate_acc_cyc;                    /* 窗口累计 refill 时长 (cycles) */
-static uint32_t  s_rate_last_wdone_cyc;             /* 上次写完成时刻 (DWT) */
-static rt_bool_t s_rate_waiting;                    /* ring 在门控下, 下次写前有 refill 等待 */
+/* 速率闭环状态 (字节收支窗口结算) */
+static uint32_t  s_rate_win_delivered0;             /* 窗口起点供给字节快照 */
+static uint32_t  s_rate_win_consumed0;              /* 窗口起点消耗字节快照 */
 static uint32_t  s_rate_win_writes;                 /* 窗口写入块数 */
 static uint32_t  s_rate_win_dup;                    /* 窗口内已补帧数 */
 static uint32_t  s_rate_win_skip;                   /* 窗口内已跳帧数 */
@@ -382,37 +381,27 @@ uint32_t ft_usb_uac_output_read(uint8_t *data, uint32_t capacity)
     return output_ring_read(data, capacity, 4U);   /* 48k/16/2ch 帧对齐 */
 }
 
-/* ---- 速率闭环: refill 时长窗口积分 ----
- * 写块前调用: 若上次写后 ring 曾低于门控 (等待过 refill), 累计
- * 写完成→本次写之间的 DWT 时长; 每 1024 块结算: 实测时长 vs 标称
- * (期望字节/192B每ms) 得漂移 ppm, 残差入积分器, 死区 60ppm。
- * 积分器每块最多吐 ±1 帧修正 (uac_rate_correct_block 应用)。 */
+/* ---- 速率闭环: 字节收支窗口结算 ----
+ * 每 1024 写块结算一次: 窗口内 ring 供给字节 D (host_to_device) vs
+ * 消耗字节 C (ring read)。漂移 ppm = (C-D)/C —— 不依赖任何时钟测量
+ * (refill 时长法会被门控阈值附近的双态抖动打爆: 实测窗口间在 0 与
+ * -3000ppm 间振荡, 修正器每块都动作 -> 周期性可闻伪影)。
+ * 符号: drift>0 = 消费快于供给 (主机偏慢) -> 补帧; 负 -> 跳帧。
+ * 残差入积分器, 每块最多 +-1 帧, 死区 60ppm, 首窗丢弃 (预填充瞬态)。 */
 static void uac_rate_sample(void)
 {
-    uint32_t now = DWT->CYCCNT;
-    if (s_rate_waiting)
-    {
-        s_rate_acc_cyc += (uint32_t)(now - s_rate_last_wdone_cyc);
-        s_rate_waiting = RT_FALSE;
-    }
     s_rate_win_writes++;
     if (s_rate_win_writes >= FT_UAC_RATE_WINDOW_WRITES)
     {
-        uint64_t expected = (uint64_t)FT_UAC_RATE_WINDOW_WRITES *
-                            FT_UAC_AUDIO_BLOCK +
-                            4ULL * (s_rate_win_dup - s_rate_win_skip);
-        /* 在线校准的有效 DWT 时钟 (主机包间隔实测), 未收敛时退回常数 */
-        uint64_t f_cyc = (uint64_t)s_rate_clk_ema_cyc * 1000ULL;
-        if (f_cyc == 0U) f_cyc = (uint64_t)SystemCoreClock;
-        if (!s_rate_first_window)
+        uint32_t delivered = s_status.host_to_device_bytes -
+                             s_rate_win_delivered0;
+        uint32_t consumed = s_status.output_ring_read_bytes -
+                            s_rate_win_consumed0;
+        if (!s_rate_first_window && consumed > 0U)
         {
-            /* drift_ppm = (acc - expected/F*192... ) 转 ppm:
-             * acc*192 - expected*F  (cycles 差), 除 expected*F 再 x1e6 */
-            int64_t diff = (int64_t)s_rate_acc_cyc * 192LL -
-                           (int64_t)expected * (int64_t)f_cyc;
+            int64_t diff = (int64_t)consumed - (int64_t)delivered;
             int32_t drift_ppm = (int32_t)(diff * 1000000LL /
-                                          ((int64_t)expected *
-                                           (int64_t)f_cyc));
+                                          (int64_t)consumed);
             if (drift_ppm > (int32_t)FT_UAC_RATE_DRIFT_CLAMP_PPM)
                 drift_ppm = (int32_t)FT_UAC_RATE_DRIFT_CLAMP_PPM;
             else if (drift_ppm < -(int32_t)FT_UAC_RATE_DRIFT_CLAMP_PPM)
@@ -426,7 +415,8 @@ static void uac_rate_sample(void)
             s_status.rate_drift_ppm = drift_ppm;   /* 诊断快照 */
         }
         s_rate_first_window = RT_FALSE;
-        s_rate_acc_cyc = 0U;
+        s_rate_win_delivered0 = s_status.host_to_device_bytes;
+        s_rate_win_consumed0 = s_status.output_ring_read_bytes;
         s_rate_win_writes = 0U;
         s_rate_win_dup = 0U;
         s_rate_win_skip = 0U;
@@ -857,9 +847,8 @@ static void output_worker(void *parameter)
                 }
                 /* 预填充完成: 低水位/速率闭环基线从此刻起才有效 */
                 s_out_ring_min_reset = RT_FALSE;
-                s_rate_acc_cyc = 0U;
-                s_rate_last_wdone_cyc = DWT->CYCCNT;   /* DWT 已由包回调使能 */
-                s_rate_waiting = RT_TRUE;
+                s_rate_win_delivered0 = s_status.host_to_device_bytes;
+                s_rate_win_consumed0 = s_status.output_ring_read_bytes;
                 s_rate_win_writes = 0U;
                 s_rate_win_dup = 0U;
                 s_rate_win_skip = 0U;
@@ -898,9 +887,6 @@ static void output_worker(void *parameter)
                 s_status.last_error = -RT_EIO;
                 break;
             }
-            s_rate_last_wdone_cyc = DWT->CYCCNT;
-            s_rate_waiting =
-                s_out_ring_used < FT_UAC_WRITE_THRESHOLD;
             s_status.output_sound_write_bytes += count;
             s_status.output_worker_state = 6U;
         }
