@@ -31,4 +31,9 @@ int bt_service_enabled(void);
    (Stacks without connection support return 0.) */
 int bt_service_connected(void);
 
+/* M6-BT: A2DP 角色仲裁 (A2 单角色)。0=SINK(音箱,被动可连) 1=SOURCE(转发)。
+ * 未上电时返回 -RT_EBUSY; 未知角色返回 -RT_EINVAL。 */
+rt_err_t bt_service_set_a2dp_role(int role);
+int bt_service_a2dp_role(void);
+
 #endif

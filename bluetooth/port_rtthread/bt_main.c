@@ -331,6 +331,14 @@ static void bt_adv_enable(void)
 /* HCI 包处理器: 状态机到达 WORKING 即启动 BLE 广播 */
 static void bt_iso_probe_print(const uint8_t *mask);
 static volatile int s_iso_probe_pending;
+
+/* M6-BT: A2DP 角色管理 (A2 单角色决策)。0=SINK 音箱(被动可连) 1=SOURCE 转发。
+ * 切换语义: ->SOURCE 先挂断 Sink ACL (手机/PC 链路随 AVDTP 释放);
+ *           ->SINK 断开 Source 链路并停泵 (M55 编码器让位, UAC 恢复) */
+static int s_a2dp_role;
+extern void bt_a2dp_source_drop(void);
+int bt_service_enabled(void);
+int bt_service_connected(void);
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size)
 {
     UNUSED(channel);
@@ -954,6 +962,48 @@ int bt_service_run_callback(void (*callback)(void))
     rt_hw_interrupt_enable(level);
     return result;
 }
+
+/* ---- M6-BT: A2DP 角色管理 (经 IPC quick command BT_A2DP_ROLE 驱动) ---- */
+
+static void bt_role_switch_owned(void)
+{
+    if (s_bt_state != BT_READY) return;
+    if (s_a2dp_role == 1)
+    {
+        /* -> SOURCE: 挂断 Sink ACL (对端手机/PC 的 AVDTP 随 ACL 释放) */
+        if (s_classic_connected && s_classic_handle != 0U)
+            gap_disconnect(s_classic_handle);
+        rt_kprintf("[BT] a2dp role -> SOURCE (connect headphone via bt_src)\n");
+    }
+    else
+    {
+        /* -> SINK: 断开 Source 链路, 恢复 Sink 待连 */
+        bt_a2dp_source_drop();
+        rt_kprintf("[BT] a2dp role -> SINK\n");
+    }
+}
+
+rt_err_t bt_service_set_a2dp_role(int role)
+{
+    if (role != 0 && role != 1) return -RT_EINVAL;
+    if (!bt_service_enabled()) return -RT_EBUSY;
+    rt_base_t level = rt_hw_interrupt_disable();
+    int changed = s_a2dp_role != role;
+    s_a2dp_role = role;
+    rt_hw_interrupt_enable(level);
+    if (changed)
+    {
+        int rc = bt_service_run_callback(bt_role_switch_owned);
+        if (rc != RT_EOK) return -RT_EBUSY;
+    }
+    return RT_EOK;
+}
+
+int bt_service_a2dp_role(void)
+{
+    return s_a2dp_role;
+}
+
 
 /* ---- 栈中立服务 API (bt_service_api.h, FEATHERTALK_BT_STACK_BK 实现) ---- */
 

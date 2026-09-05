@@ -77,6 +77,17 @@ typedef enum
     FT_USB_ROW_COUNT
 } ft_usb_row_t;
 
+/* M6-BT: 蓝牙设置页行定义 (角色语义见 蓝牙设置UI设计-M6.md) */
+typedef enum
+{
+    FT_BT_ROW_POWER = 0,
+    FT_BT_ROW_A2DP_ROLE,
+    FT_BT_ROW_LE_ROLE,
+    FT_BT_ROW_PAIRED,
+    FT_BT_ROW_STATUS,
+    FT_BT_ROW_COUNT
+} ft_bt_row_t;
+
 typedef enum
 {
     FT_GALLERY_ACTION_PREVIOUS = 0,
@@ -294,6 +305,7 @@ typedef struct
     ft_storage_device_info_t flash;
     ft_storage_device_info_t sd;
     uint8_t storage_selected;
+    uint8_t bt_a2dp_role;   /* M6-BT: 0=SINK 1=SOURCE (RAM v1, 命令驱动) */
     char file_path[FT_STORAGE_PATH_MAX];
     ft_storage_entry_t files[FT_FILE_CAPACITY];
     uint8_t file_count;
@@ -1655,6 +1667,54 @@ static void draw_radio_page(fui_painter_t *p, bool bluetooth)
     set_scroll_content_rows(2U);
 }
 
+/* M6-BT: 蓝牙设置页 (总开关 + A2DP 角色 + LE 占位 + 状态) */
+static void draw_bt_settings(fui_painter_t *p)
+{
+    uint8_t cap = FEATHERTALK_QUICK_CAP_BLUETOOTH;
+    bool available = s.quick_valid && (s.quick.capabilities & cap) != 0U;
+    bool on = (s.quick.enabled & cap) != 0U;
+    fui_rect_t radio_switch = row_switch_rect(0U);
+    fui_component_style_t style = component_style();
+    fui_option_t a2dp_opts[2] = {
+        {"SINK", FUI_COMPONENT_STATE_DEFAULT},
+        {"SOURCE", FUI_COMPONENT_STATE_DEFAULT}
+    };
+    fui_option_t le_opts[2] = {
+        {"SERVER", FUI_COMPONENT_STATE_DEFAULT},
+        {"BROADCAST", FUI_COMPONENT_STATE_DEFAULT}
+    };
+    fui_segmented_control_t a2dp_sel = {
+        .bounds = {FT_ROW_X, row_y(FT_BT_ROW_A2DP_ROLE), FT_ROW_W, FT_ROW_H},
+        .options = a2dp_opts, .option_count = 2U,
+        .selected_index = s.bt_a2dp_role,
+        .state = FUI_COMPONENT_STATE_DEFAULT,
+        .text_scale = 1U
+    };
+    fui_segmented_control_t le_sel = {
+        .bounds = {FT_ROW_X, row_y(FT_BT_ROW_LE_ROLE), FT_ROW_W, FT_ROW_H},
+        .options = le_opts, .option_count = 2U,
+        .selected_index = 0U,
+        .state = FUI_COMPONENT_STATE_DISABLED,
+        .text_scale = 1U
+    };
+
+    draw_header(p, available ? tr("BLUETOOTH", "蓝牙") :
+                               tr("M33 DRIVER UNAVAILABLE", "M33 驱动不可用"));
+    draw_row(p, FT_BT_ROW_POWER, FUI_ICON_BLUETOOTH, tr("BLUETOOTH", "蓝牙"),
+             on ? tr("ON", "已开启") : tr("OFF", "已关闭"), available);
+    draw_switch(p, radio_switch.x, radio_switch.y, on, available);
+    (void)fui_component_segmented_control(p, &a2dp_sel, &style);
+    (void)fui_component_segmented_control(p, &le_sel, &style);
+    draw_row(p, FT_BT_ROW_PAIRED, FUI_ICON_PAIRED_DEVICES,
+             tr("PAIRED DEVICES", "已配对设备"),
+             tr("MANAGE FROM PAIRED HOST", "在对端设备上管理"), true);
+    draw_row(p, FT_BT_ROW_STATUS, FUI_ICON_SETTING_BLUETOOTH,
+             tr("STATUS", "状态"),
+             s.quick.connected & FEATHERTALK_QUICK_CAP_BLUETOOTH ?
+                 tr("LINKED", "已连接") : tr("IDLE", "空闲"), true);
+    set_scroll_content_rows(FT_BT_ROW_COUNT);
+}
+
 static const char *bytes_text(uint64_t bytes, char *buffer, size_t size)
 {
     if (bytes >= 1024ULL * 1024ULL * 1024ULL)
@@ -2456,7 +2516,7 @@ void ft_gpu_scene_collect(fui_painter_t *p, void *user_data)
     case FT_GPU_PAGE_SETTINGS_DISPLAY: draw_display(p); break;
     case FT_GPU_PAGE_SETTINGS_AUDIO: draw_audio(p); break;
     case FT_GPU_PAGE_SETTINGS_WIFI: draw_radio_page(p, false); break;
-    case FT_GPU_PAGE_SETTINGS_BLUETOOTH: draw_radio_page(p, true); break;
+    case FT_GPU_PAGE_SETTINGS_BLUETOOTH: draw_bt_settings(p); break;
     case FT_GPU_PAGE_SETTINGS_STORAGE: draw_storage(p); break;
     case FT_GPU_PAGE_SETTINGS_USB: draw_usb(p); break;
     case FT_GPU_PAGE_SETTINGS_TIME_LANGUAGE: draw_time_language(p); break;
@@ -3303,14 +3363,43 @@ static void handle_page_tap(const fui_event_t *event)
                 (s.quick.enabled & FEATHERTALK_QUICK_CAP_ROTATION) ? 0U : 1U);
     }
     else if (page == FT_GPU_PAGE_SETTINGS_AUDIO) handle_audio_row(row, event->x);
-    else if (page == FT_GPU_PAGE_SETTINGS_WIFI || page == FT_GPU_PAGE_SETTINGS_BLUETOOTH)
+    else if (page == FT_GPU_PAGE_SETTINGS_WIFI)
     {
-        uint8_t control = page == FT_GPU_PAGE_SETTINGS_WIFI ? FEATHERTALK_QUICK_WIFI :
-                                                              FEATHERTALK_QUICK_BLUETOOTH;
-        uint8_t mask = (uint8_t)(1U << control);
+        uint8_t mask = (uint8_t)(1U << FEATHERTALK_QUICK_WIFI);
         if (row == 0 && s.quick_valid && (s.quick.capabilities & mask))
-            (void)feathertalk_ipc_set_quick_control(control,
+            (void)feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_WIFI,
                 (s.quick.enabled & mask) ? 0U : 1U);
+    }
+    else if (page == FT_GPU_PAGE_SETTINGS_BLUETOOTH)
+    {
+        if (row == FT_BT_ROW_POWER && s.quick_valid &&
+            (s.quick.capabilities & FEATHERTALK_QUICK_CAP_BLUETOOTH))
+            (void)feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BLUETOOTH,
+                (s.quick.enabled & FEATHERTALK_QUICK_CAP_BLUETOOTH) ? 0U : 1U);
+        else if (row == FT_BT_ROW_A2DP_ROLE)
+        {
+            /* M6-BT: A2DP 角色分段 (SINK/SOURCE 互斥, A2 决策) */
+            fui_option_t options[2] = {
+                {"SINK", FUI_COMPONENT_STATE_DEFAULT},
+                {"SOURCE", FUI_COMPONENT_STATE_DEFAULT}
+            };
+            fui_segmented_control_t selector = {
+                .bounds = {FT_ROW_X, row_y(FT_BT_ROW_A2DP_ROLE), FT_ROW_W, FT_ROW_H},
+                .options = options, .option_count = 2U,
+                .selected_index = s.bt_a2dp_role,
+                .state = FUI_COMPONENT_STATE_DEFAULT,
+                .text_scale = 1U
+            };
+            int idx = fui_component_segment_index_from_point(&selector,
+                                                             event->x, event->y);
+            if (idx >= 0 && (uint8_t)idx != s.bt_a2dp_role)
+            {
+                s.bt_a2dp_role = (uint8_t)idx;
+                (void)feathertalk_ipc_set_quick_control(
+                    FEATHERTALK_QUICK_BT_A2DP_ROLE, (uint8_t)idx);
+            }
+        }
+        /* FT_BT_ROW_LE_ROLE: M8 占位, 灰显无动作 */
     }
     else if (page == FT_GPU_PAGE_SETTINGS_STORAGE)
     {

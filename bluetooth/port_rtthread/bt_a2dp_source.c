@@ -172,6 +172,17 @@ static void bt_src_kick(void)
 static void bt_src_pump_stop(void);
 static void bt_src_ring2_publish(rt_uint32_t rate);
 
+/* M6-BT: 角色切回 SINK 时由 bt_main 调用 —— 断开 Source 链路并停泵 */
+void bt_a2dp_source_drop(void)
+{
+    if (s_src_a2dp_cid != 0U)
+    {
+        a2dp_source_disconnect(s_src_a2dp_cid);
+    }
+    bt_src_pump_stop();
+    bt_src_ring2_publish(0U);   /* M55 编码器停 -> UAC 本地播放恢复 */
+}
+
 /* ---- 媒体泵: 10ms 兜底节拍 (防空转后链路停摆), 主驱动在 CAN_SEND 事件 ---- */
 static void bt_src_pump_handler(btstack_timer_source_t *ts)
 {

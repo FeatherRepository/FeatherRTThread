@@ -61,6 +61,9 @@ typedef enum
     FEATHERTALK_QUICK_BLUETOOTH  = 1,
     FEATHERTALK_QUICK_BRIGHTNESS = 2,
     FEATHERTALK_QUICK_ROTATION   = 3,
+    /* M6-BT: 蓝牙角色控制 (value = 目标角色枚举) */
+    FEATHERTALK_QUICK_BT_A2DP_ROLE = 4,   /* value: 0=SINK 1=SOURCE */
+    FEATHERTALK_QUICK_BT_LE_ROLE   = 5,   /* value: 0=OFF 1=SERVER 2=BROADCAST (M8) */
     FEATHERTALK_QUICK_COUNT
 } feathertalk_quick_control_t;
 

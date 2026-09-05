@@ -314,6 +314,18 @@ static void feathertalk_ipc_receive(void)
                     rc != RT_EOK ? FEATHERTALK_QUICK_RESULT_FAILED :
                     bt_service_busy() ? FEATHERTALK_QUICK_RESULT_PENDING : FEATHERTALK_QUICK_RESULT_OK;
             }
+            else if (command.control == FEATHERTALK_QUICK_BT_A2DP_ROLE)
+            {
+                /* M6-BT: A2DP 角色 (0=SINK 1=SOURCE); LE_ROLE 走 M8, 先报不可用 */
+                int rc = bt_service_set_a2dp_role((int)command.value);
+                g_quick_last_result = rc == -RT_EINVAL ? FEATHERTALK_QUICK_RESULT_INVALID :
+                    rc != RT_EOK ? FEATHERTALK_QUICK_RESULT_FAILED :
+                    FEATHERTALK_QUICK_RESULT_OK;
+            }
+            else if (command.control == FEATHERTALK_QUICK_BT_LE_ROLE)
+            {
+                g_quick_last_result = FEATHERTALK_QUICK_RESULT_UNAVAILABLE;  /* M8 预留 */
+            }
             else
 #endif
             {
