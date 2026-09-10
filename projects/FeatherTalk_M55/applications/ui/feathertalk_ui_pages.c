@@ -2648,9 +2648,123 @@ static lv_obj_t *create_settings_wifi_page(lv_obj_t *parent)
     return ft_wifi_page_create(parent);
 }
 
+/* M6-BT: A2DP 角色切换回调 (0=SINK 音箱 1=SOURCE 转发) */
+static void settings_bt_a2dp_role_clicked_cb(lv_event_t *event)
+{
+    uint8_t role = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
+    (void)feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_A2DP_ROLE, role);
+}
+
 static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
 {
-    return create_settings_radio_page(parent, FEATHERTALK_QUICK_BLUETOOTH);
+    const ft_ui_layout_t *layout = ft_layout_get();
+    lv_obj_t *page = lv_obj_create(parent);
+    lv_obj_t *header, *desc, *label, *caption, *row;
+    ft_ui_style_page(page);
+    lv_obj_set_style_pad_all(page, layout->page_padding, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(page, layout->section_gap, LV_PART_MAIN);
+    lv_obj_set_flex_flow(page, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(page, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_add_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(page, LV_DIR_VER);
+
+    header = lv_label_create(page);
+    lv_label_set_text(header, ft_preferences_text("蓝牙设置", "Bluetooth"));
+    lv_obj_set_style_text_font(header, ft_layout_font(22), LV_PART_MAIN);
+    ft_ui_register_accent(header, FT_ACCENT_TEXT);
+
+    desc = lv_label_create(page);
+    lv_label_set_text(desc, ft_preferences_text(
+        "此开发板提供 Wi-Fi 和蓝牙无线设置，不显示不存在的蜂窝网络选项。",
+        "This board exposes Wi-Fi and Bluetooth radio categories; cellular settings are intentionally absent."));
+    lv_obj_set_width(desc, lv_pct(100));
+    lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(desc, ft_layout_font(16), LV_PART_MAIN);
+
+    /* -- 蓝牙总开关 -- */
+    label = lv_label_create(page);
+    lv_label_set_text(label, ft_preferences_text("蓝牙总开关", "Bluetooth power"));
+    lv_obj_set_style_text_font(label, ft_layout_font(16), LV_PART_MAIN);
+    track_object(&s_settings_radio_status, lv_label_create(page));
+    lv_obj_set_width(s_settings_radio_status, lv_pct(100));
+    lv_label_set_long_mode(s_settings_radio_status, LV_LABEL_LONG_WRAP);
+    track_object(&s_settings_radio_button,
+                 create_flat_button(page,
+                    ft_preferences_text("开启蓝牙", "Turn Bluetooth on"),
+                    settings_radio_toggle_cb,
+                    (void *)(uintptr_t)FEATHERTALK_QUICK_BLUETOOTH));
+    lv_obj_set_width(s_settings_radio_button, lv_pct(100));
+
+    /* -- A2DP 角色 -- */
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("A2DP 角色", "A2DP role"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), layout->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    track_object(&s_usb_role_buttons[0],
+                 create_flat_button(row,
+                    ft_preferences_text("SINK 音箱（接收推流）", "SINK speaker (receive)"),
+                    settings_bt_a2dp_role_clicked_cb, (void *)(uintptr_t)0U));
+    track_object(&s_usb_role_buttons[1],
+                 create_flat_button(row,
+                    ft_preferences_text("SOURCE 转发（发送到耳机）", "SOURCE forward (send)"),
+                    settings_bt_a2dp_role_clicked_cb, (void *)(uintptr_t)1U));
+    lv_obj_set_width(s_usb_role_buttons[0], 0);
+    lv_obj_set_width(s_usb_role_buttons[1], 0);
+    lv_obj_set_flex_grow(s_usb_role_buttons[0], 1);
+    lv_obj_set_flex_grow(s_usb_role_buttons[1], 1);
+
+    label = lv_label_create(page);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(label, ft_preferences_text(
+        "SINK = 板子作为音箱接收手机推流；SOURCE = 板子将 USB 音频转发到蓝牙耳机。单角色互斥。",
+        "SINK = board receives audio as speaker; SOURCE = board forwards USB audio to BT headphone."\
+        " Single role at a time."));
+    lv_obj_set_style_text_color(label, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
+
+    /* -- LE AUDIO（M8 占位） -- */
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("LE AUDIO 角色（M8 预留）", "LE AUDIO role (M8 reserved)"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), layout->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_add_state(row, LV_STATE_DISABLED);
+    track_object(&s_usb_role_buttons[0],
+                 create_flat_button(row,
+                    ft_preferences_text("SERVER 被连（出声）", "SERVER (render)"),
+                    RT_NULL, RT_NULL));
+    track_object(&s_usb_role_buttons[1],
+                 create_flat_button(row,
+                    ft_preferences_text("BROADCAST 广播", "BROADCAST (cast)"),
+                    RT_NULL, RT_NULL));
+    lv_obj_set_width(s_usb_role_buttons[0], 0);
+    lv_obj_set_width(s_usb_role_buttons[1], 0);
+    lv_obj_set_flex_grow(s_usb_role_buttons[0], 1);
+    lv_obj_set_flex_grow(s_usb_role_buttons[1], 1);
+
+    label = lv_label_create(page);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(label, ft_preferences_text(
+        "LE Audio（CIS 单播 / Auracast 广播）：功能开发中，待测试手机到位后开放。",
+        "LE Audio (CIS unicast / Auracast broadcast): under development."));
+    lv_obj_set_style_text_color(label, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
+
+    /* -- 连接状态 -- */
+    label = lv_label_create(page);
+    lv_label_set_text(label, ft_preferences_text("连接状态", "Connection status"));
+    lv_obj_set_style_text_font(label, ft_layout_font(16), LV_PART_MAIN);
+
+    return page;
 }
 
 static void time_format_clicked_cb(lv_event_t *event)

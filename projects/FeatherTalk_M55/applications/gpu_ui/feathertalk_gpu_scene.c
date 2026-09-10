@@ -294,6 +294,7 @@ typedef struct
     ft_storage_device_info_t flash;
     ft_storage_device_info_t sd;
     uint8_t storage_selected;
+    uint8_t bt_a2dp_role;   /* M6-BT: A2DP 角色 0=SINK 1=SOURCE (RAM, 命令驱动) */
     char file_path[FT_STORAGE_PATH_MAX];
     ft_storage_entry_t files[FT_FILE_CAPACITY];
     uint8_t file_count;
@@ -1647,12 +1648,53 @@ static void draw_radio_page(fui_painter_t *p, bool bluetooth)
              bluetooth ? tr("BLUETOOTH", "蓝牙") : "WI-FI",
              detail, available);
     draw_switch(p, radio_switch.x, radio_switch.y, on, available);
-    draw_row(p, 1, bluetooth ? FUI_ICON_PAIRED_DEVICES : FUI_ICON_NETWORK_SCAN,
-             bluetooth ? tr("PAIRED DEVICES", "已配对设备") :
-                         tr("AVAILABLE NETWORKS", "可用网络"),
-             available ? tr("SCAN SERVICE PENDING", "扫描服务待接入") :
-                         tr("NO HARDWARE STATUS", "无硬件状态"), available);
-    set_scroll_content_rows(2U);
+    if (bluetooth)
+    {
+        /* M6-BT: A2DP 角色分段 (A2 单角色: SINK 音箱 / SOURCE 转发) */
+        fui_component_style_t bstyle = component_style();
+        fui_option_t a2dp_opts[2] = {
+            {"SINK", FUI_COMPONENT_STATE_DEFAULT},
+            {"SOURCE", FUI_COMPONENT_STATE_DEFAULT}
+        };
+        fui_option_t le_opts[2] = {
+            {"SERVER", FUI_COMPONENT_STATE_DEFAULT},
+            {"BROADCAST", FUI_COMPONENT_STATE_DEFAULT}
+        };
+        fui_segmented_control_t a2dp_sel = {
+            .bounds = {FT_ROW_X, row_y(1U), FT_ROW_W, FT_ROW_H},
+            .options = a2dp_opts, .option_count = 2U,
+            .selected_index = s.bt_a2dp_role,
+            .state = FUI_COMPONENT_STATE_DEFAULT,
+            .text_scale = 1U
+        };
+        fui_segmented_control_t le_sel = {
+            .bounds = {FT_ROW_X, row_y(2U), FT_ROW_W, FT_ROW_H},
+            .options = le_opts, .option_count = 2U,
+            .selected_index = 0U,
+            .state = FUI_COMPONENT_STATE_DISABLED,
+            .text_scale = 1U
+        };
+        (void)fui_component_segmented_control(p, &a2dp_sel, &style);
+        (void)fui_component_segmented_control(p, &le_sel, &style);
+        draw_row(p, 3U, FUI_ICON_PAIRED_DEVICES,
+                 tr("PAIRED DEVICES", "已配对设备"),
+                 tr("MANAGE FROM PAIRED HOST", "在对端设备上管理"), available);
+        snprintf(detail, sizeof(detail), "%s / %s",
+                 s.bt_a2dp_role ? "SOURCE" : "SINK",
+                 (s.quick.connected & FEATHERTALK_QUICK_CAP_BLUETOOTH) ?
+                 tr("LINKED", "已连接") : tr("IDLE", "空闲"));
+        draw_row(p, 4U, FUI_ICON_SETTING_BLUETOOTH, tr("STATUS", "状态"),
+                 detail, true);
+        set_scroll_content_rows(5U);
+    }
+    else
+    {
+        draw_row(p, 1, FUI_ICON_PAIRED_DEVICES,
+                 tr("PAIRED DEVICES", "已配对设备"),
+                 available ? tr("SCAN SERVICE PENDING", "扫描服务待接入") :
+                             tr("NO HARDWARE STATUS", "无硬件状态"), available);
+        set_scroll_content_rows(2U);
+    }
 }
 
 static const char *bytes_text(uint64_t bytes, char *buffer, size_t size)
@@ -3303,14 +3345,42 @@ static void handle_page_tap(const fui_event_t *event)
                 (s.quick.enabled & FEATHERTALK_QUICK_CAP_ROTATION) ? 0U : 1U);
     }
     else if (page == FT_GPU_PAGE_SETTINGS_AUDIO) handle_audio_row(row, event->x);
-    else if (page == FT_GPU_PAGE_SETTINGS_WIFI || page == FT_GPU_PAGE_SETTINGS_BLUETOOTH)
+    else if (page == FT_GPU_PAGE_SETTINGS_WIFI)
     {
-        uint8_t control = page == FT_GPU_PAGE_SETTINGS_WIFI ? FEATHERTALK_QUICK_WIFI :
-                                                              FEATHERTALK_QUICK_BLUETOOTH;
-        uint8_t mask = (uint8_t)(1U << control);
+        uint8_t mask = (uint8_t)(1U << FEATHERTALK_QUICK_WIFI);
         if (row == 0 && s.quick_valid && (s.quick.capabilities & mask))
-            (void)feathertalk_ipc_set_quick_control(control,
+            (void)feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_WIFI,
                 (s.quick.enabled & mask) ? 0U : 1U);
+    }
+    else if (page == FT_GPU_PAGE_SETTINGS_BLUETOOTH)
+    {
+        if (row == 0 && s.quick_valid && (s.quick.capabilities & FEATHERTALK_QUICK_CAP_BLUETOOTH))
+            (void)feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BLUETOOTH,
+                (s.quick.enabled & FEATHERTALK_QUICK_CAP_BLUETOOTH) ? 0U : 1U);
+        else if (row == 1)
+        {
+            /* M6-BT: A2DP 角色分段命中 (SINK/SOURCE 互斥, A2 决策) */
+            fui_option_t options[2] = {
+                {"SINK", FUI_COMPONENT_STATE_DEFAULT},
+                {"SOURCE", FUI_COMPONENT_STATE_DEFAULT}
+            };
+            fui_segmented_control_t selector = {
+                .bounds = {FT_ROW_X, row_y(1U), FT_ROW_W, FT_ROW_H},
+                .options = options, .option_count = 2U,
+                .selected_index = s.bt_a2dp_role,
+                .state = FUI_COMPONENT_STATE_DEFAULT,
+                .text_scale = 1U
+            };
+            int idx = fui_component_segment_index_from_point(&selector,
+                                                             event->x, event->y);
+            if (idx >= 0 && (uint8_t)idx != s.bt_a2dp_role)
+            {
+                s.bt_a2dp_role = (uint8_t)idx;
+                (void)feathertalk_ipc_set_quick_control(
+                    FEATHERTALK_QUICK_BT_A2DP_ROLE, (uint8_t)idx);
+            }
+        }
+        /* row 2 (LE AUDIO): M8 占位, 灰显无动作 */
     }
     else if (page == FT_GPU_PAGE_SETTINGS_STORAGE)
     {
