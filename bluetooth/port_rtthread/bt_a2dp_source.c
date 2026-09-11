@@ -67,6 +67,45 @@ static uint32_t     s_neg_rate;
 static uint8_t      s_neg_channels;
 static uint8_t      s_neg_bitpool_max;
 
+/* ---- M6: 断链自动重连 (指数退避, 最大 5 次) ---- */
+#define FT_SRC_RECONNECT_MAX_RETRY  5
+#define FT_SRC_RECONNECT_BASE_MS    2000
+static bd_addr_t                s_reconnect_peer;
+static rt_bool_t                s_reconnect_valid;
+static rt_uint8_t               s_reconnect_retry;
+static btstack_timer_source_t   s_reconnect_timer;
+
+static void bt_src_reconnect_timer_cb(btstack_timer_source_t *ts);
+
+/* 调度下一次重连 (指数退避; 超过最大次数放弃) */
+static void bt_src_schedule_reconnect(void)
+{
+    if (!s_reconnect_valid || s_reconnect_retry >= FT_SRC_RECONNECT_MAX_RETRY)
+    {
+        if (s_reconnect_valid)
+            rt_kprintf("[SRC] reconnect: max retries, giving up\n");
+        s_reconnect_valid = RT_FALSE;
+        return;
+    }
+    uint32_t delay_ms = FT_SRC_RECONNECT_BASE_MS << (s_reconnect_retry > 3 ? 3 : s_reconnect_retry);
+    btstack_run_loop_set_timer(&s_reconnect_timer, delay_ms);
+    btstack_run_loop_set_timer_handler(&s_reconnect_timer, bt_src_reconnect_timer_cb);
+    btstack_run_loop_add_timer(&s_reconnect_timer);
+    s_reconnect_retry++;
+    rt_kprintf("[SRC] reconnect #%u to %s in %lu ms\n",
+               s_reconnect_retry, bd_addr_to_str(s_reconnect_peer),
+               (unsigned long)delay_ms);
+}
+
+/* 重连定时器回调: 尝试对上次的 peer 重新 establish */
+static void bt_src_reconnect_timer_cb(btstack_timer_source_t *ts)
+{
+    if (s_src_state != FT_SRC_STATE_CLOSED || !s_reconnect_valid) return;
+    rt_kprintf("[SRC] reconnect attempt #%u to %s\n",
+               s_reconnect_retry, bd_addr_to_str(s_reconnect_peer));
+    a2dp_source_establish_stream(s_reconnect_peer, &s_src_a2dp_cid);
+}
+
 /* 媒体泵 (btloop 定时器驱动) */
 static btstack_timer_source_t s_pump_timer;
 static rt_bool_t   s_pump_active;
@@ -310,6 +349,7 @@ static void bt_src_packet_handler(uint8_t packet_type, uint16_t channel,
         bt_src_ring2_publish(0U);
         bt_src_pump_stop();
         rt_kprintf("[SRC] signaling released\n");
+        bt_src_schedule_reconnect();
         break;
 
     case A2DP_SUBEVENT_STREAMING_CAN_SEND_MEDIA_PACKET_NOW:
