@@ -90,11 +90,12 @@ static void m55_lcd_backlight_enable(void)
                      CYBSP_DISP_BACKLIGHT_PWM_PIN,
                      &CYBSP_DISP_BACKLIGHT_PWM_config);
 
-    /* Boot-time backlight probe: print the panel-facing duty right after the
-     * pin handover, so brightness regressions show up on the console. */
+    /* Boot-time backlight guard: check the panel-facing duty right after the
+     * pin handover; if anything left it below the boot default, the driver
+     * re-asserts it (and logs), so the panel can no longer boot dim. */
     {
         uint8_t bl_percent = 0U;
-        if (lcd_backlight_get_percent(&bl_percent) == RT_EOK)
+        if (lcd_backlight_ensure_default(&bl_percent) == RT_EOK)
             rt_kprintf("[lcd] backlight after handover: %u%%\n", bl_percent);
         else
             rt_kprintf("[lcd] backlight probe unavailable\n");

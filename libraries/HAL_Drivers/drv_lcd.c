@@ -1139,6 +1139,30 @@ rt_err_t lcd_backlight_get_percent(rt_uint8_t *percent)
     *percent = (rt_uint8_t)scaled;
     return RT_EOK;
 }
+
+rt_err_t lcd_backlight_ensure_default(rt_uint8_t *final_percent)
+{
+    rt_uint8_t current = 0U;
+
+    if (final_percent == RT_NULL) return -RT_EINVAL;
+    if (lcd_backlight_get_percent(&current) != RT_EOK) return -RT_ERROR;
+
+    /* Self-heal guard: the boot default is applied before the backlight pin
+     * is handed back to TCPWM, so a lost register write only shows up
+     * panel-side after handover.  If the panel-facing duty ever reads below
+     * the default, re-assert it once instead of booting dim. */
+    if ((rt_uint32_t)current + 1U < (rt_uint32_t)LCD_BL_DEFAULT_PERCENT)
+    {
+        LOG_W("backlight reads %u%%, below default %u%%; re-asserting",
+              current, LCD_BL_DEFAULT_PERCENT);
+        if (lcd_backlight_set_percent(LCD_BL_DEFAULT_PERCENT) != RT_EOK)
+            return -RT_ERROR;
+        if (lcd_backlight_get_percent(&current) != RT_EOK) return -RT_ERROR;
+    }
+
+    *final_percent = current;
+    return RT_EOK;
+}
 #endif
 
 static rt_err_t drv_lcd_init(struct rt_device *device)

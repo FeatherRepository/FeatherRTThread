@@ -46,6 +46,9 @@ rt_err_t lcd_wait_frame_done(uint32_t timeout_ms);
  * 50 percent PWM duty, matching the product brightness policy. */
 rt_err_t lcd_backlight_set_percent(uint8_t percent);
 rt_err_t lcd_backlight_get_percent(uint8_t *percent);
+/* Read the panel-facing level and re-assert the boot default if it sags
+ * below it.  Reports the effective percent via final_percent. */
+rt_err_t lcd_backlight_ensure_default(uint8_t *final_percent);
 
 #ifdef __cplusplus
 }
