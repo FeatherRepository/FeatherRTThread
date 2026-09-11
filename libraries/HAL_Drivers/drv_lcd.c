@@ -1543,6 +1543,16 @@ __exit:
 }
 INIT_APP_EXPORT(drv_lcd_hw_init);
 
+/* M6: LCD 初始化后设置默认背光亮度 (80%)。
+ * 之前背光控制只在 gpu_scene.c (未参与构建) —— 没人调背光,
+ * 屏幕处于硬件默认低亮度。此调用保证无论哪套 UI 在用, 背光都有合理亮度。 */
+static int lcd_backlight_default_init(void)
+{
+    lcd_backlight_set_percent(80);
+    return 0;
+}
+INIT_COMPONENT_EXPORT(lcd_backlight_default_init);
+
 
 #ifdef DRV_DEBUG
 #ifdef FINSH_USING_MSH
