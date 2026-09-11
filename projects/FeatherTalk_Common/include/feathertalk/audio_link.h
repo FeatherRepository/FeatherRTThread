@@ -58,6 +58,11 @@ typedef struct
 #define FT_ALINK    ((ft_audio_link_t *)FT_ALINK_BASE)
 #define FT_ALINK2   ((ft_audio_link_t *)FT_ALINK2_BASE)   /* M5: M55->M33 */
 
+/* flags 字段: 数据面解码模式 (M55 consumer 据此分派解码插件)。
+ * bit0 = LE Audio LC3 帧模式 (帧化: [len16][ch u8][LC3 帧]);
+ * 0 = SBC 模式 (帧化: [len16][SBC 载荷]) */
+#define FT_ALINK_FLAGS_MODE_LE_AUDIO 0x01U
+
 #if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1)
 #define FT_ALINK_DCACHE_CLEAN(addr, size)     SCB_CleanDCache_by_Addr((uint32_t *)(addr), (int32_t)(size))
 #define FT_ALINK_DCACHE_INVALID(addr, size)   SCB_InvalidateDCache_by_Addr((uint32_t *)(addr), (int32_t)(size))

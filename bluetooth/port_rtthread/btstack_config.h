@@ -37,6 +37,9 @@
 /* M8.0: LE Audio ISO 通路 (CIS/BIS)。H4 层按此宏编译 type 0x05 帧解析;
  * 控制器侧 ISO 能力由 bt_iso_probe 探针实测裁决 */
 #define ENABLE_LE_ISOCHRONOUS_STREAMS
+/* M8.1: ISO 流对象池。btstack_memory 默认 0 = hci_iso_stream_create 必失败
+ * = 收到 LE CIS Request 也无法 gap_cis_accept (实测坑, 见 worklog M8.1) */
+#define MAX_NR_HCI_ISO_STREAMS 4
 
 /* logging off for P0 skeleton (avoids hci_dump dependency) */
 #define ENABLE_PRINTF_HEXDUMP

@@ -13,7 +13,8 @@ typedef enum
     FT_AUDIO_OUTPUT_OWNER_NONE = 0,
     FT_AUDIO_OUTPUT_OWNER_LOCAL_PLAYER,
     FT_AUDIO_OUTPUT_OWNER_USB_UAC,
-    FT_AUDIO_OUTPUT_OWNER_BT_A2DP    /* M4b: 蓝牙 A2DP Sink 流 */
+    FT_AUDIO_OUTPUT_OWNER_BT_A2DP,    /* M4b: 蓝牙 A2DP Sink 流 */
+    FT_AUDIO_OUTPUT_OWNER_BT_LE_AUDIO /* M8.1: LE Audio CIS 单播流 */
 } ft_audio_output_owner_t;
 
 typedef struct

@@ -44,16 +44,19 @@ if not os.path.isfile(firmware_source):
 src = [os.path.join(bt_root, f) for f in
        ('bt_main.c', 'bt_hcd_download.c', 'bt_uart_block_rtthread.c',
         'hal_uart_dma_rtthread.c', 'hal_cpu_rtthread.c', 'hal_time_ms_rtthread.c',
-        'sm_stubs_m2.c',
         'bt_a2dp_sink.c',    # M4b: A2DP sink + AVRCP + 媒体包 -> 跨核 ring
         'bt_a2dp_source.c',  # M5: A2DP source + 反向 ring -> 蓝牙耳机
-        'bt_bond_store.c')]  # M3': link key 持久化 (内存表+共享块, M55 托管文件)
+        'bt_bond_store.c',   # M3': link key 持久化 (内存表+共享块, M55 托管文件)
+        'bt_le_audio_unicast.c')]  # M8.1: BAP Unicast Server (ASCS/CIS/ISO -> ring)
 src += [os.path.join(btstack_root, 'src', f) for f in
         ('hci.c', 'hci_transport_h4.c', 'hci_cmd.c', 'hci_dump.c',
          'btstack_linked_list.c', 'btstack_memory.c', 'btstack_memory_pool.c',
          'btstack_util.c', 'btstack_run_loop.c', 'btstack_run_loop_base.c',
          'l2cap.c', 'l2cap_signaling.c', 'ad_parser.c',
          'ble/le_device_db_memory.c',
+         'ble/sm.c',           # M8.1: 真 SMP 取代 M2 桩 (LE 配对/绑定, ASCS 加密前置)
+         'btstack_crypto.c',   # M8.1: sm.c 的 AES 依赖
+         'hci_event.c',        # M8.1: sm.c 事件模板辅助
          'ble/att_db.c', 'ble/att_server.c', 'ble/att_dispatch.c',
          # M4a Classic: SDP server + link key 内存库
          'classic/sdp_server.c', 'classic/sdp_util.c',

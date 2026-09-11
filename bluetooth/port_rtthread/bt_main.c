@@ -41,6 +41,8 @@
 #include "hci_dump.h"
 #include "hci_dump_embedded_stdout.h"
 #include "ble/att_server.h"
+/* M8.1: LE SMP (ASCS 控制点要求加密写入, 手机先配对再配流) */
+#include "ble/sm.h"
 #include "ft_gatt.h"
 /* M4a Classic: SDP server + link key 内存库 (SSP Just Works 配对) */
 #include "bluetooth.h"
@@ -53,6 +55,9 @@ extern void bt_a2dp_sink_quiesce(void);
 extern void bt_uart_shutdown(void);
 extern int bt_a2dp_source_setup(void);
 extern const btstack_link_key_db_t * bt_bond_store_instance(void);
+
+/* M8.1: LE Audio BAP Unicast Server (bt_le_audio_unicast.c) */
+#include "bt_le_audio.h"
 
 /* FT Data CCCD 使能值 (Bluetooth 规范) */
 #define FT_GATT_CCCD_NOTIFICATION   0x0001U
@@ -216,6 +221,14 @@ static uint16_t att_read_callback(hci_con_handle_t con_handle, uint16_t att_hand
                                   uint16_t offset, uint8_t *buffer, uint16_t buffer_size)
 {
     (void)con_handle;
+    /* M8.1: LE Audio ASE 状态读取先行路由 (0xFFFF = 非本模块句柄) */
+    {
+        uint16_t le_rc = ft_le_audio_att_read(att_handle, offset, buffer, buffer_size);
+        if (le_rc != 0xFFFFU)
+        {
+            return le_rc;
+        }
+    }
     if (att_handle == ATT_CHARACTERISTIC_46540002_4654_4541_4C4B_000000000002_01_VALUE_HANDLE)
     {
         if ((offset == 0U) && (buffer != NULL) && (buffer_size >= 1U))
@@ -245,6 +258,14 @@ static int att_write_callback(hci_con_handle_t con_handle, uint16_t att_handle,
 {
     (void)transaction_mode;
     (void)offset;
+    /* M8.1: LE Audio 控制点 / ASE CCCD 先行路由 (-2 = 非本模块句柄) */
+    {
+        int le_rc = ft_le_audio_att_write(con_handle, att_handle, buffer, buffer_size);
+        if (le_rc != -2)
+        {
+            return le_rc;
+        }
+    }
     if (att_handle == ATT_CHARACTERISTIC_46540003_4654_4541_4C4B_000000000003_01_CLIENT_CONFIGURATION_HANDLE)
     {
         s_notify_enabled =
@@ -277,10 +298,29 @@ static void ft_notify_timer_handler(struct btstack_timer_source *ts)
 
 /* 广播保活: 连接尝试失败(未建立)时, 控制器会停广播且不产生断开事件,
  * 造成"广播假死、扫不到"。每 3s 若未连接且未在广播, 重新使能。
- * (对已建立连接无影响; 重发 enable 是幂等的) */
+ * (对已建立连接无影响; 重发 enable 是幂等的)
+ * M8.1 自愈扩展: 真 SMP 引入后, sm_event_packet_handler 在 WORKING 边沿
+ * 经 btstack_crypto 发 IR/ER 随机数 (LE_Rand), 命令在飞时广播链内的
+ * 下一条 hci_send_cmd 被 DISALLOWED 丢弃 (0x2008 实测丢失 -> 15s 启动
+ * 超时)。此处按 CC 记录补发丢失的一步, 广播链从此可自愈。 */
 static btstack_timer_source_t s_adv_keepalive_timer;
+static void bt_adv_set_data(void);
+static void bt_adv_enable(void);
 static void ft_adv_keepalive_handler(struct btstack_timer_source *ts)
 {
+    if (s_desired_on && s_bt_state == BT_STARTING)
+    {
+        if (g_adv_cc_status[ADV_CC_PARAMS] == 0U &&
+            g_adv_cc_status[ADV_CC_DATA] == 0xFFU)
+        {
+            bt_adv_set_data();   /* data 步被丢弃: 幂等重发 */
+        }
+        else if (g_adv_cc_status[ADV_CC_DATA] == 0U &&
+                 g_adv_cc_status[ADV_CC_ENABLE] == 0xFFU)
+        {
+            bt_adv_enable();     /* enable 步被丢弃: 幂等重发 */
+        }
+    }
     if ((s_bt_state == BT_READY) && s_desired_on && !s_gatt_connected)
     {
         /* 控制器若已在广播, 此命令幂等; 若假死则救活 */
@@ -422,6 +462,12 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 ft_radio_set_state(FT_RADIO_BT, FT_RADIO_READY, 0);
                 rt_kprintf("[BT] BLE advertising as FeatherTalk\n");
                 feathertalk_ipc_send_event(41);
+                /* M8.1: 广播就绪后再初始化 SMP — 此时 WORKING 事件已过,
+                 * SM 的 IR/ER 随机数路径不会再与 HCI 命令队列竞争。
+                 * sm_init 幂等 (sm_initialized 保护), 后续周期只执行一次 */
+                sm_init();
+                sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
+                sm_set_authentication_requirements(SM_AUTHREQ_BONDING);
             }
         }
         break;
@@ -762,6 +808,10 @@ static int bt_bringup(void)
 
     /* M4b: A2DP Sink + AVRCP (SDP 记录/流端点/handler 注册, 纯静态登记,
      * 须在 hci_power_on 前完成) */
+    /* M8.1: LE SMP — Just Works + 绑定。sm_init 推迟到 BT_READY 边沿执行
+     * (见 packet_handler WORKING 分支): sm_init 后 SM 会在 WORKING 事件里
+     * 经 btstack_crypto 发 IR/ER 随机数, 与广播链竞争 HCI 命令队列,
+     * 0x2008 曾被 DISALLOWED 丢弃导致启动超时 (实测根因, 见 worklog M8.1) */
     if (bt_a2dp_sink_setup() != 0) {
         s_stack_initialized = RT_TRUE;
         s_stack_setup_failed = RT_TRUE;
@@ -780,6 +830,8 @@ static int bt_bringup(void)
     /* M2: att_server (GAP+DIS+FT Data) */
     att_server_init(profile_data, att_read_callback, att_write_callback);
     att_server_register_packet_handler(packet_handler);
+    /* M8.1: LE Audio Unicast Server (PACS/ASCS/CIS acceptor/ISO 收流) */
+    ft_le_audio_init();
     s_stack_initialized = RT_TRUE;
     g_bt_coex_diag.stack_inits++;
     }

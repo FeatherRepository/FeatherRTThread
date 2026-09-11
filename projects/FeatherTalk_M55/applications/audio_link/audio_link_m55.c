@@ -13,6 +13,7 @@
 
 #include <feathertalk/audio_link.h>
 #include "ft_sbc_decode.h"   /* A0-2: fmt_gen 非 0 时切换到 SBC 帧解码 */
+#include "../le_audio/ft_lc3_decode.h"   /* M8.1: flags bit0 -> LC3 帧解码 */
 
 #define FT_ALINK_EVT_DBELL   0x01U
 #define FT_ALINK_CHUNK       4096U
@@ -24,6 +25,7 @@ static struct rt_event  s_alink_event;
 static rt_thread_t      s_alink_thread;
 static rt_bool_t        s_alink_ready;
 static rt_uint32_t      s_last_fmt_gen;   /* ring 流格式代际 (0 = 图案校验模式) */
+static rt_bool_t        s_le_mode;        /* M8.1: 当前流为 LE Audio LC3 模式 */
 
 /* 统计 (msh ft_audio_stats 可读) */
 static rt_uint32_t s_stat_bytes;
@@ -59,8 +61,15 @@ static void ft_alink_consume(void)
 
         if (s_last_fmt_gen != 0U)
         {
-            /* A0-2: SBC 流模式, 帧化字节流送解码器 */
-            ft_sbc_feed(buf, got);
+            /* A0-2/M8.1: 流模式, 按 flags 分派帧化字节流给解码插件 */
+            if (s_le_mode)
+            {
+                ft_lc3_feed(buf, got);
+            }
+            else
+            {
+                ft_sbc_feed(buf, got);
+            }
         }
         else
         {
@@ -127,26 +136,43 @@ static void ft_alink_thread_entry(void *parameter)
         {
             s_first_wake_tick = rt_tick_get();
         }
-        /* A0-2/M4b: 流格式代际变化 -> fmt_rate 非 0 开流 (SBC 解码+sound0),
-         * fmt_rate 为 0 则流结束 (M33 侧停流/断连), 关 sound0 释放 */
+        /* A0-2/M4b/M8.1: 流格式代际变化 -> fmt_rate 非 0 开流 (按 flags 分派
+         * SBC / LE Audio LC3 解码), fmt_rate 为 0 则流结束 (关 sound0 释放) */
         FT_ALINK_DCACHE_INVALID(FT_ALINK_BASE, 32);
         if (FT_ALINK->fmt_gen != s_last_fmt_gen)
         {
             s_last_fmt_gen = FT_ALINK->fmt_gen;
             if ((s_last_fmt_gen != 0U) && (FT_ALINK->fmt_rate != 0U))
             {
-                ft_sbc_stream_begin();
+                s_le_mode = (FT_ALINK->flags & FT_ALINK_FLAGS_MODE_LE_AUDIO) ? RT_TRUE : RT_FALSE;
+                if (s_le_mode)
+                {
+                    ft_lc3_stream_begin();
+                }
+                else
+                {
+                    ft_sbc_stream_begin();
+                }
             }
             else if (s_last_fmt_gen != 0U)
             {
-                ft_sbc_stream_end();
+                if (s_le_mode)
+                {
+                    ft_lc3_stream_end();
+                }
+                else
+                {
+                    ft_sbc_stream_end();
+                }
             }
         }
-        /* M4b 防卡顿水位管理 (仅 SBC 流模式): 短断流静默容忍, 长断流计数
-         * (可听卡顿, 验收指标) 并等恢复水位干净续播; 详见 ft_sbc_decode.h */
+        /* M4b 防卡顿水位管理 (仅流模式): 短断流静默容忍, 长断流计数
+         * (可听卡顿, 验收指标) 并等恢复水位干净续播 */
         if (s_last_fmt_gen != 0U)
         {
-            if (!ft_sbc_watermark_tick())
+            rt_bool_t ok = s_le_mode ? ft_lc3_watermark_tick()
+                                     : ft_sbc_watermark_tick();
+            if (!ok)
             {
                 continue;
             }
