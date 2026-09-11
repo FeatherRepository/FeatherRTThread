@@ -331,6 +331,10 @@ static lv_obj_t *s_audio_channel_buttons[FT_AUDIO_CHANNEL_COUNT];
 static lv_obj_t *s_settings_radio_status;
 static lv_obj_t *s_settings_radio_button;
 static lv_obj_t *s_usb_role_buttons[2];
+/* M6-BT: 蓝牙页 A2DP 角色按钮 (与 USB 页 s_usb_role_buttons 分开) */
+static lv_obj_t *s_bt_a2dp_buttons[2];
+static lv_obj_t *s_bt_le_buttons[2];
+static uint8_t s_bt_a2dp_role;   /* 0=SINK 1=SOURCE */
 static lv_obj_t *s_usb_function_buttons[2];
 static lv_obj_t *s_usb_function_radios[2];
 static lv_obj_t *s_usb_function_status[2];
@@ -2648,11 +2652,35 @@ static lv_obj_t *create_settings_wifi_page(lv_obj_t *parent)
     return ft_wifi_page_create(parent);
 }
 
+/* M6-BT: 角色按钮选中态刷新 (选中的加高亮边框, 未选中的恢复) */
+static void settings_bt_role_refresh(void)
+{
+    for (int i = 0; i < 2; i++)
+    {
+        lv_obj_t *btn = s_bt_a2dp_buttons[i];
+        if (btn == RT_NULL || !lv_obj_is_valid(btn)) continue;
+        if ((int)s_bt_a2dp_role == i)
+        {
+            lv_obj_add_state(btn, LV_STATE_CHECKED);
+            lv_obj_set_style_border_color(btn, lv_color_hex(0x2196F3), LV_PART_MAIN | LV_STATE_CHECKED);
+            lv_obj_set_style_border_width(btn, 2, LV_PART_MAIN | LV_STATE_CHECKED);
+        }
+        else
+        {
+            lv_obj_remove_state(btn, LV_STATE_CHECKED);
+            lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
+        }
+    }
+}
+
 /* M6-BT: A2DP 角色切换回调 (0=SINK 音箱 1=SOURCE 转发) */
 static void settings_bt_a2dp_role_clicked_cb(lv_event_t *event)
 {
     uint8_t role = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
+    if (role == s_bt_a2dp_role) return;
     (void)feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_A2DP_ROLE, role);
+    s_bt_a2dp_role = role;
+    settings_bt_role_refresh();
 }
 
 static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
@@ -2704,18 +2732,19 @@ static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
     lv_obj_set_size(row, lv_pct(100), layout->control_height);
     lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    track_object(&s_usb_role_buttons[0],
+    track_object(&s_bt_a2dp_buttons[0],
                  create_flat_button(row,
                     ft_preferences_text("SINK 音箱（接收推流）", "SINK speaker (receive)"),
                     settings_bt_a2dp_role_clicked_cb, (void *)(uintptr_t)0U));
-    track_object(&s_usb_role_buttons[1],
+    track_object(&s_bt_a2dp_buttons[1],
                  create_flat_button(row,
                     ft_preferences_text("SOURCE 转发（发送到耳机）", "SOURCE forward (send)"),
                     settings_bt_a2dp_role_clicked_cb, (void *)(uintptr_t)1U));
-    lv_obj_set_width(s_usb_role_buttons[0], 0);
-    lv_obj_set_width(s_usb_role_buttons[1], 0);
-    lv_obj_set_flex_grow(s_usb_role_buttons[0], 1);
-    lv_obj_set_flex_grow(s_usb_role_buttons[1], 1);
+    lv_obj_set_width(s_bt_a2dp_buttons[0], 0);
+    lv_obj_set_width(s_bt_a2dp_buttons[1], 0);
+    lv_obj_set_flex_grow(s_bt_a2dp_buttons[0], 1);
+    lv_obj_set_flex_grow(s_bt_a2dp_buttons[1], 1);
+    settings_bt_role_refresh();
 
     label = lv_label_create(page);
     lv_obj_set_width(label, lv_pct(100));
@@ -2737,18 +2766,18 @@ static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
     lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_add_state(row, LV_STATE_DISABLED);
-    track_object(&s_usb_role_buttons[0],
+    track_object(&s_bt_le_buttons[0],
                  create_flat_button(row,
                     ft_preferences_text("SERVER 被连（出声）", "SERVER (render)"),
                     RT_NULL, RT_NULL));
-    track_object(&s_usb_role_buttons[1],
+    track_object(&s_bt_le_buttons[1],
                  create_flat_button(row,
                     ft_preferences_text("BROADCAST 广播", "BROADCAST (cast)"),
                     RT_NULL, RT_NULL));
-    lv_obj_set_width(s_usb_role_buttons[0], 0);
-    lv_obj_set_width(s_usb_role_buttons[1], 0);
-    lv_obj_set_flex_grow(s_usb_role_buttons[0], 1);
-    lv_obj_set_flex_grow(s_usb_role_buttons[1], 1);
+    lv_obj_set_width(s_bt_le_buttons[0], 0);
+    lv_obj_set_width(s_bt_le_buttons[1], 0);
+    lv_obj_set_flex_grow(s_bt_le_buttons[0], 1);
+    lv_obj_set_flex_grow(s_bt_le_buttons[1], 1);
 
     label = lv_label_create(page);
     lv_obj_set_width(label, lv_pct(100));
@@ -2763,6 +2792,14 @@ static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
     label = lv_label_create(page);
     lv_label_set_text(label, ft_preferences_text("连接状态", "Connection status"));
     lv_obj_set_style_text_font(label, ft_layout_font(16), LV_PART_MAIN);
+
+    /* 200ms 定时刷新: 蓝牙状态/角色/连接实时反馈到 UI。
+     * 缺少此定时器 -> 状态标签和按钮文字永远停在初始值 (实测根因)。 */
+    {
+        lv_timer_t *timer = lv_timer_create(settings_radio_refresh, 200, NULL);
+        lv_obj_add_event_cb(page, settings_radio_deleted, LV_EVENT_DELETE, timer);
+        settings_radio_refresh(timer);
+    }
 
     return page;
 }
