@@ -10,6 +10,7 @@
 #endif
 #include <feathertalk/version.h>
 #include "ipc/feathertalk_ipc.h"
+#include "drv_lcd.h"
 #ifdef FEATHERTALK_USING_GPU_UI
 #include "gpu_ui/feathertalk_gpu_ui.h"
 #endif
@@ -88,6 +89,16 @@ static void m55_lcd_backlight_enable(void)
     Cy_GPIO_Pin_Init(CYBSP_DISP_BACKLIGHT_PWM_PORT,
                      CYBSP_DISP_BACKLIGHT_PWM_PIN,
                      &CYBSP_DISP_BACKLIGHT_PWM_config);
+
+    /* Boot-time backlight probe: print the panel-facing duty right after the
+     * pin handover, so brightness regressions show up on the console. */
+    {
+        uint8_t bl_percent = 0U;
+        if (lcd_backlight_get_percent(&bl_percent) == RT_EOK)
+            rt_kprintf("[lcd] backlight after handover: %u%%\n", bl_percent);
+        else
+            rt_kprintf("[lcd] backlight probe unavailable\n");
+    }
 }
 
 #if defined(BSP_USING_LVGL)
