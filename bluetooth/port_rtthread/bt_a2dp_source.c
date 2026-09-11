@@ -311,6 +311,10 @@ static void bt_src_packet_handler(uint8_t packet_type, uint16_t channel,
         s_src_a2dp_cid = a2dp_subevent_stream_established_get_a2dp_cid(packet);
         s_src_local_seid = a2dp_subevent_stream_established_get_local_seid(packet);
         s_src_state = FT_SRC_STATE_OPEN;
+        /* 保存对端地址供断链重连 */
+        memcpy(s_reconnect_peer, s_src_peer, 6);
+        s_reconnect_valid = RT_TRUE;
+        s_reconnect_retry = 0;
         rt_kprintf("[SRC] established cid 0x%02x seid %u, starting...\n",
                    s_src_a2dp_cid, s_src_local_seid);
         a2dp_source_start_stream(s_src_a2dp_cid, s_src_local_seid);
@@ -419,10 +423,34 @@ static void bt_src_gap_handler(uint8_t packet_type, uint16_t channel,
     case GAP_EVENT_INQUIRY_COMPLETE:
         s_scan_active = RT_FALSE;
         rt_kprintf("[SRC] scan done, %u found\n", s_scan_count);
+        /* M6-BT: 角色切到 SOURCE 后自动扫描, 扫完自动连第一个音频设备 */
+        if (s_scan_count > 0U)
+        {
+            for (uint8_t i = 0U; i < s_scan_count; i++)
+            {
+                if (s_scan[i].is_audio)
+                {
+                    memcpy(s_src_peer, s_scan[i].addr, 6);
+                    rt_kprintf("[SRC] auto-connect: %s (%s)\n",
+                               bd_addr_to_str(s_src_peer),
+                               s_scan[i].name[0] ? s_scan[i].name : "unknown");
+                    a2dp_source_establish_stream(s_src_peer, &s_src_a2dp_cid);
+                    return;
+                }
+            }
+            rt_kprintf("[SRC] no audio device in scan results\n");
+        }
         break;
     default:
         break;
     }
+}
+
+/* M6-BT: 角色切到 SOURCE 时由 bt_main.c 调用——自动扫描耳机 */
+void bt_a2dp_source_start_scan(void)
+{
+    rt_kprintf("[SRC] auto-scan for headphones\n");
+    gap_inquiry_start(7);
 }
 
 /* ---- setup: bt_main.c 在 sdp_init 之后调 ---- */

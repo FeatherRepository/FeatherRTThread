@@ -973,12 +973,18 @@ static void bt_role_switch_owned(void)
         /* -> SOURCE: 挂断 Sink ACL (对端手机/PC 的 AVDTP 随 ACL 释放) */
         if (s_classic_connected && s_classic_handle != 0U)
             gap_disconnect(s_classic_handle);
-        rt_kprintf("[BT] a2dp role -> SOURCE (connect headphone via bt_src)\n");
+        /* 通知 M55 切换音频路由 (激活 UAC tap + SBC 编码) */
+        feathertalk_ipc_send_event(80);   /* 80 = role -> SOURCE */
+        rt_kprintf("[BT] a2dp role -> SOURCE\n");
+        /* 自动扫描并连接耳机 */
+        extern void bt_a2dp_source_start_scan(void);
+        bt_a2dp_source_start_scan();
     }
     else
     {
         /* -> SINK: 断开 Source 链路, 恢复 Sink 待连 */
         bt_a2dp_source_drop();
+        feathertalk_ipc_send_event(81);   /* 81 = role -> SINK */
         rt_kprintf("[BT] a2dp role -> SINK\n");
     }
 }
