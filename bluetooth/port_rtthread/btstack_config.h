@@ -40,6 +40,11 @@
 /* M8.1: ISO 流对象池。btstack_memory 默认 0 = hci_iso_stream_create 必失败
  * = 收到 LE CIS Request 也无法 gap_cis_accept (实测坑, 见 worklog M8.1) */
 #define MAX_NR_HCI_ISO_STREAMS 4
+/* M8.1: LE Secure Connections 的 ECC 后端。ENABLE_LE_SECURE_CONNECTIONS 下
+ * btstack_crypto 强制要求 ECC: 不配软件后端时 generate_key 是空函数,
+ * SM 在配对响应前死等 ECC 密钥 -> 30s 超时 (实测根因, 见 worklog M8.1)。
+ * micro-ecc 在树 (3rd-party/micro-ecc), uECC.c 由 SConscript 编入 */
+#define ENABLE_MICRO_ECC_P256
 
 /* logging off for P0 skeleton (avoids hci_dump dependency) */
 #define ENABLE_PRINTF_HEXDUMP
