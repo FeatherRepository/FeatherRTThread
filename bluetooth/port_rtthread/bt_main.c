@@ -296,6 +296,12 @@ static void ft_notify_timer_handler(struct btstack_timer_source *ts)
     btstack_run_loop_add_timer(ts);
 }
 
+/* M8.1: LE-only 验证开关 (1 = 关闭 Classic 可发现/可连, 广播 flags 声明
+ * 无 BR/EDR, 强制手机走 LE Audio/LC3; 0 = 双模常规形态) */
+#ifndef FEATHERTALK_BT_LE_AUDIO_ONLY
+#define FEATHERTALK_BT_LE_AUDIO_ONLY 1
+#endif
+
 /* 广播保活: 连接尝试失败(未建立)时, 控制器会停广播且不产生断开事件,
  * 造成"广播假死、扫不到"。每 3s 若未连接且未在广播, 重新使能。
  * (对已建立连接无影响; 重发 enable 是幂等的)
@@ -333,6 +339,28 @@ static void ft_adv_keepalive_handler(struct btstack_timer_source *ts)
 /* 广播三步: btstack 的 hci_send_cmd 在"上一命令在飞"时直接返回
  * ERROR_CODE_COMMAND_DISALLOWED 并丢弃命令 (实测: 连发三条只完成第一条),
  * 必须等上一条 CC 再发下一条 */
+/* M8.1: Classic EIR (240B, gap_set_extended_inquiry_response 不拷贝,
+ * 必须常驻内存): 名字 + 16-bit 服务 UUID (CAS/ASCS/A2DP/AVRCP)。
+ * 手机配对时读它判定对端 LE Audio 能力 */
+static uint8_t s_classic_eir[240];
+
+static void bt_classic_eir_setup(void)
+{
+    uint8_t pos = 0;
+    memset(s_classic_eir, 0, sizeof(s_classic_eir));
+    s_classic_eir[pos++] = 12;                               /* len = type + 11 chars */
+    s_classic_eir[pos++] = 0x09;                             /* complete local name */
+    memcpy(&s_classic_eir[pos], "FeatherTalk", 11);
+    pos += 11;
+    s_classic_eir[pos++] = 9;                                /* len = type + 4 UUIDs */
+    s_classic_eir[pos++] = 0x03;                             /* complete list of 16-bit service UUIDs */
+    s_classic_eir[pos++] = 0x4E;  s_classic_eir[pos++] = 0x18;  /* ASCS  0x184E */
+    s_classic_eir[pos++] = 0x53;  s_classic_eir[pos++] = 0x18;  /* CAS   0x1853 */
+    s_classic_eir[pos++] = 0x0B;  s_classic_eir[pos++] = 0x11;  /* A2DP Sink 0x110B */
+    s_classic_eir[pos++] = 0x0C;  s_classic_eir[pos++] = 0x11;  /* AVRCP Target 0x110C */
+    gap_set_extended_inquiry_response(s_classic_eir);
+}
+
 static void bt_adv_start(void)
 {
     bd_addr_t null_addr = { 0, 0, 0, 0, 0, 0 };
@@ -352,12 +380,26 @@ static void bt_adv_set_data(void)
     uint8_t pos = 0;
     /* M4b: 双模音箱 flags 必须是 0x02 (LE 可发现 + 支持经典蓝牙)。
      * 原来写 0x06 (含 "BR/EDR Not Supported" bit) 会让 Windows 把我们当纯 BLE
-     * 设备配对, 从不做经典 SDP 服务发现 -> 建不出 A2DP 音频端点 (实测)。 */
+     * 设备配对, 从不做经典 SDP 服务发现 -> 建不出 A2DP 音频端点 (实测)。
+     * M8.1 手机验证: FEATHERTALK_BT_LE_AUDIO_ONLY=1 时强制 BLE-only (flags
+     * 0x06 + 关闭 Classic 扫描), 手机无 A2DP 回退, 只能走 LE Audio/LC3 通路 */
+#if FEATHERTALK_BT_LE_AUDIO_ONLY
+    adv[pos++] = 2;  adv[pos++] = 0x01;  adv[pos++] = 0x06;   /* flags: LE general + BR/EDR NOT supported */
+#else
     adv[pos++] = 2;  adv[pos++] = 0x01;  adv[pos++] = 0x02;   /* flags: LE general + BR/EDR supported */
+#endif
     adv[pos++] = 12;                                          /* len(1 type + 11 chars) */
     adv[pos++] = 0x09;                                        /* complete name */
     memcpy(&adv[pos], "FeatherTalk", 11);
     pos += 11;
+    /* M8.1: LE Audio 能力声明 —— CAS (0x1853) + ASCS (0x184E)。
+     * Android 依广播里的服务 UUID 识别 LE Audio 设备并建立 LE 链路;
+     * 缺失时手机只走经典 A2DP (实测 SBC, 不进 LC3/CIS 通路)。
+     * AD 长度 = type(1) + 2 UUID x2B = 5, 写错会导致广播数据非法 */
+    adv[pos++] = 5;
+    adv[pos++] = 0x03;                                        /* complete list of 16-bit service UUIDs */
+    adv[pos++] = 0x4E;  adv[pos++] = 0x18;                    /* ASCS  0x184E */
+    adv[pos++] = 0x53;  adv[pos++] = 0x18;                    /* CAS   0x1853 */
     hci_send_cmd(&hci_le_set_advertising_data, pos, adv);
     BT_CP(62);
 }
@@ -426,8 +468,18 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
              * adv 串行链冲突 */
             gap_set_class_of_device(0x240418U);  /* Audio/Rendering + Loudspeaker */
             gap_set_local_name("FeatherTalk");
+            /* M8.1: Classic EIR 声明 LE Audio 服务 (CAS/ASCS) —— 手机在
+             * 配对时读 EIR 判定 "对端支持 LE Audio", 缺失则不建 LE 链路
+             * (实测: 小米15U 只连经典 A2DP, 从不发起 LE 连接) */
+            bt_classic_eir_setup();
+#if !FEATHERTALK_BT_LE_AUDIO_ONLY
             gap_discoverable_control(1);
             gap_connectable_control(1);
+#else
+            /* LE-only 验证: 关闭 Classic 可发现/可连, 手机无 A2DP 可走 */
+            gap_discoverable_control(0);
+            gap_connectable_control(0);
+#endif
         }
         break;
     case HCI_EVENT_COMMAND_COMPLETE:
@@ -535,7 +587,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         {
             s_classic_connected = 0;
             rt_kprintf("[BT] Classic disconnected, back to discoverable\n");
-            if (s_desired_on && s_bt_state == BT_READY) {
+            if (s_desired_on && s_bt_state == BT_READY && !FEATHERTALK_BT_LE_AUDIO_ONLY) {
                 gap_discoverable_control(1);
                 gap_connectable_control(1);
             }
