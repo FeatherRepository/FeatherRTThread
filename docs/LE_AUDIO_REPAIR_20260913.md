@@ -14,6 +14,13 @@ Xperia 5 V 已完成媒体服务发现、加密配对、双 CIS 建立，并由�
 待办：连续音乐流的 ISO/PLC/欠载统计；LE 绑定持久化；完整 TMAP 能力与状态机合规性。
 以下为分阶段证据，旧阶段“未连接／无声”的结论不代表当前版本。
 
+提交前已获取并合并远程 a228fb48（含新增 VCS 与分类元数据提交）。
+重叠实现采用本地已板测的版本：VCS 三字节状态/0–255 音量/Change Counter、
+Available Audio Contexts Notify/CCCD、现有7上下文位图和扩展广播。
+远程两字节 VCS、旧操作码与不带 CCCD 的声明由上述修复替代；
+保留现行 LE-only 验证配置，未额外扩大已声明的音频上下文。
+合并保留远程提交历史；最终代码测试覆盖不因历史整合而改变。
+
 基线：origin/product/edgi-talk a8db342b，叠加原有本地 USB/SPI 修改。
 目标：Xperia 5 V → CYW5551x → M33 BTstack ISO → M55 LC3 → ES8388/sound0。
 FPGA 音频桥保持默认关闭。当前仅验证 48 kHz、10 ms、每 ASE 单声道、30–120 字节 LC3 帧；
