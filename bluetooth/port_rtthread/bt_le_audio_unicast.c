@@ -84,6 +84,7 @@ typedef struct
     rt_uint8_t       cis_id;
     rt_uint32_t      sdu_interval_us;
     rt_uint16_t      max_sdu;
+    rt_uint16_t      max_latency;
     rt_uint32_t      pres_delay_us;
     rt_uint8_t       chan_alloc;    /* bit0=FL bit1=FR (LTV tag 0x04) */
     hci_con_handle_t cis_handle;    /* HCI_CON_HANDLE_INVALID = 未建 */
@@ -171,13 +172,16 @@ static uint16_t ft_le_ase_encode(const ft_ase_t *ase, uint8_t *out)
         pos += ase->codec_cfg_len;
         break;
     case FT_ASE_QOS_CONFIGURED:
-        out[pos++] = 0x00U; out[pos++] = 0x00U; out[pos++] = 0x00U;  /* SDU interval, 3B, 按写入值回填 */
+        out[pos++] = (uint8_t)(ase->sdu_interval_us & 0xFF);
+        out[pos++] = (uint8_t)((ase->sdu_interval_us >> 8) & 0xFF);
+        out[pos++] = (uint8_t)((ase->sdu_interval_us >> 16) & 0xFF);
         out[pos++] = 0x00U;   /* framing: unframed */
         out[pos++] = 0x02U;   /* PHY: 2M */
         out[pos++] = (uint8_t)(ase->max_sdu & 0xFFU);
         out[pos++] = (uint8_t)(ase->max_sdu >> 8);
         out[pos++] = 0x02U;   /* retransmission number (RTN) */
-        out[pos++] = 0x28U; out[pos++] = 0x00U;   /* max transport latency 40ms */
+        out[pos++] = (uint8_t)(ase->max_latency & 0xFFU);
+        out[pos++] = (uint8_t)(ase->max_latency >> 8);
         out[pos++] = (uint8_t)(ase->pres_delay_us & 0xFFU);
         out[pos++] = (uint8_t)((ase->pres_delay_us >> 8) & 0xFFU);
         out[pos++] = (uint8_t)((ase->pres_delay_us >> 16) & 0xFFU);
@@ -278,7 +282,7 @@ static void ft_le_handle_codec_config(const rt_uint8_t *p, rt_uint32_t len)
         s_stat_op_err++;
         return;
     }
-    if (p[7] != FT_LE_CODEC_LC3)   /* codec_id[0] = coding format */
+    if (p[3] != FT_LE_CODEC_LC3)   /* codec id[0] = coding format (p[3..7]) */
     {
         ft_le_ase_notify(ase, FT_LE_ERR_INVALID_ASE_STATE);
         s_stat_op_err++;
@@ -319,9 +323,10 @@ static void ft_le_handle_qos_config(const rt_uint8_t *p, rt_uint32_t len)
         ase->cis_id = q[2];
         ase->sdu_interval_us = (rt_uint32_t)q[3] | ((rt_uint32_t)q[4] << 8) |
                                ((rt_uint32_t)q[5] << 16);
-        ase->max_sdu = (rt_uint16_t)q[6] | ((rt_uint16_t)q[7] << 8);
-        ase->pres_delay_us = (rt_uint32_t)q[15] | ((rt_uint32_t)q[16] << 8) |
-                             ((rt_uint32_t)q[17] << 16);
+        ase->max_sdu = (rt_uint16_t)q[8] | ((rt_uint16_t)q[9] << 8);
+        ase->max_latency = (rt_uint16_t)q[11] | ((rt_uint16_t)q[12] << 8);
+        ase->pres_delay_us = (rt_uint32_t)q[16] | ((rt_uint32_t)q[17] << 8) |
+                             ((rt_uint32_t)q[18] << 16);
         ase->state = FT_ASE_QOS_CONFIGURED;
         ft_le_ase_notify(ase, FT_LE_ERR_SUCCESS);
         rt_kprintf("[LEA] ASE%u qos: cig=%u cis=%u sdu_int=%lu us max_sdu=%u\n",
@@ -474,8 +479,12 @@ uint16_t ft_le_audio_att_read(rt_uint16_t att_handle, rt_uint16_t offset,
         {
             rt_uint8_t val[8U + FT_LE_CODEC_CFG_MAX];
             rt_uint16_t len = ft_le_ase_encode(&s_ase[i], val);
-            if (buffer != RT_NULL && offset < len &&
-                buffer_size >= (rt_uint16_t)(len - offset))
+            /* btstack 两段式: 首调 buffer=NULL 查总长, 再调拷贝 */
+            if (buffer == RT_NULL)
+            {
+                return len;
+            }
+            if (offset < len && buffer_size >= (rt_uint16_t)(len - offset))
             {
                 memcpy(buffer, &val[offset], len - offset);
                 return (uint16_t)(len - offset);
