@@ -182,13 +182,13 @@ static void ft_lc3_on_frame(rt_uint8_t ch, const rt_uint8_t *data, rt_uint16_t l
 /* 新 LE Audio 流开始 (fmt_gen 换代且 flags bit0): 复位解码器, 开 sound0 */
 void ft_lc3_stream_begin(void)
 {
-    unsigned mem_sz = lc3_decoder_size(FT_LC3_FRAME_US, FT_LC3_RATE_HZ);
+    unsigned mem_sz = (lc3_decoder_size(FT_LC3_FRAME_US, FT_LC3_RATE_HZ) + 3U) & ~3U;
 
     s_dec_mem = (rt_uint8_t *)rt_malloc(mem_sz * 2U);
     if (s_dec_mem == RT_NULL)
     {
         rt_kprintf("[LC3] decoder mem alloc failed (%u x2)\n", mem_sz);
-        return;
+return;
     }
     s_dec[0] = lc3_setup_decoder(FT_LC3_FRAME_US, FT_LC3_RATE_HZ,
                                  FT_LC3_RATE_HZ, &s_dec_mem[0]);
@@ -197,7 +197,7 @@ void ft_lc3_stream_begin(void)
     if ((s_dec[0] == RT_NULL) || (s_dec[1] == RT_NULL))
     {
         rt_kprintf("[LC3] decoder setup failed (mem_sz=%u)\n", mem_sz);
-        rt_free(s_dec_mem);
+rt_free(s_dec_mem);
         s_dec_mem = RT_NULL;
         return;
     }
@@ -265,7 +265,7 @@ void ft_lc3_stream_begin(void)
     }
     s_dec_ready = RT_TRUE;
     rt_kprintf("[LC3] decoder ready (stream #%lu, 48k/10ms stereo, sound0 %s)\n",
-               (unsigned long)s_stat_streams,
+(unsigned long)s_stat_streams,
                s_sound_open ? "open" : (s_claim_ok ? "open-failed" : "busy"));
 }
 
@@ -281,7 +281,7 @@ void ft_lc3_stream_end(void)
             s_out_fill = 0U;
         }
         rt_kprintf("[LC3] stream end: frames=%lu plc=%lu out=%lu B (blocks=%lu)\n",
-                   (unsigned long)s_stat_frames, (unsigned long)s_stat_plc,
+(unsigned long)s_stat_frames, (unsigned long)s_stat_plc,
                    (unsigned long)s_stat_out_bytes,
                    (unsigned long)s_stat_out_blocks);
     }
@@ -406,25 +406,122 @@ rt_bool_t ft_lc3_watermark_tick(void)
         s_starve_counted = RT_TRUE;
         s_stat_starves++;
         rt_kprintf("[LC3] starve #%lu: ring empty %lu ms, hold until %lu B\n",
-                   (unsigned long)s_stat_starves,
+(unsigned long)s_stat_starves,
                    (unsigned long)FT_STARVE_HOLDOFF_MS,
                    (unsigned long)FT_REPREBUF_BYTES);
     }
     return s_starve_counted ? RT_FALSE : RT_TRUE;
 }
 
+/* ---- LC3 自环测试 (M8.1 管线验证, 不依赖手机/BT) ----
+ * 本机 liblc3 编码 3 秒 440Hz 正弦 -> 按 ring 帧格式喂回真实解码路径
+ * -> sound0 出声。验证: 解码器/声道配对/攒块/音量/sound0 全链路。
+ * M8.0 教训: 帧编解码栈深, 测试体放独立 16KB 栈线程 (tshell 4KB 必溢出)。
+ * msh: ft_lc3_test */
+#define FT_LC3_ENC_BYTES 120
+
+static void ft_lc3_test_worker(void *parameter)
+{
+    const rt_uint32_t frames = 300;              /* 3 秒 */
+    const rt_uint32_t samples = 480;             /* 48k/10ms 每声道 */
+    rt_uint8_t *enc = RT_NULL;
+    int16_t *pcm = RT_NULL;
+    rt_uint8_t *enc_mem = RT_NULL;
+    lc3_encoder_t enc_l, enc_r;
+    rt_uint32_t f;
+
+    if (s_dec_ready)
+    {
+        rt_kprintf("[LC3] test: stream busy, stop it first\n");
+        return;
+    }
+
+    unsigned enc_size_work = (lc3_encoder_size(FT_LC3_FRAME_US, FT_LC3_RATE_HZ) + 3U) & ~3U;
+    pcm = (int16_t *)rt_malloc(sizeof(int16_t) * samples * 2);
+    enc = (rt_uint8_t *)rt_malloc((FT_LC3_ENC_BYTES + 3U) * frames * 2U);
+    enc_mem = (rt_uint8_t *)rt_malloc(enc_size_work * 2U);
+    if ((pcm == RT_NULL) || (enc == RT_NULL) || (enc_mem == RT_NULL))
+    {
+        rt_kprintf("[LC3] test alloc failed\n");
+        if (pcm) rt_free(pcm);
+        if (enc) rt_free(enc);
+        if (enc_mem) rt_free(enc_mem);
+        return;
+    }
+    enc_l = lc3_setup_encoder(FT_LC3_FRAME_US, FT_LC3_RATE_HZ, FT_LC3_RATE_HZ, &enc_mem[0]);
+    enc_r = lc3_setup_encoder(FT_LC3_FRAME_US, FT_LC3_RATE_HZ, FT_LC3_RATE_HZ, &enc_mem[enc_size_work]);
+
+    for (f = 0; f < frames; f++)
+    {
+        for (rt_uint32_t i = 0; i < samples; i++)
+        {
+            int32_t v = (int32_t)(12000.0 * sin(2.0 * 3.14159265358979 * 440.0 *
+                                                (double)(f * samples + i) / FT_LC3_RATE_HZ));
+            pcm[i * 2] = (int16_t)v;
+            pcm[i * 2 + 1] = (int16_t)v;
+        }
+        lc3_encode(enc_l, LC3_PCM_FORMAT_S16, pcm, 2, FT_LC3_ENC_BYTES, &enc[f * 2 * FT_LC3_ENC_BYTES]);
+        lc3_encode(enc_r, LC3_PCM_FORMAT_S16, pcm + 1, 2, FT_LC3_ENC_BYTES, &enc[(f * 2 + 1) * FT_LC3_ENC_BYTES]);
+    }
+    rt_free(enc_mem);
+    enc_mem = RT_NULL;
+    rt_kprintf("[LC3] test: %lu frames encoded, starting decode->sound0\n",
+               (unsigned long)frames);
+
+    ft_lc3_stream_begin();
+    if (!s_dec_ready)
+    {
+        rt_kprintf("[LC3] test: decoder not ready\n");
+        rt_free(pcm); rt_free(enc); rt_free(enc_mem);
+        return;
+    }
+
+    /* 按 ring 帧格式喂回解码路径: [len16][ch][帧], len = 1 + 帧长 */
+    for (f = 0; f < frames; f++)
+    {
+        rt_uint8_t hdr_l[3] = { (rt_uint8_t)((FT_LC3_ENC_BYTES + 1U) & 0xFF),
+                                (rt_uint8_t)(((FT_LC3_ENC_BYTES + 1U) >> 8) & 0xFF), 0x01 };
+        rt_uint8_t hdr_r[3] = { (rt_uint8_t)((FT_LC3_ENC_BYTES + 1U) & 0xFF),
+                                (rt_uint8_t)(((FT_LC3_ENC_BYTES + 1U) >> 8) & 0xFF), 0x02 };
+        ft_lc3_feed(hdr_l, 3U);
+        ft_lc3_feed(&enc[f * 2 * FT_LC3_ENC_BYTES], FT_LC3_ENC_BYTES);
+        ft_lc3_feed(hdr_r, 3U);
+        ft_lc3_feed(&enc[(f * 2 + 1) * FT_LC3_ENC_BYTES], FT_LC3_ENC_BYTES);
+    }
+    /* 收尾: 冲刷并关流 */
+    ft_lc3_stream_end();
+    rt_free(pcm);
+    rt_free(enc);
+    rt_kprintf("[LC3] test done (speaker should have played 3s 440Hz)\n");
+}
+
+static int ft_lc3_test(int argc, char **argv)
+{
+    rt_thread_t t = rt_thread_create("lc3t", ft_lc3_test_worker, RT_NULL,
+                                     16384, 20, 10);
+    if (t == RT_NULL)
+    {
+        rt_kprintf("[LC3] test thread alloc failed\n");
+        return -1;
+    }
+    rt_thread_startup(t);
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(ft_lc3_test, ft_lc3_test,
+                     M8.1: LC3 pipeline self-test (3s sine -> sound0));
+
 static int ft_lc3_stats(int argc, char **argv)
 {
     (void)argc; (void)argv;
     rt_kprintf("[LC3] ready=%d streams=%lu frames=%lu plc=%lu bad_len=%lu ch_mask=%u\n",
-               (int)s_dec_ready, (unsigned long)s_stat_streams,
+(int)s_dec_ready, (unsigned long)s_stat_streams,
                (unsigned long)s_stat_frames, (unsigned long)s_stat_plc,
                (unsigned long)s_stat_bad_len, s_last_ch_mask);
     rt_kprintf("[LC3] pcm=%lu B samples=%lu energy_avg=%lu\n",
-               (unsigned long)s_stat_pcm_bytes, (unsigned long)s_stat_samples,
+(unsigned long)s_stat_pcm_bytes, (unsigned long)s_stat_samples,
                s_stat_samples ? (unsigned long)(s_stat_energy / s_stat_samples) : 0UL);
     rt_kprintf("[LC3] sound0: claim=%d open=%d, wrote %lu blocks/%lu B, prebuf=%lu ms, starves=%lu\n",
-               (int)s_claim_ok, (int)s_sound_open,
+(int)s_claim_ok, (int)s_sound_open,
                (unsigned long)s_stat_out_blocks, (unsigned long)s_stat_out_bytes,
                (unsigned long)s_stat_prebuf_ms, (unsigned long)s_stat_starves);
     return 0;
