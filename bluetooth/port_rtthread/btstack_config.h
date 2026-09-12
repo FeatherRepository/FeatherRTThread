@@ -7,6 +7,10 @@
 #define ENABLE_CLASSIC
 #define ENABLE_LE_PERIPHERAL
 #define ENABLE_LE_ADVERTISING
+#define ENABLE_LE_EXTENDED_ADVERTISING
+/* This BTstack revision gates Advertising Set Terminated handling behind
+ * CENTRAL; it is needed to clear ACTIVE and restart a peripheral adv set. */
+#define ENABLE_LE_CENTRAL
 #define HAVE_LOCAL_NAME_COMPLETE_LOCAL_NAME
 
 /* HCI buffer sizes (required by hci.h) */

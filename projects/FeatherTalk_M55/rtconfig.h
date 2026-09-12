@@ -424,6 +424,9 @@
 #define FEATHERTALK_USING_FLASH_STORAGE
 #define FEATHERTALK_USING_USB_MSC
 #define FEATHERTALK_USING_USB_UAC
+/* External SPI-to-I2S FPGA bridge is opt-in.  LE Audio validation owns
+ * sound0/ES8388 so decoded LC3 plays through the board speaker by default. */
+/* #define FEATHERTALK_USING_FPGA_AUDIO_BRIDGE */
 #define BSP_LVGL_DRAW_BUF_LINES 800
 /* end of Onboard Peripheral Drivers */
 
@@ -432,6 +435,9 @@
 #define BSP_USING_GPIO
 #define BSP_USING_IPC
 #define BSP_USING_I2C
+#define RT_USING_SPI
+#define BSP_USING_SPI
+#define BSP_USING_SPI1
 #define BSP_USING_HW_I2C0
 #define BSP_USING_SOFT_I2C1
 #define BSP_SOFT_I2C1_SCL_PIN 105

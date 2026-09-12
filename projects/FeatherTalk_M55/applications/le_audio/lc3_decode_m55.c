@@ -23,6 +23,7 @@
 #include "lc3.h"
 #include "ft_lc3_decode.h"
 #include "feathertalk_audio.h"
+#include <math.h>
 
 /* LE Audio 固定规格 (PACS 静态声明, v1 只支持 48k/10ms) */
 #define FT_LC3_FRAME_US     10000
@@ -385,6 +386,13 @@ rt_bool_t ft_lc3_watermark_tick(void)
     }
 
     rt_uint32_t used = ft_alink_used(FT_ALINK);
+    /* Only a continuous empty interval is starvation. Normal 10-ms packets
+     * must cancel the timer even if they are smaller than the rebuffer target. */
+    if (used != 0U && !s_starve_counted)
+    {
+        s_empty_since = 0;
+        return RT_TRUE;
+    }
     if (s_empty_since == 0)
     {
         if (used != 0U)

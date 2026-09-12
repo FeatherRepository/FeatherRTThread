@@ -26,6 +26,17 @@
 
 #define GET_PIN(PORTx, PIN) ((((uint8_t)(PORTx)) << 3U) + ((uint8_t)(PIN)))
 #define INT_PRIORITY        7u
+/*
+ * The audio bridge sends 768-byte bursts through SPI9.  The generic MTB HAL
+ * transfer is asynchronous, but its blocking wrapper waits forever for an
+ * IRQ-driven completion notification.  A lost/masked SCB completion IRQ then
+ * permanently stalls the USB-audio output worker.  Keep this driver strictly
+ * synchronous and bounded instead: feed TX and drain RX FIFOs directly.
+ */
+#define IFX_SPI_POLL_TIMEOUT_MS 20u
+/* A second guard is independent of the RTOS tick, which may itself be
+ * starved by a malformed SCB transfer. */
+#define IFX_SPI_POLL_IDLE_LIMIT 2000000u
 
 struct ifx_spi {
     struct rt_spi_bus spi_bus;
@@ -176,14 +187,90 @@ static rt_err_t spi_configure(struct rt_spi_device* device, struct rt_spi_config
     return RT_EOK;
 }
 
+static rt_bool_t ifx_spi_poll_xfer(struct ifx_spi* spi, const struct rt_spi_message* message)
+{
+    const rt_uint8_t* tx = (const rt_uint8_t*)message->send_buf;
+    rt_uint8_t* rx = (rt_uint8_t*)message->recv_buf;
+    const rt_uint32_t element_bytes = (spi->spi_obj.data_bits > 8u) ? 2u : 1u;
+    const rt_uint32_t element_count = message->length / element_bytes;
+    rt_uint32_t written = 0u;
+    rt_uint32_t read = 0u;
+    rt_uint32_t idle_spins = 0u;
+    const rt_uint32_t start_ms = rt_tick_get_millisecond();
+
+    if ((message->length % element_bytes) != 0u)
+        return RT_FALSE;
+
+    Cy_SCB_SPI_ClearRxFifo(spi->base);
+    Cy_SCB_SPI_ClearTxFifo(spi->base);
+
+    while (read < element_count)
+    {
+        rt_bool_t progressed = RT_FALSE;
+        while (written < element_count)
+        {
+            rt_uint32_t value = 0u;
+
+            if (tx != RT_NULL)
+            {
+                value = tx[written * element_bytes];
+                if (element_bytes == 2u)
+                    value |= ((rt_uint32_t)tx[(written * element_bytes) + 1u] << 8u);
+            }
+
+            if (Cy_SCB_SPI_Write(spi->base, value) == 0u)
+                break;
+
+            written++;
+            progressed = RT_TRUE;
+        }
+
+        while ((read < element_count) && (Cy_SCB_SPI_GetNumInRxFifo(spi->base) != 0u))
+        {
+            rt_uint32_t value = Cy_SCB_SPI_Read(spi->base);
+
+            if (rx != RT_NULL)
+            {
+                rx[read * element_bytes] = (rt_uint8_t)value;
+                if (element_bytes == 2u)
+                    rx[(read * element_bytes) + 1u] = (rt_uint8_t)(value >> 8u);
+            }
+            read++;
+            progressed = RT_TRUE;
+        }
+
+        idle_spins = progressed ? 0u : idle_spins + 1u;
+        if ((rt_uint32_t)(rt_tick_get_millisecond() - start_ms) >= IFX_SPI_POLL_TIMEOUT_MS ||
+            idle_spins >= IFX_SPI_POLL_IDLE_LIMIT)
+        {
+            Cy_SCB_SPI_ClearRxFifo(spi->base);
+            Cy_SCB_SPI_ClearTxFifo(spi->base);
+            return RT_FALSE;
+        }
+    }
+
+    while (!Cy_SCB_SPI_IsTxComplete(spi->base))
+    {
+        idle_spins++;
+        if ((rt_uint32_t)(rt_tick_get_millisecond() - start_ms) >= IFX_SPI_POLL_TIMEOUT_MS ||
+            idle_spins >= IFX_SPI_POLL_IDLE_LIMIT)
+        {
+            Cy_SCB_SPI_ClearRxFifo(spi->base);
+            Cy_SCB_SPI_ClearTxFifo(spi->base);
+            return RT_FALSE;
+        }
+    }
+
+    return RT_TRUE;
+}
+
 static rt_ssize_t spixfer(struct rt_spi_device* device, struct rt_spi_message* message)
 {
     RT_ASSERT(device);
     RT_ASSERT(message);
 
     struct ifx_spi* spi = rt_container_of(device->bus, struct ifx_spi, spi_bus);
-    cy_rslt_t result = CY_RSLT_SUCCESS;
-    rt_err_t wait_ret = RT_EOK;
+    rt_bool_t transfer_ok = RT_TRUE;
 
     if (message->cs_take && !(device->config.mode & RT_SPI_NO_CS)) {
         ifx_spi_set_cs(spi, (device->config.mode & RT_SPI_CS_HIGH) ? PIN_HIGH : PIN_LOW);
@@ -191,23 +278,11 @@ static rt_ssize_t spixfer(struct rt_spi_device* device, struct rt_spi_message* m
 
     if (message->length > 0) {
         if (message->send_buf == RT_NULL && message->recv_buf == RT_NULL) {
-            result = (cy_rslt_t)-RT_EINVAL;
+            transfer_ok = RT_FALSE;
             goto __exit;
         }
 
-        mtb_hal_spi_clear(&spi->spi_obj);
-        rt_completion_init(&spi->cpt);
-
-        if (message->send_buf == RT_NULL && message->recv_buf != RT_NULL) {
-            result = mtb_hal_spi_transfer(&spi->spi_obj, RT_NULL, 0x00, message->recv_buf, message->length, 0x00);
-        } else if (message->send_buf != RT_NULL && message->recv_buf == RT_NULL) {
-            result = mtb_hal_spi_transfer(&spi->spi_obj, message->send_buf, message->length, RT_NULL, 0x00, 0x00);
-        } else if (message->send_buf != RT_NULL && message->recv_buf != RT_NULL) {
-            result = mtb_hal_spi_transfer(&spi->spi_obj, message->send_buf, message->length, message->recv_buf, message->length, 0x00);
-        }
-        if (result == CY_RSLT_SUCCESS) {
-            wait_ret = rt_completion_wait(&spi->cpt, RT_WAITING_FOREVER);
-        }
+        transfer_ok = ifx_spi_poll_xfer(spi, message);
     }
 
 __exit:
@@ -215,7 +290,7 @@ __exit:
         ifx_spi_set_cs(spi, (device->config.mode & RT_SPI_CS_HIGH) ? PIN_LOW : PIN_HIGH);
     }
 
-    if (result != CY_RSLT_SUCCESS || wait_ret != RT_EOK)
+    if (!transfer_ok)
         return 0;
 
     return message->length;

@@ -7,6 +7,9 @@
 #include <drivers/audio.h>
 #include "feathertalk_audio.h"
 #include "feathertalk_usb_uac.h"
+#if defined(FEATHERTALK_USING_FPGA_AUDIO_BRIDGE)
+#include "fpga_audio_bridge/feathertalk_fpga_audio_bridge.h"
+#endif
 #include "usbd_core.h"
 #include "usbd_audio.h"
 
@@ -26,9 +29,18 @@
 #define FT_UAC_VENDOR_ID              0xFFFFU
 #define FT_UAC_PRODUCT_ID             0xF502U
 #define FT_UAC_MAX_POWER_MA           100U
-/* M5: 删掉 24bit packed alt (该通路在 sound0/I2S 侧不通, 主机选上即纯爆音),
- * 只保留 16bit —— 与全系统 A3 契约 (48k/16/2ch) 一致 */
-#define FT_UAC_OUT_ALT_COUNT          1U
+#if defined(FEATHERTALK_USING_FPGA_AUDIO_BRIDGE)
+/* The FPGA bridge has one physical clock family and wire format.  Do not
+ * advertise choices that would require resampling or an on-board codec. */
+#define FT_UAC_FPGA_OUTPUT             1
+#define FT_UAC_FIXED_RATE              FT_FPGA_AUDIO_SAMPLE_RATE
+#define FT_UAC_FIXED_BITS              FT_FPGA_AUDIO_SAMPLE_BITS
+#define FT_UAC_FIXED_CHANNELS          FT_FPGA_AUDIO_CHANNELS
+#define FT_UAC_OUT_ALT_COUNT           1U
+#else
+#define FT_UAC_FPGA_OUTPUT             0
+#define FT_UAC_OUT_ALT_COUNT           1U
+#endif
 #define FT_UAC_MAX_PACKET             576U
 #define FT_UAC_INPUT_PACKET           64U
 #define FT_UAC_RING_SIZE              16384U
@@ -103,7 +115,7 @@ static uint8_t s_device_descriptor[] =
 {
     USB_DEVICE_DESCRIPTOR_INIT(USB_2_0, 0x00, 0x00, 0x00,
                                FT_UAC_VENDOR_ID, FT_UAC_PRODUCT_ID,
-                               0x0100, 0x01)
+                               0x0101, 0x01)
 };
 
 static const uint8_t s_config_descriptor[] =
@@ -132,15 +144,22 @@ static const uint8_t s_config_descriptor[] =
         0x08, AUDIO_TERMINAL_STREAMING, FT_UAC_IN_FEATURE_ID,
         FT_UAC_IN_CLOCK_ID, 0x0000),
 
-    /* Host playback: the USB terminal has a fixed stereo cluster;
-     * 只有 16bit 一个 alt (24bit packed 通路不通已删, 见 FT_UAC_OUT_ALT_COUNT)。 */
+    /* The FPGA route is fixed packed-S24_LE.  The on-board sound0 route is
+     * fixed S16_LE because packed S24 is not supported by that I2S path. */
     0x09, USB_DESCRIPTOR_TYPE_INTERFACE, FT_UAC_OUT_INTERFACE, 0x00,
     0x00, USB_DEVICE_CLASS_AUDIO, AUDIO_SUBCLASS_AUDIOSTREAMING,
     AUDIO_PROTOCOLv20, 0x00,
+#if FT_UAC_FPGA_OUTPUT
+    AUDIO_V2_AS_ALTSETTING_DESCRIPTOR_INIT(
+        FT_UAC_OUT_INTERFACE, 0x01, 0x02, 2,
+        FT_UAC_CHANNEL_CONFIG_STEREO, 3, 24, FT_UAC_OUT_EP, 0x09,
+        576, FT_UAC_EP_INTERVAL),
+#else
     AUDIO_V2_AS_ALTSETTING_DESCRIPTOR_INIT(
         FT_UAC_OUT_INTERFACE, 0x01, 0x02, 2,
         FT_UAC_CHANNEL_CONFIG_STEREO, 2, 16, FT_UAC_OUT_EP, 0x09,
         384, FT_UAC_EP_INTERVAL),
+#endif
 
     /* The current PDM driver is genuinely fixed at 16 kHz / 16 bit /
      * stereo, so USB must not advertise formats it cannot produce. */
@@ -164,11 +183,16 @@ static const char *s_string_descriptors[] =
     (const char[]){0x09, 0x04},
     "FeatherRepository",
     "FeatherTalk Bidirectional USB Audio",
-    "FTALK-UAC2-0001",
+    "FTALK-UAC2-0002",
 };
 
 static const uint8_t s_output_rates[] =
 {
+#if FT_UAC_FPGA_OUTPUT
+    AUDIO_SAMPLE_FREQ_NUM(1),
+    AUDIO_SAMPLE_FREQ_4B(96000), AUDIO_SAMPLE_FREQ_4B(96000),
+    AUDIO_SAMPLE_FREQ_4B(0),
+#else
     AUDIO_SAMPLE_FREQ_NUM(4),
     AUDIO_SAMPLE_FREQ_4B(16000), AUDIO_SAMPLE_FREQ_4B(16000),
     AUDIO_SAMPLE_FREQ_4B(0),
@@ -178,6 +202,7 @@ static const uint8_t s_output_rates[] =
     AUDIO_SAMPLE_FREQ_4B(0),
     AUDIO_SAMPLE_FREQ_4B(96000), AUDIO_SAMPLE_FREQ_4B(96000),
     AUDIO_SAMPLE_FREQ_4B(0),
+#endif
 };
 
 static const uint8_t s_input_rates[] =
@@ -304,11 +329,16 @@ bool ft_usb_uac_output_format_supported(uint32_t sample_rate,
                                         uint8_t sample_bits,
                                         uint8_t channels)
 {
-    /* M5 实测: 24bit packed 样本在 sound0/I2S 通路不通 (音乐变纯爆音),
-     * 描述符已删 24bit alt; 这里同步钉死 16bit, 防止异常主机配置进来 */
+#if FT_UAC_FPGA_OUTPUT
+    return sample_rate == FT_UAC_FIXED_RATE &&
+           sample_bits == FT_UAC_FIXED_BITS &&
+           channels == FT_UAC_FIXED_CHANNELS;
+#else
+    /* The sound0 I2S path is S16_LE only; do not accept packed S24. */
     return channels == 2U && sample_bits == 16U &&
            ft_audio_output_format_supported(sample_rate, sample_bits,
                                              channels);
+#endif
 }
 
 bool ft_usb_uac_input_format_supported(uint32_t sample_rate,
@@ -598,6 +628,14 @@ static void audio_interface_notify(uint8_t busid, uint8_t event, void *arg)
             rt_event_send(&s_uac_event, FT_UAC_EVENT_STOP);
             return;
         }
+#if FT_UAC_FPGA_OUTPUT
+        if (alternate == 1U)
+        {
+            s_negotiated_output_rate = FT_UAC_FIXED_RATE;
+            s_negotiated_output_bits = FT_UAC_FIXED_BITS;
+            s_negotiated_output_channels = FT_UAC_FIXED_CHANNELS;
+        }
+#else
         if (alternate == 1U)
         {
             s_negotiated_output_bits = 16U;
@@ -613,13 +651,8 @@ static void audio_interface_notify(uint8_t busid, uint8_t event, void *arg)
             /* 时钟校准 EMA 重播种 (EMA 在 ~16 包内收敛到真实核频) */
             s_rate_clk_ema_cyc = SystemCoreClock / 1000U;
         }
-        else if (alternate == 2U)
-        {
-            s_negotiated_output_bits = 24U;
-            s_negotiated_output_channels = 2U;
-        }
-        else
-            return;
+#endif
+        else return;
         s_status.output_streaming = true;
         s_out_buffer_index = 0U;
         (void)usbd_ep_start_read(busid, FT_UAC_OUT_EP,
@@ -756,6 +789,67 @@ void usbd_audio_close(uint8_t busid, uint8_t interface_number)
     RT_UNUSED(interface_number);
 }
 
+#if FT_UAC_FPGA_OUTPUT
+/* USB OUT packets already carry interleaved packed S24_LE.  The FPGA bridge
+ * consumes exactly that format, so this worker has no software conversion,
+ * resampler, replay pool or ES8388/TDM reconfiguration in its data path. */
+static void output_worker(void *parameter)
+{
+    uint32_t applied_generation = 0U;
+    RT_UNUSED(parameter);
+
+    while (1)
+    {
+        rt_uint32_t received = 0U;
+        s_status.output_worker_state = 1U;
+        (void)rt_event_recv(&s_uac_event,
+            FT_UAC_EVENT_FORMAT | FT_UAC_EVENT_OUTPUT_DATA |
+            FT_UAC_EVENT_STOP,
+            RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR, 20U, &received);
+        s_status.output_worker_wakeups++;
+        s_status.output_worker_state = 2U;
+
+        if (!s_status.active || !s_status.output_streaming)
+            continue;
+
+        if (applied_generation != s_requested_generation)
+        {
+            ft_fpga_audio_bridge_status_t bridge;
+            s_status.output_worker_state = 3U;
+            if (ft_fpga_audio_bridge_get_status(&bridge) != RT_EOK ||
+                !bridge.initialized || !bridge.ready)
+            {
+                s_status.last_error = -RT_EIO;
+                continue;
+            }
+            applied_generation = s_requested_generation;
+            s_status.format_pending = false;
+            s_status.last_error = RT_EOK;
+        }
+
+        while (s_out_ring_used >= FT_FPGA_AUDIO_FRAME_BYTES &&
+               s_status.output_streaming)
+        {
+            uint32_t count = output_ring_read(s_output_worker_block,
+                                              sizeof(s_output_worker_block),
+                                              FT_FPGA_AUDIO_FRAME_BYTES);
+            rt_err_t result;
+            if (count == 0U) break;
+            s_status.output_worker_state = 5U;
+            s_status.output_sound_write_calls++;
+            result = ft_fpga_audio_bridge_write_s24le(s_output_worker_block,
+                count / FT_FPGA_AUDIO_FRAME_BYTES);
+            if (result != RT_EOK)
+            {
+                s_status.last_error = result;
+                break;
+            }
+            s_status.output_sound_write_bytes += count;
+            s_status.output_worker_state = 6U;
+        }
+    }
+}
+#else
 static void output_worker(void *parameter)
 {
     rt_device_t device = RT_NULL;
@@ -955,6 +1049,7 @@ static void output_worker(void *parameter)
         }
     }
 }
+#endif /* FT_UAC_FPGA_OUTPUT */
 
 static void input_worker(void *parameter)
 {
@@ -1090,14 +1185,21 @@ static int initialize_usb(void)
 
 int ft_usb_uac_start(void)
 {
+#if !FT_UAC_FPGA_OUTPUT
     ft_audio_status_t audio;
+#endif
     int result;
 
     if (s_status.active) return RT_EOK;
     result = ensure_workers();
     if (result != RT_EOK) return result;
-    (void)ft_audio_get_status(&audio);
     rt_memset(&s_status, 0, sizeof(s_status));
+#if FT_UAC_FPGA_OUTPUT
+    s_status.output_sample_rate = FT_UAC_FIXED_RATE;
+    s_status.output_sample_bits = FT_UAC_FIXED_BITS;
+    s_status.output_channels = FT_UAC_FIXED_CHANNELS;
+#else
+    (void)ft_audio_get_status(&audio);
     if (ft_usb_uac_output_format_supported(audio.output_sample_rate,
             audio.output_sample_bits, audio.output_channels))
     {
@@ -1111,6 +1213,7 @@ int ft_usb_uac_start(void)
         s_status.output_sample_bits = 16U;
         s_status.output_channels = 2U;
     }
+#endif
     s_status.input_sample_rate = 16000U;
     s_status.input_sample_bits = 16U;
     s_status.input_channels = 2U;
@@ -1167,10 +1270,27 @@ void ft_usb_uac_get_status(ft_usb_uac_status_t *status)
 int ft_usb_uac_set_output_format(uint32_t sample_rate, uint8_t sample_bits,
                                  uint8_t channels, bool reconnect_host)
 {
+#if !FT_UAC_FPGA_OUTPUT
     int result = RT_EOK;
+#endif
 
     if (!ft_usb_uac_output_format_supported(sample_rate, sample_bits, channels))
         return -RT_EINVAL;
+#if FT_UAC_FPGA_OUTPUT
+    /* USB descriptor and FPGA bitstream are both fixed at 96k/S24/stereo.
+     * Accept the idempotent request without tearing down USB enumeration. */
+    RT_UNUSED(reconnect_host);
+    s_status.output_sample_rate = FT_UAC_FIXED_RATE;
+    s_status.output_sample_bits = FT_UAC_FIXED_BITS;
+    s_status.output_channels = FT_UAC_FIXED_CHANNELS;
+    s_negotiated_output_rate = FT_UAC_FIXED_RATE;
+    s_negotiated_output_bits = FT_UAC_FIXED_BITS;
+    s_negotiated_output_channels = FT_UAC_FIXED_CHANNELS;
+    if (s_status.active)
+        queue_output_format(FT_UAC_FIXED_RATE, FT_UAC_FIXED_BITS,
+                            FT_UAC_FIXED_CHANNELS, false);
+    return RT_EOK;
+#else
     if (!s_status.active)
     {
         result = ft_audio_set_output_format(sample_rate, sample_bits, channels);
@@ -1230,6 +1350,7 @@ int ft_usb_uac_set_output_format(uint32_t sample_rate, uint8_t sample_bits,
         s_status.last_error = result;
     }
     return result;
+#endif
 }
 
 #else

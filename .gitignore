@@ -41,3 +41,4 @@ cconfig.h
 *.asm
 /tmp/
 /tools/freather/logs/
+/tools/freather/ble-validation-vendor/

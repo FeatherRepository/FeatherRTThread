@@ -17,6 +17,9 @@
 
 #define FT_ALINK_EVT_DBELL   0x01U
 #define FT_ALINK_CHUNK       4096U
+/* LC3 has nested transform workspaces plus a 1920-byte stereo PCM frame.
+ * The old 2 KiB stack overwrote adjacent RT-Thread objects on first decode. */
+#define FT_ALINK_STACK_BYTES 32768U
 /* M4b: 10ms 兜底轮询 —— A0 图案回环时代 50ms 足够, 但音频流 ring 空 50ms
  * 必致 sound0 欠载插零帧 (听感卡顿), 门铃丢失时它就是恢复及时性的下限 */
 #define FT_ALINK_POLL_MS     10U
@@ -184,7 +187,7 @@ static void ft_alink_thread_entry(void *parameter)
 static int ft_alink_consumer_init(void)
 {
     s_alink_thread = rt_thread_create("ft_alink", ft_alink_thread_entry, RT_NULL,
-                                      2048, 12, 10);
+                                      FT_ALINK_STACK_BYTES, 12, 10);
     if (s_alink_thread != RT_NULL)
     {
         rt_thread_startup(s_alink_thread);

@@ -15,6 +15,9 @@
  * 48 kHz / 10 ms / 30..120 octets (PACS 静态声明)。
  * 数据面: ISO -> ring 恒 48k/16/2 消费 (A0 契约不变), LC3 解码在 M55。
  */
+#ifdef FT_LE_HOST_TEST
+#include "le_audio_test_stubs.h"
+#else
 #include <rtthread.h>
 #include <string.h>
 
@@ -28,6 +31,9 @@
 
 #include <feathertalk/audio_link.h>
 #include "bt_le_audio.h"
+#include "ipc/feathertalk_ipc.h"
+extern rt_uint32_t ft_audio_produce(const rt_uint8_t *data, rt_uint32_t len);
+#endif
 
 /* ---- 常量 (ASCS 1.0.1 / BAP 1.0.1) ---- */
 #define FT_LE_OP_CONFIG_CODEC       0x01U
@@ -57,7 +63,7 @@
 /* LC3 帧参数 LTV tag (BAP Codec Specific Configuration) */
 #define FT_LE_LTV_FREQ          0x01U
 #define FT_LE_LTV_FRAME_DUR     0x02U
-#define FT_LE_LTV_CHAN_ALLOC    0x04U
+#define FT_LE_LTV_CHAN_ALLOC    0x03U
 #define FT_LE_LTV_OCTETS        0x04U   /* QoS LTV 空间无冲突, 仅 Codec 用下表 */
 
 /* ---- Sink ASE 状态机 ---- */
@@ -86,10 +92,11 @@ typedef struct
     rt_uint16_t      max_sdu;
     rt_uint16_t      max_latency;
     rt_uint32_t      pres_delay_us;
-    rt_uint8_t       chan_alloc;    /* bit0=FL bit1=FR (LTV tag 0x04) */
+    rt_uint8_t       chan_alloc;    /* bit0=FL bit1=FR (LTV tag 0x03) */
     hci_con_handle_t cis_handle;    /* HCI_CON_HANDLE_INVALID = 未建 */
     rt_uint8_t       notify_on;     /* CCCD 已订阅 */
     rt_uint8_t       established;
+    rt_uint8_t       framing, phy, rtn;
 } ft_ase_t;
 
 static ft_ase_t        s_ase[FT_LE_ASE_NUM];
@@ -163,6 +170,13 @@ static uint16_t ft_le_ase_encode(const ft_ase_t *ase, uint8_t *out)
     switch (ase->state)
     {
     case FT_ASE_CODEC_CONFIGURED:
+        /* ASCS Codec Configured preferred QoS fields (17 bytes). */
+        out[pos++] = 0; out[pos++] = 2; out[pos++] = 2;
+        little_endian_store_16(out, pos, 20); pos += 2;
+        little_endian_store_24(out, pos, 40000); pos += 3;
+        little_endian_store_24(out, pos, 100000); pos += 3;
+        little_endian_store_24(out, pos, 40000); pos += 3;
+        little_endian_store_24(out, pos, 60000); pos += 3;
         /* Codec ID (5B: format/company/vendor) + Codec Specific Config LTVs */
         out[pos++] = FT_LE_CODEC_LC3;
         out[pos++] = 0x00U; out[pos++] = 0x00U;   /* company id */
@@ -172,14 +186,15 @@ static uint16_t ft_le_ase_encode(const ft_ase_t *ase, uint8_t *out)
         pos += ase->codec_cfg_len;
         break;
     case FT_ASE_QOS_CONFIGURED:
+        out[pos++] = ase->cig_id; out[pos++] = ase->cis_id;
         out[pos++] = (uint8_t)(ase->sdu_interval_us & 0xFF);
         out[pos++] = (uint8_t)((ase->sdu_interval_us >> 8) & 0xFF);
         out[pos++] = (uint8_t)((ase->sdu_interval_us >> 16) & 0xFF);
-        out[pos++] = 0x00U;   /* framing: unframed */
-        out[pos++] = 0x02U;   /* PHY: 2M */
+        out[pos++] = ase->framing;
+        out[pos++] = ase->phy;
         out[pos++] = (uint8_t)(ase->max_sdu & 0xFFU);
         out[pos++] = (uint8_t)(ase->max_sdu >> 8);
-        out[pos++] = 0x02U;   /* retransmission number (RTN) */
+        out[pos++] = ase->rtn;
         out[pos++] = (uint8_t)(ase->max_latency & 0xFFU);
         out[pos++] = (uint8_t)(ase->max_latency >> 8);
         out[pos++] = (uint8_t)(ase->pres_delay_us & 0xFFU);
@@ -189,6 +204,7 @@ static uint16_t ft_le_ase_encode(const ft_ase_t *ase, uint8_t *out)
     case FT_ASE_ENABLING:
     case FT_ASE_STREAMING:
     case FT_ASE_DISABLING:
+        out[pos++] = ase->cig_id; out[pos++] = ase->cis_id;
         out[pos++] = ase->metadata_len;
         memcpy(&out[pos], ase->metadata, ase->metadata_len);
         pos += ase->metadata_len;
@@ -199,23 +215,45 @@ static uint16_t ft_le_ase_encode(const ft_ase_t *ase, uint8_t *out)
     return pos;
 }
 
+/* Serialize notifications through ATT credits; never replace state data with
+ * control-point errors. Each queued value is a snapshot of that transition. */
+#define FT_NOTIFY_MAX 16U
+static struct { uint16_t handle, len; uint8_t value[64]; } s_ntf[FT_NOTIFY_MAX];
+static uint8_t s_ntf_rd, s_ntf_wr, s_cp_notify, s_operation_error;
+static btstack_context_callback_registration_t s_send_cb;
+static uint8_t s_volume[3] = {115, 0, 0}; /* level, mute, change counter */
+static uint8_t s_volume_notify;
+static uint8_t s_context_notify;
+
+static void ft_le_send_next(void *context)
+{
+    (void)context;
+    if (s_ntf_rd == s_ntf_wr || s_acl_handle == HCI_CON_HANDLE_INVALID) return;
+    unsigned i = s_ntf_rd % FT_NOTIFY_MAX;
+    if (att_server_notify(s_acl_handle, s_ntf[i].handle,
+                          s_ntf[i].value, s_ntf[i].len) == 0) s_ntf_rd++;
+    if (s_ntf_rd != s_ntf_wr)
+        att_server_register_can_send_now_callback(&s_send_cb, s_acl_handle);
+}
+static void ft_le_queue(uint16_t handle, const uint8_t *value, uint16_t len)
+{
+    if (s_acl_handle == HCI_CON_HANDLE_INVALID) return;
+    if ((uint8_t)(s_ntf_wr - s_ntf_rd) >= FT_NOTIFY_MAX || len > 64) {
+        s_stat_op_err++; return;
+    }
+    unsigned i = s_ntf_wr % FT_NOTIFY_MAX;
+    s_ntf[i].handle = handle; s_ntf[i].len = len;
+    memcpy(s_ntf[i].value, value, len); s_ntf_wr++;
+    att_server_register_can_send_now_callback(&s_send_cb, s_acl_handle);
+}
 static void ft_le_ase_notify(ft_ase_t *ase, uint8_t err_code)
 {
-    uint8_t buf[8U + FT_LE_CODEC_CFG_MAX];
-
-    if ((s_acl_handle == HCI_CON_HANDLE_INVALID) || (ase->notify_on == 0U))
-    {
-        return;
+    if (err_code != FT_LE_ERR_SUCCESS) { s_operation_error = err_code; return; }
+    if (ase->notify_on) {
+        uint8_t buf[64];
+        uint16_t len = ft_le_ase_encode(ase, buf);
+        ft_le_queue(s_ase_value_handle[ase->ase_id - 1U], buf, len);
     }
-    uint16_t len = ft_le_ase_encode(ase, buf);
-    if (err_code != FT_LE_ERR_SUCCESS)
-    {
-        /* 错误通知: [ASE_ID, 当前 state, Error Code] (无状态参数) */
-        buf[2] = err_code;
-        len = 3U;
-    }
-    (void)att_server_notify(s_acl_handle, s_ase_value_handle[ase->ase_id - 1U],
-                            buf, len);
 }
 
 static void ft_le_ase_reset(ft_ase_t *ase)
@@ -223,8 +261,10 @@ static void ft_le_ase_reset(ft_ase_t *ase)
     /* 关键: 保留 ase_id —— memset 会清零 ID, 清零后的 ASE 永远无法再被
      * 手机匹配 (INVALID_ASE_ID), 一次断链后整台设备即不可用 (实测) */
     rt_uint8_t keep_id = ase->ase_id;
+    rt_uint8_t keep_notify = ase->notify_on;
     memset(ase, 0, sizeof(*ase));
     ase->ase_id = keep_id;
+    ase->notify_on = keep_notify;
     ase->cis_handle = HCI_CON_HANDLE_INVALID;
     ase->state = FT_ASE_IDLE;
 }
@@ -263,7 +303,7 @@ static void ft_le_parse_codec_cfg(ft_ase_t *ase)
 
 /* ---- ASE Control Point 操作分发 ----
  * 每个操作按 BAP 校验 ASE 状态后迁移并通知; 错误经通知携带错误码。
- * 一次写只取第一个 ASE 处理 (手机实际逐 ASE 发), 简化但合规。 */
+ * 控制点先校验整条请求，再逐 ASE 分发，通知状态和控制点结果。 */
 static void ft_le_handle_codec_config(const rt_uint8_t *p, rt_uint32_t len)
 {
     if (len < 9U) { s_stat_op_err++; return; }
@@ -286,12 +326,39 @@ static void ft_le_handle_codec_config(const rt_uint8_t *p, rt_uint32_t len)
         s_stat_op_err++;
         return;
     }
-    if (p[3] != FT_LE_CODEC_LC3)   /* codec id[0] = coding format (p[3..7]) */
+    if (p[3] != FT_LE_CODEC_LC3 || p[4] || p[5] || p[6] || p[7])
     {
         ft_le_ase_notify(ase, FT_LE_ERR_INVALID_ASE_STATE);
         s_stat_op_err++;
         return;
     }
+    /* Reject formats the M55 decoder does not support before publishing them. */
+    uint32_t at = 9U, seen = 0U;
+    while (at < 9U + cfg_len) {
+        uint8_t n = p[at];
+        if (n < 1 || at + n + 1 > 9U + cfg_len) {
+            ft_le_ase_notify(ase, FT_LE_ERR_INVALID_LEN); return;
+        }
+        uint8_t tag = p[at + 1];
+        if (tag == 1) {
+            if (n != 2 || p[at + 2] != 8) { s_operation_error = 7; return; }
+            seen |= 1;
+        } else if (tag == 2) {
+            if (n != 2 || p[at + 2] != 1) { s_operation_error = 7; return; }
+            seen |= 2;
+        } else if (tag == 3) {
+            uint32_t ch = n == 5 ? little_endian_read_32(p, at + 2) : 0;
+            if (ch != 1 && ch != 2) { s_operation_error = 7; return; }
+        } else if (tag == 4) {
+            unsigned octets = n == 3 ? little_endian_read_16(p, at + 2) : 0;
+            if (octets < 30 || octets > 120) { s_operation_error = 7; return; }
+            seen |= 4;
+        } else if (tag == 5) {
+            if (n != 2 || p[at + 2] != 1) { s_operation_error = 7; return; }
+        } else { s_operation_error = 6; return; }
+        at += n + 1;
+    }
+    if (seen != 7) { s_operation_error = 7; return; }
     memcpy(ase->codec_cfg, &p[9], cfg_len);
     ase->codec_cfg_len = cfg_len;
     ft_le_parse_codec_cfg(ase);
@@ -303,11 +370,11 @@ static void ft_le_handle_codec_config(const rt_uint8_t *p, rt_uint32_t len)
 
 static void ft_le_handle_qos_config(const rt_uint8_t *p, rt_uint32_t len)
 {
-    /* num_ases + N * 19B: ASE_ID,CIG_ID,CIS_ID,SDUint(3),framing,phy,
-     * max_sdu(2),rtn,latency(2),pd_min(3),pd_max(3) */
+    /* num_ases + N * 16B: ASE_ID,CIG_ID,CIS_ID,SDUint(3),framing,phy,
+     * max_sdu(2),rtn,latency(2),presentation_delay(3) */
     if (len < 1U) { s_stat_op_err++; return; }
     rt_uint8_t n = p[0];
-    if ((rt_uint32_t)(1U + n * 19U) > len)
+    if ((rt_uint32_t)(1U + n * 16U) > len)
     {
         s_stat_op_err++;
         return;
@@ -323,20 +390,25 @@ static void ft_le_handle_qos_config(const rt_uint8_t *p, rt_uint32_t len)
             s_stat_op_err++;
             return;
         }
+        if (little_endian_read_24(q, 3) != 10000 || q[6] > 1 ||
+            q[7] < 1 || q[7] > 2 || little_endian_read_16(q, 8) < 30 ||
+            little_endian_read_16(q, 8) > 120) {
+            s_operation_error = 7; return;
+        }
         ase->cig_id = q[1];
         ase->cis_id = q[2];
         ase->sdu_interval_us = (rt_uint32_t)q[3] | ((rt_uint32_t)q[4] << 8) |
                                ((rt_uint32_t)q[5] << 16);
         ase->max_sdu = (rt_uint16_t)q[8] | ((rt_uint16_t)q[9] << 8);
         ase->max_latency = (rt_uint16_t)q[11] | ((rt_uint16_t)q[12] << 8);
-        ase->pres_delay_us = (rt_uint32_t)q[16] | ((rt_uint32_t)q[17] << 8) |
-                             ((rt_uint32_t)q[18] << 16);
+        ase->pres_delay_us = little_endian_read_24(q, 13);
+        ase->framing = q[6]; ase->phy = q[7]; ase->rtn = q[10];
         ase->state = FT_ASE_QOS_CONFIGURED;
         ft_le_ase_notify(ase, FT_LE_ERR_SUCCESS);
         rt_kprintf("[LEA] ASE%u qos: cig=%u cis=%u sdu_int=%lu us max_sdu=%u\n",
                    ase->ase_id, ase->cig_id, ase->cis_id,
                    (unsigned long)ase->sdu_interval_us, ase->max_sdu);
-        q += 19U;
+        q += 16U;
     }
 }
 
@@ -369,8 +441,10 @@ static void ft_le_handle_enable(const rt_uint8_t *p, rt_uint32_t len)
         ft_le_ase_notify(ase, FT_LE_ERR_SUCCESS);
         /* Sink ASE: 服务端就绪即转 Streaming (Receiver Start Ready 仅用于
          * Source ASE; 本配置无 Source), 手机随后开始投 ISO SDU */
-        ase->state = FT_ASE_STREAMING;
-        ft_le_ase_notify(ase, FT_LE_ERR_SUCCESS);
+        if (ase->established) {
+            ase->state = FT_ASE_STREAMING;
+            ft_le_ase_notify(ase, FT_LE_ERR_SUCCESS);
+        }
         q += 2U + meta_len;
     }
     ft_le_streaming_refresh();
@@ -437,36 +511,76 @@ static void ft_le_handle_release(const rt_uint8_t *p, rt_uint32_t len)
 
 static void ft_le_control_point(const rt_uint8_t *buffer, rt_uint16_t size)
 {
-    if (size < 1U)
-    {
-        s_stat_op_err++;
-        return;
-    }
-    switch (buffer[0])
-    {
-    case FT_LE_OP_CONFIG_CODEC:     ft_le_handle_codec_config(&buffer[1], size - 1U); break;
-    case FT_LE_OP_CONFIG_QOS:       ft_le_handle_qos_config(&buffer[1], size - 1U); break;
-    case FT_LE_OP_ENABLE:           ft_le_handle_enable(&buffer[1], size - 1U); break;
-    case FT_LE_OP_UPDATE_METADATA:  ft_le_handle_metadata_update(&buffer[1], size - 1U); break;
-    case FT_LE_OP_RELEASE:          ft_le_handle_release(&buffer[1], size - 1U); break;
-    case FT_LE_OP_RECV_START_READY:
-    case FT_LE_OP_DISABLE:
-    case FT_LE_OP_RECV_STOP_READY:
-        /* 仅 Source ASE 适用; Sink-only 配置直接回 Invalid Direction */
-        if (size >= 2U)
-        {
-            ft_ase_t *ase = ft_le_ase_by_id(buffer[1]);
-            if (ase != RT_NULL)
-            {
-                ft_le_ase_notify(ase, FT_LE_ERR_INVALID_DIRECTION);
-            }
+    uint8_t response[2 + 3 * FT_LE_ASE_NUM], n, op;
+    uint16_t offsets[FT_LE_ASE_NUM], lengths[FT_LE_ASE_NUM], pos = 2;
+    if (size == 0) { s_stat_op_err++; return; }
+    op = buffer[0]; response[0] = op; response[1] = 0xFF;
+    response[2] = 0; response[3] = FT_LE_ERR_INVALID_LEN; response[4] = 0;
+    if (op < 1 || op > 8) { response[3] = FT_LE_ERR_UNSUPPORTED_OP; goto reject; }
+    if (size < 2 || buffer[1] == 0 || buffer[1] > FT_LE_ASE_NUM) goto reject;
+    n = buffer[1];
+    /* Validate the complete variable-length request before changing any ASE. */
+    for (unsigned i = 0; i < n; i++) {
+        uint16_t len = 1;
+        offsets[i] = pos;
+        if (op == FT_LE_OP_CONFIG_CODEC) {
+            if (pos + 9 > size) goto reject;
+            len = 9 + buffer[pos + 8];
+        } else if (op == FT_LE_OP_CONFIG_QOS) len = 16;
+        else if (op == FT_LE_OP_ENABLE || op == FT_LE_OP_UPDATE_METADATA) {
+            if (pos + 2 > size) goto reject;
+            len = 2 + buffer[pos + 1];
         }
-        s_stat_op_err++;
-        break;
-    default:
-        s_stat_op_err++;
-        break;
+        if (pos + len > size) goto reject;
+        lengths[i] = len; pos += len;
     }
+    if (pos != size) goto reject;
+    response[1] = n;
+    for (unsigned i = 0; i < n; i++) {
+        const uint8_t *p = &buffer[offsets[i]];
+        ft_ase_t *ase = ft_le_ase_by_id(p[0]);
+        uint8_t one[1 + 2 + FT_LE_META_MAX];
+        s_operation_error = 0;
+        if (!ase) s_operation_error = FT_LE_ERR_INVALID_ASE_ID;
+        else {
+            uint32_t errors = s_stat_op_err;
+            if (op == FT_LE_OP_CONFIG_CODEC) ft_le_handle_codec_config(p, lengths[i]);
+            else if (op == FT_LE_OP_CONFIG_QOS) {
+                one[0] = 1; memcpy(one + 1, p, 16);
+                ft_le_handle_qos_config(one, 17);
+            } else if (op == FT_LE_OP_ENABLE || op == FT_LE_OP_UPDATE_METADATA) {
+                if (lengths[i] > sizeof(one) - 1) s_operation_error = 0x0B;
+                else {
+                    one[0] = 1; memcpy(one + 1, p, lengths[i]);
+                    if (op == FT_LE_OP_ENABLE) ft_le_handle_enable(one, lengths[i] + 1);
+                    else ft_le_handle_metadata_update(one, lengths[i] + 1);
+                }
+            } else if (op == FT_LE_OP_DISABLE) {
+                if (ase->state != FT_ASE_ENABLING && ase->state != FT_ASE_STREAMING)
+                    s_operation_error = FT_LE_ERR_INVALID_ASE_STATE;
+                else {
+                    ase->state = FT_ASE_QOS_CONFIGURED;
+                    ft_le_ase_notify(ase, 0); ft_le_streaming_refresh();
+                }
+            } else if (op == FT_LE_OP_RELEASE) {
+                one[0] = 1; one[1] = p[0]; ft_le_handle_release(one, 2);
+            } else s_operation_error = FT_LE_ERR_INVALID_DIRECTION;
+            if (s_stat_op_err != errors && !s_operation_error)
+                s_operation_error = FT_LE_ERR_INVALID_LEN;
+        }
+        response[2 + i * 3] = p[0];
+        response[3 + i * 3] = s_operation_error;
+        response[4 + i * 3] = 0;
+    }
+    if (s_cp_notify) ft_le_queue(
+        ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_ASE_CONTROL_POINT_01_VALUE_HANDLE,
+        response, 2 + 3 * n);
+    return;
+reject:
+    s_stat_op_err++;
+    if (s_cp_notify) ft_le_queue(
+        ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_ASE_CONTROL_POINT_01_VALUE_HANDLE,
+        response, 5);
 }
 
 /* ---- ATT 路由 (bt_main.c 的 att 回调转发进来) ----
@@ -477,21 +591,50 @@ static void ft_le_control_point(const rt_uint8_t *buffer, rt_uint16_t size)
 uint16_t ft_le_audio_att_read(rt_uint16_t att_handle, rt_uint16_t offset,
                               rt_uint8_t *buffer, rt_uint16_t buffer_size)
 {
+    if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_VOLUME_STATE_01_VALUE_HANDLE) {
+        if (!buffer) return 3;
+        if (offset >= 3) return 0;
+        uint16_t n = 3 - offset;
+        if (n > buffer_size) n = buffer_size;
+        memcpy(buffer, s_volume + offset, n); return n;
+    }
+    uint8_t cccd_value = 0, cccd_found = 1;
+    if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_AVAILABLE_AUDIO_CONTEXTS_01_CLIENT_CONFIGURATION_HANDLE)
+        cccd_value = s_context_notify;
+    else if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_VOLUME_STATE_01_CLIENT_CONFIGURATION_HANDLE)
+        cccd_value = s_volume_notify;
+    else if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_ASE_CONTROL_POINT_01_CLIENT_CONFIGURATION_HANDLE)
+        cccd_value = s_cp_notify;
+    else if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_SINK_ASE_01_CLIENT_CONFIGURATION_HANDLE)
+        cccd_value = s_ase[0].notify_on;
+    else if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_SINK_ASE_02_CLIENT_CONFIGURATION_HANDLE)
+        cccd_value = s_ase[1].notify_on;
+    else cccd_found = 0;
+    if (cccd_found) {
+        uint8_t value[2] = {cccd_value, 0};
+        if (!buffer) return 2;
+        if (offset >= 2) return 0;
+        uint16_t n = 2 - offset;
+        if (n > buffer_size) n = buffer_size;
+        memcpy(buffer, value + offset, n); return n;
+    }
     for (rt_uint32_t i = 0U; i < FT_LE_ASE_NUM; i++)
     {
         if (att_handle == s_ase_value_handle[i])
         {
-            rt_uint8_t val[8U + FT_LE_CODEC_CFG_MAX];
+            rt_uint8_t val[64];
             rt_uint16_t len = ft_le_ase_encode(&s_ase[i], val);
             /* btstack 两段式: 首调 buffer=NULL 查总长, 再调拷贝 */
             if (buffer == RT_NULL)
             {
                 return len;
             }
-            if (offset < len && buffer_size >= (rt_uint16_t)(len - offset))
+            if (offset < len)
             {
-                memcpy(buffer, &val[offset], len - offset);
-                return (uint16_t)(len - offset);
+                uint16_t count = len - offset;
+                if (count > buffer_size) count = buffer_size;
+                memcpy(buffer, &val[offset], count);
+                return count;
             }
             return 0U;
         }
@@ -502,6 +645,46 @@ uint16_t ft_le_audio_att_read(rt_uint16_t att_handle, rt_uint16_t offset,
 int ft_le_audio_att_write(hci_con_handle_t con_handle, rt_uint16_t att_handle,
                           const rt_uint8_t *buffer, rt_uint16_t buffer_size)
 {
+    if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_AVAILABLE_AUDIO_CONTEXTS_01_CLIENT_CONFIGURATION_HANDLE) {
+        if (buffer_size != 2) return ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH;
+        uint16_t value = little_endian_read_16(buffer, 0);
+        if (value > 1) return ATT_ERROR_VALUE_NOT_ALLOWED;
+        s_context_notify = value;
+        s_acl_handle = con_handle; return 0;
+    }
+    if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_VOLUME_STATE_01_CLIENT_CONFIGURATION_HANDLE) {
+        if (buffer_size != 2) return ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH;
+        s_volume_notify = little_endian_read_16(buffer, 0) == 1;
+        s_acl_handle = con_handle; return 0;
+    }
+    if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_VOLUME_CONTROL_POINT_01_VALUE_HANDLE) {
+        if (!buffer_size) return ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH;
+        uint8_t op = buffer[0];
+        if (op > 6) return 0x81;
+        if (buffer_size != (op == 4 ? 3 : 2)) return ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH;
+        if (buffer[1] != s_volume[2]) return 0x80;
+        uint8_t level = s_volume[0], mute = s_volume[1];
+        if (op == 0 || op == 2) level = level > 16 ? level - 16 : 0;
+        if (op == 1 || op == 3) level = level < 239 ? level + 16 : 255;
+        if (op == 2 || op == 3 || op == 5) mute = 0;
+        if (op == 4) level = buffer[2];
+        if (op == 6) mute = 1;
+        s_acl_handle = con_handle;
+        if (level != s_volume[0] || mute != s_volume[1]) {
+            s_volume[0] = level; s_volume[1] = mute; s_volume[2]++;
+            FT_ALINK->volume_percent = mute ? 0 : (level * 100U + 127U) / 255U;
+            FT_ALINK_DCACHE_CLEAN(FT_ALINK_BASE, 32);
+            if (s_volume_notify) ft_le_queue(
+                ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_VOLUME_STATE_01_VALUE_HANDLE,
+                s_volume, 3);
+        }
+        return 0;
+    }
+    if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_ASE_CONTROL_POINT_01_CLIENT_CONFIGURATION_HANDLE) {
+        if (buffer_size != 2) return ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH;
+        s_cp_notify = little_endian_read_16(buffer, 0) == 1;
+        s_acl_handle = con_handle; return 0;
+    }
     if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_ASE_CONTROL_POINT_01_VALUE_HANDLE)
     {
         s_acl_handle = con_handle;   /* 控制面来自哪个 ACL, 通知就回哪条 */
@@ -531,7 +714,10 @@ static void ft_le_iso_handler(rt_uint8_t packet_type, rt_uint16_t channel,
                               rt_uint8_t *packet, rt_uint16_t size)
 {
     (void)channel;
-    if (packet_type != HCI_ISO_DATA_PACKET) return;
+    if (packet_type != HCI_ISO_DATA_PACKET || size < 8) return;
+    if (((little_endian_read_16(packet, 0) >> 12) & 3) != 2) {
+        s_stat_iso_dropped++; return; /* Complete SDUs only; reject fragments. */
+    }
 
     rt_uint16_t hdr = little_endian_read_16(packet, 0);
     hci_con_handle_t con_handle = hdr & 0x0FFFU;
@@ -541,8 +727,8 @@ static void ft_le_iso_handler(rt_uint8_t packet_type, rt_uint16_t channel,
     offset += 2U;   /* packet sequence number */
     if (size < offset + 2U) return;
     rt_uint16_t hdr2 = little_endian_read_16(packet, offset);
-    rt_uint16_t sdu_len = hdr2 & 0x3FFFU;
-    rt_uint8_t pkt_status = hdr2 >> 14;
+    rt_uint16_t sdu_len = hdr2 & 0x0FFFU;
+    rt_uint8_t pkt_status = (hdr2 >> 14) & 3U;
     offset += 2U;
     if (pkt_status != 0U || sdu_len == 0U || (rt_uint16_t)(offset + sdu_len) > size)
     {
@@ -558,14 +744,15 @@ static void ft_le_iso_handler(rt_uint8_t packet_type, rt_uint16_t channel,
     {
         return;
     }
-    /* 自愈: 部分 stack 在 Enable 完成前即开始投流 —— 首包数据到达即开 ring */
+    /* Only publish media from an established, streaming ASE. */
+    if (ase->state != FT_ASE_STREAMING || !ase->established) return;
     if (s_streaming == 0U)
     {
         ft_le_ring_start();
     }
 
     rt_uint16_t total = (rt_uint16_t)(1U + sdu_len);
-    if (ft_alink_space(FT_ALINK) < (rt_uint32_t)total)
+    if (ft_alink_space(FT_ALINK) < (rt_uint32_t)(total + 2U))
     {
         s_stat_iso_dropped++;
         return;
@@ -580,7 +767,7 @@ static void ft_le_iso_handler(rt_uint8_t packet_type, rt_uint16_t channel,
     stage[1] = (rt_uint8_t)(total >> 8);
     stage[2] = ase->chan_alloc;   /* 0x01=L 0x02=R, M55 据此分路解码 */
     memcpy(&stage[3], &packet[offset], sdu_len);
-    if (ft_audio_produce(stage, total) == total)
+    if (ft_audio_produce(stage, total + 2U) == total + 2U)
     {
         s_stat_iso_sdus++;
         s_stat_frames++;
@@ -614,7 +801,7 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
             for (rt_uint32_t i = 0U; i < FT_LE_ASE_NUM; i++)
             {
                 ft_ase_t *ase = &s_ase[i];
-                if (ase->state == FT_ASE_QOS_CONFIGURED &&
+                if ((ase->state == FT_ASE_QOS_CONFIGURED || ase->state == FT_ASE_ENABLING) &&
                     ase->cig_id == cig_id && ase->cis_id == cis_id)
                 {
                     match = ase;
@@ -647,6 +834,11 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
         break;
 
     case HCI_EVENT_META_GAP:
+        if (packet[2] == GAP_SUBEVENT_LE_CONNECTION_COMPLETE) {
+            if (gap_subevent_le_connection_complete_get_status(packet) == 0)
+                s_acl_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
+            break;
+        }
         if (packet[2] == GAP_SUBEVENT_CIS_CREATED)
         {
             rt_uint8_t status = gap_subevent_cis_created_get_status(packet);
@@ -659,6 +851,11 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
                     if (status == 0U)
                     {
                         s_ase[i].established = 1U;
+                        if (s_ase[i].state == FT_ASE_ENABLING) {
+                            s_ase[i].state = FT_ASE_STREAMING;
+                            ft_le_ase_notify(&s_ase[i], 0);
+                            ft_le_streaming_refresh();
+                        }
                         rt_kprintf("[LEA] ASE%u CIS established (0x%04x)\n",
                                    s_ase[i].ase_id, cis_handle);
                     }
@@ -689,6 +886,9 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
         if (was_acl)
         {
             s_acl_handle = HCI_CON_HANDLE_INVALID;
+            s_cp_notify = 0; s_volume_notify = 0; s_context_notify = 0;
+            s_ntf_rd = s_ntf_wr;
+            for (unsigned i = 0; i < FT_LE_ASE_NUM; i++) s_ase[i].notify_on = 0;
         }
         if (touched)
         {
@@ -705,6 +905,7 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
 /* ---- 初始化 / 诊断 ---- */
 void ft_le_audio_init(void)
 {
+    s_send_cb.callback = ft_le_send_next; s_send_cb.context = RT_NULL;
     for (rt_uint32_t i = 0U; i < FT_LE_ASE_NUM; i++)
     {
         ft_le_ase_reset(&s_ase[i]);

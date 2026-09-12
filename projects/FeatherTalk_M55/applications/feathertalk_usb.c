@@ -526,6 +526,21 @@ int ft_usb_set_uac_output_format(uint32_t sample_rate, uint8_t sample_bits,
                                             FT_USB_FUNCTION_AUDIO);
 }
 
+#if defined(FEATHERTALK_USING_USB_UAC) && \
+    defined(FEATHERTALK_USING_FPGA_AUDIO_BRIDGE)
+/* This firmware image is the external-DAC bring-up profile.  It deliberately
+ * comes up as a UAC2 device so the host sees its fixed 96 kHz/S24/stereo
+ * capability immediately after boot; USB settings can still stop it. */
+static int ft_usb_fpga_uac_autostart(void)
+{
+    int result = ft_usb_set_function(FT_USB_FUNCTION_AUDIO);
+    rt_kprintf("usb-uac-fpga: %s (96kHz/S24/stereo)\n",
+               result == RT_EOK ? "started" : "start failed");
+    return result == RT_EOK ? 0 : result;
+}
+INIT_APP_EXPORT(ft_usb_fpga_uac_autostart);
+#endif
+
 bool ft_usb_uac_output_supported(uint32_t sample_rate, uint8_t sample_bits,
                                  uint8_t channels)
 {

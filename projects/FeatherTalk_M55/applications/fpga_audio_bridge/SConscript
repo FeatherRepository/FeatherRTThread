@@ -1,0 +1,11 @@
+from building import *
+
+cwd = GetCurrentDir()
+src = Glob('*.c')
+
+group = DefineGroup('FeatherTalk FPGA audio bridge', src,
+                    depend=['FEATHERTALK_USING_FPGA_AUDIO_BRIDGE',
+                            'BSP_USING_SPI'],
+                    CPPPATH=[cwd])
+
+Return('group')

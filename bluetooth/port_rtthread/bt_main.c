@@ -106,6 +106,9 @@ static btstack_packet_callback_registration_t s_hci_event_handler;
 
 /* 崩溃现场存活检查点: 写在静态变量里, 即使整机死锁也能用 GDB 读出最后一步 */
 volatile uint32_t g_bt_checkpoint;
+/* Persistent evidence: connects, disconnects, last reason, pair completions,
+ * pair status/reason, last dynamic ATT handle, last write opcode. */
+volatile uint32_t g_le_connect_diag[8];
 #define BT_CP(code) do { g_bt_checkpoint = (uint32_t)(code); } while (0)
 
 /* Passive coexistence diagnostics. Count replies to EXISTING HCI traffic;
@@ -171,10 +174,46 @@ static hci_transport_config_uart_t s_uart_config = {
  * 过滤包装: 丢 ACL 数据帧与高频 NOP(Number Of Completed Packets, 0x13)事件,
  * 其余事件/日志原样保留 (排障能力不降)。 */
 static const hci_dump_t *s_dump_stdout;
+/* Read-only debugger evidence, excludes SMP keys and audio payloads.
+ * row: timestamp, type, direction, original length, captured length, data[56].
+ * Commit count last so a debugger can retry a concurrent snapshot. */
+volatile uint32_t g_le_trace_count;
+volatile struct {
+    uint32_t ms;
+    uint8_t type, incoming, length, captured;
+    uint8_t data[56];
+} g_le_trace[64];
+static void ft_trace_packet(uint8_t type, uint8_t incoming,
+                            const uint8_t *packet, uint16_t length)
+{
+    uint16_t capture = 0;
+    if (type == HCI_ACL_DATA_PACKET && length >= 9 &&
+        ((little_endian_read_16(packet, 0) >> 12) & 3) != 1) {
+        uint16_t cid = little_endian_read_16(packet, 6);
+        if (cid == 4) capture = length; /* ATT */
+        if (cid == 6) capture = 9;      /* SMP: opcode only, never keys */
+    } else if (type == HCI_EVENT_PACKET && length >= 2) {
+        if (packet[0] == 5 || packet[0] == 8 || packet[0] == 0x30 ||
+            packet[0] == 0x3e) capture = length;
+    }
+    if (!capture) return;
+    if (capture > 56) capture = 56;
+    uint32_t i = g_le_trace_count % 64;
+    g_le_trace[i].ms = rt_tick_get_millisecond();
+    g_le_trace[i].type = type; g_le_trace[i].incoming = incoming;
+    g_le_trace[i].length = length > 255 ? 255 : length;
+    g_le_trace[i].captured = capture;
+    for (uint16_t j = 0; j < capture; j++) g_le_trace[i].data[j] = packet[j];
+    __DMB();
+    g_le_trace_count++;
+}
 static void ft_dump_log_packet(uint8_t packet_type, uint8_t in,
                                uint8_t *packet, uint16_t len)
 {
-    if (packet_type == HCI_ACL_DATA_PACKET)
+    ft_trace_packet(packet_type, in, packet, len);
+    /* ISO media can exceed 80 KB/s as hex text. Blocking 115200-baud
+     * console output throttles H4 reception and loses audio SDUs. */
+    if (packet_type == HCI_ACL_DATA_PACKET || packet_type == HCI_ISO_DATA_PACKET)
     {
         return;
     }
@@ -221,6 +260,7 @@ static uint16_t att_read_callback(hci_con_handle_t con_handle, uint16_t att_hand
                                   uint16_t offset, uint8_t *buffer, uint16_t buffer_size)
 {
     (void)con_handle;
+    g_le_connect_diag[6] = att_handle;
     /* M8.1: LE Audio ASE 状态读取先行路由 (0xFFFF = 非本模块句柄) */
     {
         uint16_t le_rc = ft_le_audio_att_read(att_handle, offset, buffer, buffer_size);
@@ -258,6 +298,8 @@ static int att_write_callback(hci_con_handle_t con_handle, uint16_t att_handle,
 {
     (void)transaction_mode;
     (void)offset;
+    g_le_connect_diag[6] = att_handle;
+    g_le_connect_diag[7] = buffer_size ? buffer[0] : 0xFFFFFFFFU;
     /* M8.1: LE Audio 控制点 / ASE CCCD 先行路由 (-2 = 非本模块句柄) */
     {
         int le_rc = ft_le_audio_att_write(con_handle, att_handle, buffer, buffer_size);
@@ -330,7 +372,7 @@ static void ft_adv_keepalive_handler(struct btstack_timer_source *ts)
     if ((s_bt_state == BT_READY) && s_desired_on && !s_gatt_connected)
     {
         /* 控制器若已在广播, 此命令幂等; 若假死则救活 */
-        hci_send_cmd(&hci_le_set_advertise_enable, 1);
+        bt_adv_enable();
     }
     btstack_run_loop_set_timer(ts, 3000);
     btstack_run_loop_add_timer(ts);
@@ -361,57 +403,72 @@ static void bt_classic_eir_setup(void)
     gap_set_extended_inquiry_response(s_classic_eir);
 }
 
-static void bt_adv_start(void)
-{
-    bd_addr_t null_addr = { 0, 0, 0, 0, 0, 0 };
-    g_adv_cc_status[ADV_CC_PARAMS] = 0xFF;
-    g_adv_cc_status[ADV_CC_DATA] = 0xFF;
-    g_adv_cc_status[ADV_CC_ENABLE] = 0xFF;
-    /* 本版本模板为 "22111B11": interval(2) ×2 + type(1) ×3 +
-     * direct_addr(B) + channel_map(1) + filter(1) */
-    hci_send_cmd(&hci_le_set_advertising_parameters,
-                 0x0030, 0x0030, 0, 0, 0, null_addr, 0x07, 0);
-    BT_CP(61);
-}
-
-static void bt_adv_set_data(void)
-{
-    uint8_t adv[31];
-    uint8_t pos = 0;
-    /* M4b: 双模音箱 flags 必须是 0x02 (LE 可发现 + 支持经典蓝牙)。
-     * 原来写 0x06 (含 "BR/EDR Not Supported" bit) 会让 Windows 把我们当纯 BLE
-     * 设备配对, 从不做经典 SDP 服务发现 -> 建不出 A2DP 音频端点 (实测)。
-     * M8.1 手机验证: FEATHERTALK_BT_LE_AUDIO_ONLY=1 时强制 BLE-only (flags
-     * 0x06 + 关闭 Classic 扫描), 手机无 A2DP 回退, 只能走 LE Audio/LC3 通路 */
-#if FEATHERTALK_BT_LE_AUDIO_ONLY
-    adv[pos++] = 2;  adv[pos++] = 0x01;  adv[pos++] = 0x06;   /* flags: LE general + BR/EDR NOT supported */
-#else
-    adv[pos++] = 2;  adv[pos++] = 0x01;  adv[pos++] = 0x02;   /* flags: LE general + BR/EDR supported */
-#endif
-    adv[pos++] = 12;                                          /* len(1 type + 11 chars) */
-    adv[pos++] = 0x09;                                        /* complete name */
-    memcpy(&adv[pos], "FeatherTalk", 11);
-    pos += 11;
-    /* M8.1: LE Audio 能力声明 —— CAS (0x1853) + ASCS (0x184E)。
-     * Android 依广播里的服务 UUID 识别 LE Audio 设备并建立 LE 链路;
-     * 缺失时手机只走经典 A2DP (实测 SBC, 不进 LC3/CIS 通路)。
-     * AD 长度 = type(1) + 2 UUID x2B = 5, 写错会导致广播数据非法 */
-    adv[pos++] = 5;
-    adv[pos++] = 0x03;                                        /* complete list of 16-bit service UUIDs */
-    adv[pos++] = 0x4E;  adv[pos++] = 0x18;                    /* ASCS  0x184E */
-    adv[pos++] = 0x53;  adv[pos++] = 0x18;                    /* CAS   0x1853 */
-    hci_send_cmd(&hci_le_set_advertising_data, pos, adv);
-    BT_CP(62);
-}
-
+static le_advertising_set_t s_le_adv;
+static uint8_t s_le_adv_handle, s_le_adv_registered;
+static const le_extended_advertising_parameters_t s_le_adv_params = {
+    .advertising_event_properties = 1,
+    .primary_advertising_interval_min = 160,
+    .primary_advertising_interval_max = 192,
+    .primary_advertising_channel_map = 7,
+    .own_address_type = BD_ADDR_TYPE_LE_PUBLIC,
+    .advertising_tx_power = 0,
+    .primary_advertising_phy = 1,
+    .secondary_advertising_phy = 1,
+};
+/* BAP Unicast Server General Announcement, CAP Acceptor, TMAS UMR.
+ * Persistent storage is required by the asynchronous GAP advertising API. */
+static const uint8_t s_le_adv_data[] = {
+    2, 0x01, 0x06,
+    12, 0x09, 'F','e','a','t','h','e','r','T','a','l','k',
+    /* UUID list supports OS service filters in addition to announcements. */
+    11, 0x03, 0x50, 0x18, 0x4e, 0x18, 0x53, 0x18,
+    0x44, 0x18, 0x55, 0x18,
+    9, 0x16, 0x4e, 0x18, 0, 7, 0, 0, 0, 0,
+    4, 0x16, 0x53, 0x18, 0,
+    5, 0x16, 0x55, 0x18, 8, 0
+};
 static void bt_adv_enable(void)
 {
-    hci_send_cmd(&hci_le_set_advertise_enable, 1);
+    int rc = gap_extended_advertising_start(s_le_adv_handle, 0, 0);
+    if (rc) { s_bt_err = rc; rt_kprintf("[BT] extended adv start rc=%d\n", rc); }
     BT_CP(63);
+}
+static void bt_adv_set_data(void)
+{
+    int rc = gap_extended_advertising_set_adv_data(s_le_adv_handle,
+                  sizeof(s_le_adv_data), s_le_adv_data);
+    if (rc) { s_bt_err = rc; return; }
+    bt_adv_enable();
+}
+static void bt_adv_start(void)
+{
+    if (!s_le_adv_registered) {
+        int rc = gap_extended_advertising_setup(&s_le_adv, &s_le_adv_params,
+                                                 &s_le_adv_handle);
+        if (rc) { s_bt_err = rc; return; }
+        s_le_adv_registered = 1;
+    }
+    bt_adv_set_data();
 }
 
 /* HCI 包处理器: 状态机到达 WORKING 即启动 BLE 广播 */
 static void bt_iso_probe_print(const uint8_t *mask);
+static btstack_packet_callback_registration_t s_sm_event_reg;
+static void ft_sm_handler(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t size)
+{
+    (void)channel;
+    if (type != HCI_EVENT_PACKET || size < 2) return;
+    if (packet[0] == SM_EVENT_JUST_WORKS_REQUEST)
+        sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
+    if (packet[0] == SM_EVENT_PAIRING_COMPLETE) {
+        g_le_connect_diag[3]++;
+        g_le_connect_diag[4] = sm_event_pairing_complete_get_status(packet);
+        g_le_connect_diag[5] = sm_event_pairing_complete_get_reason(packet);
+        rt_kprintf("[BT] SMP pairing status=0x%02x reason=0x%02x\n",
+            sm_event_pairing_complete_get_status(packet),
+            sm_event_pairing_complete_get_reason(packet));
+    }
+}
 static volatile int s_iso_probe_pending;
 
 /* M6-BT: A2DP 角色管理 (A2 单角色决策)。0=SINK 音箱(被动可连) 1=SOURCE 转发。
@@ -501,7 +558,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             g_adv_cc_status[ADV_CC_DATA] = status;
             if (status == 0U && s_desired_on && s_bt_state != BT_STOPPING) bt_adv_enable();
         }
-        else if (opcode == 0x200A)
+        else if (opcode == 0x2039)
         {
             if (status == 0U) g_bt_coex_diag.advertising_acks++;
             g_adv_cc_status[ADV_CC_ENABLE] = status;
@@ -519,13 +576,25 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                  * sm_init 幂等 (sm_initialized 保护), 后续周期只执行一次 */
                 sm_init();
                 sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
-                sm_set_authentication_requirements(SM_AUTHREQ_BONDING);
+                sm_set_authentication_requirements(SM_AUTHREQ_BONDING | SM_AUTHREQ_SECURE_CONNECTION);
             }
         }
         break;
     }
     case HCI_EVENT_COMMAND_STATUS:
         bt_evt_log(0xFF0F, (uint16_t)((size > 1) ? packet[2] : 0xFD));
+        break;
+    case HCI_EVENT_META_GAP:
+        if (size >= 6 && packet[2] == GAP_SUBEVENT_LE_CONNECTION_COMPLETE) {
+            uint8_t status = gap_subevent_le_connection_complete_get_status(packet);
+            rt_kprintf("[BT] LE connection status=0x%02x\n", status);
+            if (status == 0) {
+                g_le_connect_diag[0]++;
+                s_gatt_con_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
+                s_gatt_connected = 1;
+                feathertalk_ipc_send_event(60);
+            }
+        }
         break;
     case HCI_EVENT_LE_META:
         if (size >= 6 && packet[3] == 0 &&
@@ -582,7 +651,10 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     case HCI_EVENT_DISCONNECTION_COMPLETE:
     {
         uint16_t disc_handle = (size > 4U) ? little_endian_read_16(packet, 3) : 0;
-        rt_kprintf("[BT] disconnect\n");
+        g_le_connect_diag[1]++;
+        g_le_connect_diag[2] = size > 5 ? packet[5] : 0xFF;
+        rt_kprintf("[BT] disconnect handle=0x%x reason=0x%02x\n",
+                   disc_handle, (unsigned)g_le_connect_diag[2]);
         if (disc_handle == s_classic_handle)
         {
             s_classic_connected = 0;
@@ -860,10 +932,8 @@ static int bt_bringup(void)
 
     /* M4b: A2DP Sink + AVRCP (SDP 记录/流端点/handler 注册, 纯静态登记,
      * 须在 hci_power_on 前完成) */
-    /* M8.1: LE SMP — Just Works + 绑定。sm_init 推迟到 BT_READY 边沿执行
-     * (见 packet_handler WORKING 分支): sm_init 后 SM 会在 WORKING 事件里
-     * 经 btstack_crypto 发 IR/ER 随机数, 与广播链竞争 HCI 命令队列,
-     * 0x2008 曾被 DISALLOWED 丢弃导致启动超时 (实测根因, 见 worklog M8.1) */
+    /* SMP is initialized below before power-on; extended advertising uses
+     * the GAP scheduler instead of competing direct legacy HCI commands. */
     if (bt_a2dp_sink_setup() != 0) {
         s_stack_initialized = RT_TRUE;
         s_stack_setup_failed = RT_TRUE;
@@ -880,6 +950,11 @@ static int bt_bringup(void)
     BT_CP(53);
 
     /* M2: att_server (GAP+DIS+FT Data) */
+    sm_init();
+    sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
+    sm_set_authentication_requirements(SM_AUTHREQ_BONDING | SM_AUTHREQ_SECURE_CONNECTION);
+    s_sm_event_reg.callback = ft_sm_handler;
+    sm_add_event_handler(&s_sm_event_reg);
     att_server_init(profile_data, att_read_callback, att_write_callback);
     att_server_register_packet_handler(packet_handler);
     /* M8.1: LE Audio Unicast Server (PACS/ASCS/CIS acceptor/ISO 收流) */
