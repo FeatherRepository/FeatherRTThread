@@ -469,6 +469,47 @@ static void ft_le_control_point(const rt_uint8_t *buffer, rt_uint16_t size)
     }
 }
 
+/* ---- VCS 音量控制服务器 (0x1844) ----
+ * TMAP Unicast Media Handler 角色必配 (手机端 LE Audio 分类/音量控制)。
+ * 音量变化写入 ring 控制块 volume_percent (M55 LC3 解码端应用),
+ * 并通知已订阅的 Volume State。 */
+static volatile rt_uint8_t s_volume_setting = 100U;   /* 0..100 */
+static volatile rt_uint8_t s_volume_mute    = 0U;     /* 0=unmuted */
+
+static void ft_le_volume_apply(void)
+{
+    /* VCS 音量 -> ring 音量档 (M55 解码输出衰减) */
+    FT_ALINK->volume_percent = s_volume_mute ? 0U : s_volume_setting;
+    FT_ALINK_DCACHE_CLEAN((uintptr_t)&FT_ALINK->volume_percent, 32);
+}
+
+static void ft_le_volume_notify(void)
+{
+    if (s_acl_handle == HCI_CON_HANDLE_INVALID) return;
+    rt_uint8_t val[2] = { (rt_uint8_t)s_volume_setting, (rt_uint8_t)s_volume_mute };
+    (void)att_server_notify(s_acl_handle,
+        ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_VOLUME_STATE_01_VALUE_HANDLE, val, 2);
+}
+
+/* VCP opcodes: 0=rel down, 1=rel up, 2=unmute rel, 3=absolute, 4=mute, 5=unmute */
+static void ft_le_vcp_control(const rt_uint8_t *p, rt_uint16_t len)
+{
+    if (len < 1U) return;
+    switch (p[0])
+    {
+    case 0x00U: if (s_volume_setting >  0U) s_volume_setting -=  1U; break;
+    case 0x01U: if (s_volume_setting < 100U) s_volume_setting +=  1U; break;
+    case 0x02U: s_volume_mute = 0U; break;
+    case 0x03U: if (len >= 2U) s_volume_setting = (p[1] > 100U) ? 100U : p[1]; break;
+    case 0x04U: s_volume_mute = 1U; break;
+    case 0x05U: s_volume_mute = 0U; break;
+    default: return;
+    }
+    ft_le_volume_apply();
+    ft_le_volume_notify();
+    rt_kprintf("[LEA] volume=%u mute=%u\n", s_volume_setting, s_volume_mute);
+}
+
 /* ---- ATT 路由 (bt_main.c 的 att 回调转发进来) ----
  * read 返回 0xFFFF = 非本模块句柄; write 返回 -2 = 非本模块句柄 */
 #define FT_LE_READ_UNHANDLED   0xFFFFU
@@ -496,12 +537,32 @@ uint16_t ft_le_audio_att_read(rt_uint16_t att_handle, rt_uint16_t offset,
             return 0U;
         }
     }
+    if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_VOLUME_STATE_01_VALUE_HANDLE)
+    {
+        if (buffer == RT_NULL)
+        {
+            return 2U;
+        }
+        if (offset < 2U && buffer_size >= (rt_uint16_t)(2U - offset))
+        {
+            buffer[0] = (rt_uint8_t)s_volume_setting;
+            buffer[1] = s_volume_mute;
+            return (uint16_t)(2U - offset);
+        }
+        return 0U;
+    }
     return FT_LE_READ_UNHANDLED;
 }
 
 int ft_le_audio_att_write(hci_con_handle_t con_handle, rt_uint16_t att_handle,
                           const rt_uint8_t *buffer, rt_uint16_t buffer_size)
 {
+    if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_VOLUME_CONTROL_POINT_01_VALUE_HANDLE)
+    {
+        s_acl_handle = con_handle;
+        ft_le_vcp_control(buffer, buffer_size);
+        return 0;
+    }
     if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_ASE_CONTROL_POINT_01_VALUE_HANDLE)
     {
         s_acl_handle = con_handle;   /* 控制面来自哪个 ACL, 通知就回哪条 */
