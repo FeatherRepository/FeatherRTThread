@@ -45,6 +45,10 @@
  * SM 在配对响应前死等 ECC 密钥 -> 30s 超时 (实测根因, 见 worklog M8.1)。
  * micro-ecc 在树 (3rd-party/micro-ecc), uECC.c 由 SConscript 编入 */
 #define ENABLE_MICRO_ECC_P256
+/* M8.1: 启用 SC。Windows 11 对带 ASCS/PACS 服务的设备配对要求 SC——
+ * 只回 legacy 响应时 Windows 收到 Pairing Response 即放弃 (实测:
+ * SM 等不到 Mconfirm, 30s 超时)。SC 需 ECC, 依赖上面的 micro-ecc */
+#define ENABLE_LE_SECURE_CONNECTIONS
 
 /* logging off for P0 skeleton (avoids hci_dump dependency) */
 #define ENABLE_PRINTF_HEXDUMP
