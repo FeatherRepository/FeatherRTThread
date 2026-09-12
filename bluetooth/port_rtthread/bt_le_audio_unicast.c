@@ -220,7 +220,11 @@ static void ft_le_ase_notify(ft_ase_t *ase, uint8_t err_code)
 
 static void ft_le_ase_reset(ft_ase_t *ase)
 {
+    /* 关键: 保留 ase_id —— memset 会清零 ID, 清零后的 ASE 永远无法再被
+     * 手机匹配 (INVALID_ASE_ID), 一次断链后整台设备即不可用 (实测) */
+    rt_uint8_t keep_id = ase->ase_id;
     memset(ase, 0, sizeof(*ase));
+    ase->ase_id = keep_id;
     ase->cis_handle = HCI_CON_HANDLE_INVALID;
     ase->state = FT_ASE_IDLE;
 }
@@ -550,9 +554,14 @@ static void ft_le_iso_handler(rt_uint8_t packet_type, rt_uint16_t channel,
     {
         if (s_ase[i].cis_handle == con_handle) ase = &s_ase[i];
     }
-    if (ase == RT_NULL || s_streaming == 0U)
+    if (ase == RT_NULL)
     {
         return;
+    }
+    /* 自愈: 部分 stack 在 Enable 完成前即开始投流 —— 首包数据到达即开 ring */
+    if (s_streaming == 0U)
+    {
+        ft_le_ring_start();
     }
 
     rt_uint16_t total = (rt_uint16_t)(1U + sdu_len);
