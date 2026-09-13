@@ -128,7 +128,11 @@ static void ft_alink_thread_entry(void *parameter)
         {
             continue;
         }
-        /* M33 复位重建 ring (wr 归零) -> 重新同步 */
+        /* M33 复位重建 ring (wr 归零) -> 重新同步。
+         * wr 在 M33 侧写后 clean, 读前必须 invalidate, 否则读到旧 wr
+         * 漏判/误判 resync (wr/rd 各占独立 32B line) */
+        FT_ALINK_DCACHE_INVALID((rt_uint32_t)&FT_ALINK->wr, 32);
+        FT_ALINK_DCACHE_INVALID((rt_uint32_t)&FT_ALINK->rd, 32);
         if (FT_ALINK->wr < FT_ALINK->rd)
         {
             FT_ALINK->rd = FT_ALINK->wr;
@@ -140,11 +144,26 @@ static void ft_alink_thread_entry(void *parameter)
             s_first_wake_tick = rt_tick_get();
         }
         /* A0-2/M4b/M8.1: 流格式代际变化 -> fmt_rate 非 0 开流 (按 flags 分派
-         * SBC / LE Audio LC3 解码), fmt_rate 为 0 则流结束 (关 sound0 释放) */
+         * SBC / LE Audio LC3 解码), fmt_rate 为 0 则流结束 (关 sound0 释放)。
+         * 有旧流必须先 end 再判新流: M33 重启把 fmt_gen 从非 0 清零时,
+         * 旧逻辑两个分支都不命中 -> stream_end 永不调用, 解码器内存
+         * 泄漏 + claim 悬挂 */
         FT_ALINK_DCACHE_INVALID(FT_ALINK_BASE, 32);
         if (FT_ALINK->fmt_gen != s_last_fmt_gen)
         {
+            rt_bool_t had_stream = (s_last_fmt_gen != 0U);
             s_last_fmt_gen = FT_ALINK->fmt_gen;
+            if (had_stream)
+            {
+                if (s_le_mode)
+                {
+                    ft_lc3_stream_end();
+                }
+                else
+                {
+                    ft_sbc_stream_end();
+                }
+            }
             if ((s_last_fmt_gen != 0U) && (FT_ALINK->fmt_rate != 0U))
             {
                 s_le_mode = (FT_ALINK->flags & FT_ALINK_FLAGS_MODE_LE_AUDIO) ? RT_TRUE : RT_FALSE;
@@ -155,17 +174,6 @@ static void ft_alink_thread_entry(void *parameter)
                 else
                 {
                     ft_sbc_stream_begin();
-                }
-            }
-            else if (s_last_fmt_gen != 0U)
-            {
-                if (s_le_mode)
-                {
-                    ft_lc3_stream_end();
-                }
-                else
-                {
-                    ft_sbc_stream_end();
                 }
             }
         }

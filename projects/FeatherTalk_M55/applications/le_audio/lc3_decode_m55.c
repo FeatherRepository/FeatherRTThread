@@ -43,6 +43,10 @@
 #define FT_STARVE_HOLDOFF_MS    50U
 #define FT_REPREBUF_BYTES       3072U
 
+/* 复用路径重配格式的退避重试上限 (UAC 侧范式, 几十轮 x 10ms) */
+#define FT_LC3_FMT_RETRY_MAX    30U
+#define FT_LC3_FMT_RETRY_MS     10U
+
 /* liblc3 解码器内存 (2 声道): 走 rt_malloc (lc3_bench 同款手法)。
  * m55_data_INTERNAL (256KB) 本就近满, 静态 .bss 会直接链接溢出
  * (实测 2x16KB 静态数组 -> overflow 13828B); RT-Thread 堆在系统区。 */
@@ -185,6 +189,13 @@ void ft_lc3_stream_begin(void)
 {
     unsigned mem_sz = (lc3_decoder_size(FT_LC3_FRAME_US, FT_LC3_RATE_HZ) + 3U) & ~3U;
 
+    /* 换代双保险: 上一场内存未释放 (如 M33 重启丢 end) 先回收再申请,
+     * 否则解码器内存泄漏 */
+    if (s_dec_mem != RT_NULL)
+    {
+        rt_free(s_dec_mem);
+        s_dec_mem = RT_NULL;
+    }
     s_dec_mem = (rt_uint8_t *)rt_malloc(mem_sz * 2U);
     if (s_dec_mem == RT_NULL)
     {
@@ -229,27 +240,89 @@ rt_free(s_dec_mem);
     FT_ALINK_DCACHE_INVALID(FT_ALINK_BASE, 32);
 
     /* 设备保活: 首场 claim+open, 之后场次直接复用 (close/open 循环在
-     * 框架 _aduio_replay_stop 的 completion 等待上有快速切换竞态) */
+     * 框架 _aduio_replay_stop 的 completion 等待上有快速切换竞态)。
+     * 流结束只 release claim, 设备保持 open。 */
     s_claim_ok = (ft_audio_claim_output(FT_AUDIO_OUTPUT_OWNER_BT_LE_AUDIO) == RT_EOK);
     if (!s_sound_open)
     {
         if (s_claim_ok)
         {
-            if (ft_audio_set_output_format(48000U, 16U, 2U) == RT_EOK)
+            int fmt_result = ft_audio_set_output_format(48000U, 16U, 2U);
+            if (fmt_result == RT_EOK)
             {
                 s_sound_dev = rt_device_find("sound0");
-                if ((s_sound_dev != RT_NULL) &&
-                    (rt_device_open(s_sound_dev, RT_DEVICE_OFLAG_WRONLY) == RT_EOK))
+                if (s_sound_dev != RT_NULL)
                 {
-                    s_sound_open = RT_TRUE;
+                    int open_result =
+                        rt_device_open(s_sound_dev, RT_DEVICE_OFLAG_WRONLY);
+                    if (open_result == RT_EOK)
+                    {
+                        s_sound_open = RT_TRUE;
+                    }
+                    else
+                    {
+                        rt_kprintf("[LC3] sound0 open failed (%d)\n", open_result);
+                    }
                 }
+                else
+                {
+                    rt_kprintf("[LC3] sound0 not found\n");
+                }
+            }
+            else
+            {
+                rt_kprintf("[LC3] set output format failed (%d)\n", fmt_result);
             }
         }
     }
     else
     {
-        /* 复用: 只重配格式 (open 状态下 configure 是安全的) */
-        (void)ft_audio_set_output_format(48000U, 16U, 2U);
+        /* 复用: 只重配格式 (open 状态下 configure 是安全的)。
+         * 返回值必须检查: 播放零帧循环期驱动几乎恒 -EBUSY, 丢弃返回值
+         * 会让格式漂移静默生效 (LC3 48k 数据进错速率管线 -> 变速/无声)。
+         * 按 UAC 侧范式 (feathertalk_usb_uac.c): 每轮先以 ft_audio_get_status
+         * 对账驱动实况, 已匹配直接成功; 失配/EBUSY 退避重试, 有界。 */
+        int fmt_result = -RT_EBUSY;
+        for (rt_uint32_t retry = 0U; retry < FT_LC3_FMT_RETRY_MAX; retry++)
+        {
+            ft_audio_status_t st;
+            if (retry > 0U)
+            {
+                rt_thread_mdelay(FT_LC3_FMT_RETRY_MS);
+            }
+            if ((ft_audio_get_status(&st) == RT_EOK) && st.output_ready &&
+                (st.output_sample_rate == 48000U) &&
+                (st.output_sample_bits == 16U) &&
+                (st.output_channels == 2U))
+            {
+                fmt_result = RT_EOK;
+                break;
+            }
+            fmt_result = ft_audio_set_output_format(48000U, 16U, 2U);
+            if (fmt_result == RT_EOK)
+            {
+                break;
+            }
+        }
+        if (fmt_result != RT_EOK)
+        {
+            /* 解码了却不出声的状态不可接受: 显式中止本场 */
+            rt_kprintf("[LC3] set output format failed (%d) after %lu retries, "
+                       "abort stream #%lu\n",
+                       fmt_result, (unsigned long)FT_LC3_FMT_RETRY_MAX,
+                       (unsigned long)s_stat_streams);
+            if (s_dec_mem != RT_NULL)
+            {
+                rt_free(s_dec_mem);
+                s_dec_mem = RT_NULL;
+            }
+            if (s_claim_ok)
+            {
+                ft_audio_release_output(FT_AUDIO_OUTPUT_OWNER_BT_LE_AUDIO);
+                s_claim_ok = RT_FALSE;
+            }
+            return;
+        }
     }
     s_cur_volume = 0xFFU;
 
@@ -279,15 +352,21 @@ rt_free(s_dec_mem);
                s_sound_open ? "open" : (s_claim_ok ? "open-failed" : "busy"));
 }
 
-/* 流结束 (fmt_rate=0 的换代): 冲刷尾块, close + release */
+/* 流结束 (fmt_rate=0 的换代): 尾块补零整块冲刷, 设备保活, release claim */
 void ft_lc3_stream_end(void)
 {
     if (s_dec_ready)
     {
         if (s_sound_open && (s_out_fill > 0U))
         {
-            rt_device_write(s_sound_dev, 0, s_out_buf, s_out_fill * 2U);
-            s_stat_out_bytes += s_out_fill * 2U;
+            /* 保活后不 close, 框架 partial 块 flush (write_index 尾块入队)
+             * 只在 close 时执行 -> 尾块必须在此补零成整块再写, 否则尾音
+             * 丢 (~21ms) 且残留留 replay->write_data 污染下场首块 */
+            memset(&s_out_buf[s_out_fill], 0,
+                   (FT_OUT_BLOCK_SAMPLES - s_out_fill) * 2U);
+            rt_device_write(s_sound_dev, 0, s_out_buf, FT_OUT_BLOCK_BYTES);
+            s_stat_out_blocks++;
+            s_stat_out_bytes += FT_OUT_BLOCK_BYTES;
             s_out_fill = 0U;
         }
         rt_kprintf("[LC3] stream end: frames=%lu plc=%lu out=%lu B (blocks=%lu)\n",
@@ -307,10 +386,13 @@ void ft_lc3_stream_end(void)
     /* sound0 保持 open 不 close: close 走框架 _aduio_replay_stop ->
      * completion 等待, 与播放任务的 mp 池/data queue/tx_sem 存在快速
      * stop/start 竞态 (实测挂死消费线程, 后续场次全无声)。改为保活,
-     * 下场 stream_begin 直接复用已打开的设备。 */
-    if (s_sound_open)
+     * 下场 stream_begin 直接复用已打开的设备。但 owner 必须释放,
+     * 否则 LC3 播过一次后 A2DP/本地/UAC 的 claim 永久 -EBUSY 无声。
+     * 尾块已整块写净, 释放时设备上无未完成播放事务。 */
+    if (s_claim_ok)
     {
-        /* 静音: 用音量档 0 短暂压住残留, 不动设备状态 */
+        ft_audio_release_output(FT_AUDIO_OUTPUT_OWNER_BT_LE_AUDIO);
+        s_claim_ok = RT_FALSE;
     }
 }
 
