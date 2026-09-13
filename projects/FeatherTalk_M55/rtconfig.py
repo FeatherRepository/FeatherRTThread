@@ -29,6 +29,11 @@ if os.getenv('RTT_EXEC_PATH'):
     EXEC_PATH = os.getenv('RTT_EXEC_PATH')
 
 BUILD = 'debug'
+# Keep debug symbols with optimized data paths. An explicit O0 build remains
+# available for source-level debugging and throughput A/B comparisons.
+FEATHERTALK_OPT_LEVEL = os.getenv('FEATHERTALK_OPT_LEVEL', '3')
+if FEATHERTALK_OPT_LEVEL not in ('0', '2', '3'):
+    raise ValueError('FEATHERTALK_OPT_LEVEL must be 0, 2 or 3')
 
 if PLATFORM == 'gcc':
     # toolchains
@@ -54,7 +59,9 @@ if PLATFORM == 'gcc':
     if BUILD == 'debug':
         # CFLAGS += ' -O3 -gdwarf-2 -g'
         # AFLAGS += ' -gdwarf-2'
-        CFLAGS += ' -g -O0'
+        # GCC 13 M55 auto-vectorization can emit out-of-range coprocessor
+        # offsets in DSP code; scalar optimization avoids that known failure.
+        CFLAGS += ' -g -O' + FEATHERTALK_OPT_LEVEL + ' -fno-tree-vectorize -fno-strict-aliasing'
         AFLAGS += ' -g'
     else:
         CFLAGS += ' -O2'

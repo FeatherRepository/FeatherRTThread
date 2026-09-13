@@ -12,6 +12,29 @@
 #include "feathertalk_ui_gallery.h"
 #include "feathertalk_ui_internal.h"
 #include "lv_image_decoder_private.h"
+#include "lv_draw_buf_private.h"
+
+extern struct rt_memheap *drv_hyperam_get_memheap(void);
+static lv_draw_buf_handlers_t s_gallery_draw_handlers;
+static bool s_gallery_draw_handlers_ready;
+static void *gallery_pixel_alloc(size_t size, lv_color_format_t format)
+{
+    (void)format;
+    if (size > SIZE_MAX - (LV_DRAW_BUF_ALIGN - 1U)) return RT_NULL;
+    size += LV_DRAW_BUF_ALIGN - 1U;
+    /* Keep full-screen image pixels out of the network/RTOS internal heap. */
+    if (size >= 65536U) {
+        struct rt_memheap *heap = drv_hyperam_get_memheap();
+        if (heap != RT_NULL && heap->pool_size != 0U)
+            return rt_memheap_alloc(heap, size);
+    }
+    return rt_malloc(size);
+}
+static void gallery_pixel_free(void *pixels)
+{
+    /* RT-Thread's memheap allocator dispatches to the owning pool. */
+    rt_free(pixels);
+}
 
 #define FT_GALLERY_MAX_ENTRIES        64U
 #define FT_GALLERY_MONITOR_PERIOD_MS 500U
@@ -1473,7 +1496,13 @@ bool ft_gallery_render_image_path(const char *native_path,
     if (output_width == 0U) output_width = 1U;
     if (output_height == 0U) output_height = 1U;
 
-    result.draw_buf = lv_draw_buf_create(output_width, output_height,
+    if (!s_gallery_draw_handlers_ready) {
+        s_gallery_draw_handlers = *lv_draw_buf_get_handlers();
+        s_gallery_draw_handlers.buf_malloc_cb = gallery_pixel_alloc;
+        s_gallery_draw_handlers.buf_free_cb = gallery_pixel_free;
+        s_gallery_draw_handlers_ready = true;
+    }
+    result.draw_buf = lv_draw_buf_create_ex(&s_gallery_draw_handlers, output_width, output_height,
                                          LV_COLOR_FORMAT_RGB565,
                                          LV_STRIDE_AUTO);
     if (result.draw_buf == RT_NULL) goto finish;

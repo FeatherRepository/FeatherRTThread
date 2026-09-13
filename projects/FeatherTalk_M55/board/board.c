@@ -32,6 +32,11 @@ void cy_bsp_all_init(void)
 void _start(void)
 {
     extern int entry(void);
+    extern void cy_cache_update(void);
+    /* CMSIS GCC has now copied the RAM code/data sections. Reset_Handler
+     * enabled caches before that copy; publish instructions before entry()
+     * invokes any SoCMEM initialization routine or linker veneer. */
+    cy_cache_update();
     entry();
     while (1);
     __builtin_unreachable();

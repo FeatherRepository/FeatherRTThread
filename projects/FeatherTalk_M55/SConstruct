@@ -29,6 +29,7 @@ env = Environment(tools = ['mingw'],
     CXX = rtconfig.CXX, CXXFLAGS = rtconfig.CXXFLAGS,
     LINK = rtconfig.LINK, LINKFLAGS = rtconfig.LFLAGS)
 env.PrependENVPath('PATH', rtconfig.EXEC_PATH)
+env.Depends(TARGET, File('board/linker_scripts/link.ld'))
 
 # FeatherTalk enables file-backed Gallery decoders without changing the
 # SDK-wide LVGL configuration used by the native demos.

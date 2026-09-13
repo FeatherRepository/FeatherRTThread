@@ -587,6 +587,10 @@ static cy_en_sd_host_status_t _mtb_hal_sdxx_pollcmdcomplete(_mtb_hal_sdxx_t* sdx
 * return If the sdxx pointer is NULL, returns error.
 *
 *******************************************************************************/
+#ifdef FEATHERTALK_USING_WIFI
+/* Diagnostic counters only: no per-packet logging or timing changes. */
+volatile uint32_t ft_sdhc_poll_calls, ft_sdhc_poll_delays, ft_sdhc_sema_calls;
+#endif
 static cy_en_sd_host_status_t _mtb_hal_sdxx_polltransfercomplete(_mtb_hal_sdxx_t* sdxx,
                                                                  const uint16_t delay)
 {
@@ -610,6 +614,9 @@ static cy_en_sd_host_status_t _mtb_hal_sdxx_polltransfercomplete(_mtb_hal_sdxx_t
             result = CY_SD_HOST_SUCCESS;
             break;
         }
+#ifdef FEATHERTALK_USING_WIFI
+        ++ft_sdhc_poll_delays;
+#endif
         mtb_hal_system_delay_us(delay);
     }
 
@@ -675,6 +682,9 @@ static cy_rslt_t _mtb_hal_sdxx_waitfor_transfer_complete(_mtb_hal_sdxx_t* sdxx)
     bool in_isr = (SCB->ICSR & SCB_ICSR_VECTACTIVE_Msk) != 0;
     if ((!in_isr) && _mtb_hal_sdxx_is_smfr_ready_for_get(sdxx))
     {
+#ifdef FEATHERTALK_USING_WIFI
+        ++ft_sdhc_sema_calls;
+#endif
         result =
             cy_rtos_get_semaphore(&(_mtb_hal_sdxx_semaphore_xfer_done[_mtb_hal_sdxx_get_block_num(
                                                                           sdxx)]), 500, in_isr);
@@ -687,6 +697,9 @@ static cy_rslt_t _mtb_hal_sdxx_waitfor_transfer_complete(_mtb_hal_sdxx_t* sdxx)
     else
     {
     #endif // if defined(CY_RTOS_AWARE) || defined(COMPONENT_RTOS_AWARE)
+#ifdef FEATHERTALK_USING_WIFI
+    ++ft_sdhc_poll_calls;
+#endif
     result = (cy_rslt_t)_mtb_hal_sdxx_polltransfercomplete(sdxx, _MTB_HAL_SDHC_RW_TIMEOUT_US);
     #if defined(CY_RTOS_AWARE) || defined(COMPONENT_RTOS_AWARE)
 }

@@ -164,7 +164,7 @@ SECTIONS
         /* Read only code (constants) */
         *(.rodata .rodata.* .constdata .constdata.* .conststring .conststring.*)
         /* Exclude certain files from this section as they will be placed in RAM */
-        *(EXCLUDE_FILE(*cy_syslib.* *cy_syslib_ext.* *cy_smif.* *cy_smif_memnum.* *cy_smif_memslot.* *cy_smif_sfdp.* *cy_smif_hb_flash.* *mtb_hal_memoryspi.* *mtb_serial_memory.* *freertos/Source*.* *cy_clib_support*.* *cy_mutex_pool*.* *cy_time.* *cyabs_*.* *cy_worker_thread.* *cmsis*.* *vg_lite.o *vg_lite_path.o *vg_lite_matrix.o *lv_draw_vg_lite_*.o *lv_vg_lite_*.o *lv_refr.o *lv_draw.o *lv_draw_buf.o *lv_draw_rect.o *lv_draw_image.o *lv_draw_label.o *lv_image_decoder.o *lv_obj.o *lv_obj_draw.o *lv_obj_event.o *lv_obj_pos.o *lv_obj_style.o *lv_obj_tree.o *lv_display.o *lv_event.o *lv_area.o *lv_ll.o *lv_font.o *lv_font_fmt_txt.o *lv_text.o *lv_string_rtthread.o) .text*)
+        *(EXCLUDE_FILE(*kernel/src/*.o *whd*.o *cyhal_sdio.o *drv_sdio.o *mtb_hal_sdhc.o *cy_sd_host.o *lwip*/*.o *iperf.o *cy_syslib.* *cy_syslib_ext.* *cy_smif.* *cy_smif_memnum.* *cy_smif_memslot.* *cy_smif_sfdp.* *cy_smif_hb_flash.* *mtb_hal_memoryspi.* *mtb_serial_memory.* *freertos/Source*.* *cy_clib_support*.* *cy_mutex_pool*.* *cy_time.* *cyabs_*.* *cy_worker_thread.* *cmsis*.* *vg_lite.o *vg_lite_path.o *vg_lite_matrix.o *lv_draw_vg_lite_*.o *lv_vg_lite_*.o *lv_refr.o *lv_draw.o *lv_draw_buf.o *lv_draw_rect.o *lv_draw_image.o *lv_draw_label.o *lv_image_decoder.o *lv_obj.o *lv_obj_draw.o *lv_obj_event.o *lv_obj_pos.o *lv_obj_style.o *lv_obj_tree.o *lv_display.o *lv_event.o *lv_area.o *lv_ll.o *lv_font.o *lv_font_fmt_txt.o *lv_text.o *lv_string_rtthread.o) .text*)
 
         . = ALIGN(4);
         /* section information for utest */
@@ -288,6 +288,8 @@ SECTIONS
         KEEP(*(.cy_sram_code))
         KEEP(*(.cy_ramfunc))
         KEEP(*(.text.cy_os_common))
+        /* SDIO completion and TCP buffers repeatedly enter the RTOS. */
+        *kernel/src/*.o(.text*)
         *cy_syslib_ext.*(.text*)
         *cy_syslib.*(.text*)
         *cy_smif.*(.text*)
@@ -361,6 +363,14 @@ SECTIONS
     {
         . = ALIGN(4);
         KEEP(*(.cy_socmem_code))
+        /* Wi-Fi data path: same placement strategy as the official tester. */
+        *whd*.o(.text*)
+        *cyhal_sdio.o(.text*)
+        *drv_sdio.o(.text*)
+        *mtb_hal_sdhc.o(.text*)
+        *cy_sd_host.o(.text*)
+        *lwip*/*.o(.text*)
+        *iperf.o(.text*)
 
         . = ALIGN(4);
     }  > m55_code_secondary AT > m55_nvm_sel

@@ -25,7 +25,11 @@ def main():
     parser.add_argument("--board", required=True, type=ipaddress.IPv4Address)
     parser.add_argument("--seconds", type=int, choices=range(6, 31), default=12)
     parser.add_argument("--port", type=int, default=5001)
+    parser.add_argument("--bind", type=ipaddress.IPv4Address, help="Host wired IPv4 source address")
+    parser.add_argument("--max-mib", type=int, choices=range(1,513), default=32)
     parser.add_argument("--ui-bench", action="store_true")
+    parser.add_argument("--sdk", action="store_true", help="Standalone SDK demo (no product shell)")
+    parser.add_argument("--io-timeout", type=int, choices=(3, 10, 20), default=3)
     parser.add_argument("--debug-port", type=int)
     parser.add_argument("--log", type=Path, default=ROOT / "tmp/wifi-tcp.jsonl")
     args = parser.parse_args()
@@ -54,8 +58,10 @@ def main():
         debug = None
         started = False
         try:
-            state = command("ft_wifi")
-            if "busy=0 state=6 error=0" not in state or "ip=" + str(args.board) + " " not in state:
+            state = command("ifconfig" if args.sdk else "ft_wifi")
+            valid = str(args.board) in state if args.sdk else (
+                "busy=0 state=6 error=0" in state and "ip=" + str(args.board) + " " in state)
+            if not valid:
                 raise RuntimeError("Board must already be connected with the specified DHCP address")
             if args.debug_port:
                 debug = isolation.DebugReader(args.debug_port, "cat1d.cm33",
@@ -68,13 +74,22 @@ def main():
             started = True
             payload = bytes(range(256)) * 128
             count = 0
-            with socket.create_connection((str(args.board), args.port), timeout=5) as sock:
-                sock.settimeout(3)
+            with socket.create_connection((str(args.board), args.port), timeout=5,
+                    source_address=(str(args.bind), 0) if args.bind else None) as sock:
+                sock.settimeout(args.io_timeout)
                 if args.ui_bench:
                     port.write(b"feather_ui_bench\r")
                 begin = time.monotonic()
-                while time.monotonic() - begin < args.seconds and count < 32 * 1024 * 1024:
-                    sock.sendall(payload)
+                while time.monotonic() - begin < args.seconds and count < args.max_mib * 1024 * 1024:
+                    try:
+                        sock.sendall(payload)
+                    except socket.timeout:
+                        record("send-timeout", {"completed_bytes": count,
+                            "elapsed": round(time.monotonic() - begin, 3),
+                            "io_timeout": args.io_timeout})
+                        if not args.sdk:
+                            command("ft_wifi_tcp", .5)
+                        raise
                     count += len(payload)
                     if port.in_waiting:
                         read(.001)
@@ -87,10 +102,11 @@ def main():
                                          "mbps": round(count * 8 / elapsed / 1e6, 3)})
             command("iperf --stop", 4)
             started = False
-            final = command("ft_wifi")
-            if "busy=0 state=6 error=0" not in final:
+            final = command("ifconfig" if args.sdk else "ft_wifi")
+            if (str(args.board) not in final if args.sdk else "busy=0 state=6 error=0" not in final):
                 raise RuntimeError("Wi-Fi no longer connected after TCP transfer")
-            command("feather_ui_status")
+            if not args.sdk:
+                command("feather_ui_status")
             if debug:
                 current = debug.snapshot()
                 record("bt-after", current)

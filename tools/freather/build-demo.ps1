@@ -113,6 +113,7 @@ finally {
 
 $artifactCandidates = @(
     (Join-Path $projectPath 'build\rtthread.hex'),
+    (Join-Path $projectPath 'Debug\rtthread.hex'),
     (Join-Path $projectPath 'rtthread.hex')
 )
 $artifact = $artifactCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
