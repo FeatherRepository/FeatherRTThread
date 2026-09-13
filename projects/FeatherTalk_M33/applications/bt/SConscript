@@ -47,7 +47,8 @@ src = [os.path.join(bt_root, f) for f in
         'bt_a2dp_sink.c',    # M4b: A2DP sink + AVRCP + 媒体包 -> 跨核 ring
         'bt_a2dp_source.c',  # M5: A2DP source + 反向 ring -> 蓝牙耳机
         'bt_bond_store.c',   # M3': link key 持久化 (内存表+共享块, M55 托管文件)
-        'bt_le_audio_unicast.c')]  # M8.1: BAP Unicast Server (ASCS/CIS/ISO -> ring)
+        'bt_le_audio_unicast.c',   # M8.1: BAP Unicast Server (ASCS/CIS/ISO -> ring)
+        'bt_le_audio_broadcast.c')]  # M8.2: Auracast 广播源 (BIG/BIS/BASE)
 src += [os.path.join(btstack_root, 'src', f) for f in
         ('hci.c', 'hci_transport_h4.c', 'hci_cmd.c', 'hci_dump.c',
          'btstack_linked_list.c', 'btstack_memory.c', 'btstack_memory_pool.c',
@@ -75,6 +76,11 @@ src += [os.path.join(btstack_root, 'src', f) for f in
          'classic/avdtp_initiator.c', 'classic/sdp_client.c',
          'classic/device_id_server.c',
          'btstack_tlv.c', 'btstack_tlv_none.c')]
+# M8.2: BASE builder (Auracast 周期广播) + liblc3 (M33 端编码)
+src += [os.path.join(btstack_root, 'src', 'le-audio', 'le_audio_base_builder.c')]
+src += [os.path.join(btstack_root, '3rd-party', 'lc3-google', 'src', f) for f in
+        ('attdet.c', 'bwdet.c', 'bits.c', 'energy.c', 'lc3.c', 'ltpf.c',
+         'mdct.c', 'plc.c', 'sns.c', 'spec.c', 'tables.c', 'tns.c')]
 # A0-4: bluedroid SBC 编码器底层实现 (A2DP 源方向的编码路径)
 src += [os.path.join(btstack_root, '3rd-party', 'bluedroid', 'encoder', 'srce', f) for f in
         ('sbc_analysis.c', 'sbc_dct.c', 'sbc_dct_coeffs.c',
@@ -99,6 +105,8 @@ path = [btstack_root + '/src',
         btstack_root + '/3rd-party/bluedroid/encoder/include',   # A0-4: sbc_encoder.h
         btstack_root + '/3rd-party/bluedroid/decoder/include',   # A0-4: oi_codec_sbc.h (btstack_sbc_bluedroid.h)
         btstack_root + '/3rd-party/micro-ecc',                   # M8.1: uECC.h (ENABLE_MICRO_ECC_P256)
+        btstack_root + '/3rd-party/lc3-google/include',          # M8.2: lc3.h (M33 编码)
+        btstack_root + '/src/le-audio',                          # M8.2: le_audio_base_builder.h
         bt_root,
         bsp_gen,
         os.path.normpath(os.path.join(cwd, '..')),                       # applications/ (bt_service_api.h, ipc/)

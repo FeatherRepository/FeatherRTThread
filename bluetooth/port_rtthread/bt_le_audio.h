@@ -17,3 +17,8 @@ int ft_le_audio_att_write(hci_con_handle_t con_handle, rt_uint16_t att_handle,
                           const rt_uint8_t *buffer, rt_uint16_t buffer_size);
 
 #endif /* FT_BT_LE_AUDIO_H */
+
+/* M8.2: Auracast 广播源 (bt_le_audio_broadcast.c) */
+void ft_le_audio_broadcast_init(void);
+int  ft_le_audio_broadcast_start(void);
+int  ft_le_audio_broadcast_stop(void);

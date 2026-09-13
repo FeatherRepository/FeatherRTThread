@@ -1051,6 +1051,8 @@ static int bt_bringup(void)
     att_server_register_packet_handler(packet_handler);
     /* M8.1: LE Audio Unicast Server (PACS/ASCS/CIS acceptor/ISO 收流) */
     ft_le_audio_init();
+    /* M8.2: Auracast 广播源 (msh bt_bcast_start 手动启动) */
+    ft_le_audio_broadcast_init();
     s_stack_initialized = RT_TRUE;
     g_bt_coex_diag.stack_inits++;
     }

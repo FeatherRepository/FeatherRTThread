@@ -53,6 +53,8 @@
  * 只回 legacy 响应时 Windows 收到 Pairing Response 即放弃 (实测:
  * SM 等不到 Mconfirm, 30s 超时)。SC 需 ECC, 依赖上面的 micro-ecc */
 #define ENABLE_LE_SECURE_CONNECTIONS
+/* M8.2: 周期广播 (Auracast BASE 经 periodic advertising 下发) */
+#define ENABLE_LE_PERIODIC_ADVERTISING
 
 /* logging off for P0 skeleton (avoids hci_dump dependency) */
 #define ENABLE_PRINTF_HEXDUMP
