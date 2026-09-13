@@ -362,6 +362,32 @@ static int bt_off(int argc, char **argv)
 }
 MSH_CMD_EXPORT(bt_off, Ask M33 to stop the Bluetooth host);
 
+static int bt_bcast_start(int argc, char **argv)
+{
+    int rc;
+
+    (void)argc;
+    (void)argv;
+    rc = feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_LE_ROLE, 2U);
+    rt_kprintf("bt_bcast_start: quick command %s (check bt_status / serial logs)\n",
+               (rc == RT_EOK) ? "queued" : "rejected (busy)");
+    return 0;
+}
+MSH_CMD_EXPORT(bt_bcast_start, Ask M33 to start Auracast broadcast source (M8.2));
+
+static int bt_bcast_stop(int argc, char **argv)
+{
+    int rc;
+
+    (void)argc;
+    (void)argv;
+    rc = feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_LE_ROLE, 0U);
+    rt_kprintf("bt_bcast_stop: quick command %s\n",
+               (rc == RT_EOK) ? "queued" : "rejected (busy)");
+    return 0;
+}
+MSH_CMD_EXPORT(bt_bcast_stop, Ask M33 to stop Auracast broadcast source);
+
 int feathertalk_ipc_start(void)
 {
     rt_err_t result;

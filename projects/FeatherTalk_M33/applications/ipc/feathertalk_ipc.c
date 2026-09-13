@@ -338,7 +338,15 @@ static void feathertalk_ipc_receive(void)
             }
             else if (command.control == FEATHERTALK_QUICK_BT_LE_ROLE)
             {
-                g_quick_last_result = FEATHERTALK_QUICK_RESULT_UNAVAILABLE;  /* M8 预留 */
+                /* M8: LE Audio 角色 (0=OFF 1=SERVER 预留 2=BROADCAST) */
+                extern int ft_le_audio_broadcast_start(void);
+                extern int ft_le_audio_broadcast_stop(void);
+                int rc = (command.value == 2U) ? ft_le_audio_broadcast_start() :
+                         (command.value == 0U) ? ft_le_audio_broadcast_stop() :
+                         -RT_EINVAL;
+                g_quick_last_result = rc == -RT_EINVAL ? FEATHERTALK_QUICK_RESULT_INVALID :
+                    rc != RT_EOK ? FEATHERTALK_QUICK_RESULT_FAILED :
+                    FEATHERTALK_QUICK_RESULT_OK;
             }
             else
 #endif

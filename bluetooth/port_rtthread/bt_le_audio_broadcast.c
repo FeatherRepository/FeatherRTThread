@@ -39,6 +39,7 @@
 #define FT_BCST_OCTETS          120U                    /* LC3 帧字节数 */
 #define FT_BCST_NUM_BIS         2U                      /* FL + FR */
 #define FT_BCST_SDU_INTERVAL_US 10000U
+#define FT_BCST_PD_US           40000U                  /* Presentation Delay, 同官方 demo */
 #define FT_BCST_MAX_LATENCY_MS  31U
 #define FT_BCST_RTN             2U
 #define FT_BCST_PHY             2U                      /* 2M */
@@ -126,17 +127,18 @@ static void ft_bcst_send_frame(rt_uint8_t bis_index)
     s_stat_iso_sent++;
 }
 
-/* ---- BASE 构造: 1 subgroup (LC3), 2 BIS (FL/FR) ---- */
+/* ---- BASE 构造: 1 subgroup (LC3), 2 BIS (FL/FR) ----
+ * 对齐官方 demo: subgroup 级 = freq/duration/octets (BAP Table 3.2 必选),
+ * 位置信息只在 BIS 级; metadata = Streaming Audio Contexts (tag 0x02) = MEDIA */
 static void ft_bcst_build_base(void)
 {
-    /* subgroup 级 codec configuration (LTV): 48k + 10ms + FL|FR 位置 */
     static const uint8_t subgroup_cfg[] = {
         0x03, 0x01, 0x80, 0x02,                 /* Sampling freq: 48000 */
         0x02, 0x02, 0x02,                       /* Frame duration: 10ms */
-        0x05, 0x04, 0x03, 0x00, 0x00, 0x00,     /* Audio locations: FL|FR */
+        0x03, 0x04, 0x78, 0x00,                 /* Octets per codec frame: 120 */
     };
     static const uint8_t metadata[] = {
-        0x02, 0x01, 0x00,                       /* Preferred context: unspecified */
+        0x03, 0x02, 0x04, 0x00,                 /* Streaming contexts: MEDIA */
     };
     /* BIS 级 codec configuration (LTV): 单声道各一侧 */
     static const uint8_t bis_l_cfg[] = {
@@ -148,7 +150,7 @@ static void ft_bcst_build_base(void)
     static const uint8_t codec_id[5] = { 0x06, 0x00, 0x00, 0x00, 0x00 }; /* LC3 */
 
     le_audio_base_builder_init(&s_base_builder, s_base_buffer,
-                               sizeof(s_base_buffer), FT_BCST_FRAME_US * 10U);
+                               sizeof(s_base_buffer), FT_BCST_PD_US);
     le_audio_base_builder_add_subgroup(&s_base_builder, codec_id,
                                        sizeof(subgroup_cfg), subgroup_cfg,
                                        sizeof(metadata), metadata);
@@ -158,18 +160,24 @@ static void ft_bcst_build_base(void)
                                   sizeof(bis_r_cfg), bis_r_cfg);
 }
 
-/* ---- 扩展广播数据: Broadcast Audio Announcement (0x1852) + Broadcast ID ---- */
+/* ---- 扩展广播数据 (对齐官方 PBP_Source demo):
+ * AD1 Broadcast Audio Announcement (0x1852) + Broadcast ID
+ * AD2 Public Broadcast Announcement (0x1856): features + metadata
+ * AD3 Appearance (0x0A00 Generic Audio Source)
+ * AD4 Broadcast Name (0x30) -- Auracast UI 显示名
+ * AD5 Complete Local Name */
 static uint8_t s_ext_adv_data[] = {
-    /* AD: Broadcast Audio Announcement, service data 0x1852 + 3B broadcast ID */
-    7, 0x30, 0x52, 0x18,
+    6, 0x16, 0x52, 0x18,
     (FT_BCST_ID >> 16) & 0xFF, (FT_BCST_ID >> 8) & 0xFF, FT_BCST_ID & 0xFF,
-    /* AD: name */
-    12, 0x09, 'F', 'T', '-', 'B', 'c', 'a', 's', 't', '-', '0', '1',
+    6, 0x16, 0x56, 0x18, 0x00, 0x00,        /* features: 未加密/无质量位; metadata 空 */
+    4, 0x19, 0x00, 0x0A,                    /* Appearance 0x0A00 */
+    13, 0x30, 'F', 'T', '-', 'B', 'c', 'a', 's', 't', '-', '0', '1',
+    12, 0x09, 'F', 'e', 'a', 't', 'h', 'e', 'r', 'T', 'a', 'l', 'k',
 };
 
 static const le_periodic_advertising_parameters_t s_periodic_params = {
-    .periodic_advertising_interval_min = 0x80,   /* 150ms */
-    .periodic_advertising_interval_max = 0x80,
+    .periodic_advertising_interval_min = 64,   /* 80ms, 同官方 demo */
+    .periodic_advertising_interval_max = 64,
     .periodic_advertising_properties   = 0,
 };
 
@@ -185,8 +193,8 @@ static void ft_bcst_setup_advertising(void)
     /* event properties: connectable=0 scannable=0 legacy=0 anonymous=0
      * (non-connectable non-scannable extended advertising) */
     s_ext_params.advertising_event_properties = 0;
-    s_ext_params.primary_advertising_interval_min = 0x160;  /* 220ms */
-    s_ext_params.primary_advertising_interval_max = 0x160;
+    s_ext_params.primary_advertising_interval_min = 0xA0;  /* 62.5ms, 同官方 demo */
+    s_ext_params.primary_advertising_interval_max = 0xA0;
     s_ext_params.primary_advertising_channel_map = 7;
     s_ext_params.peer_address_type = 0;
     memset(&s_ext_params.peer_address, 0, 6);
@@ -206,20 +214,11 @@ static void ft_bcst_setup_advertising(void)
 
     ft_bcst_build_base();
     gap_periodic_advertising_set_params(s_adv_handle, &s_periodic_params);
-    /* periodic data = [AD len][type 0x16? no: Broadcast Audio Announcement in
-     * periodic 用 service data(0x16)+0x1852+BASE]; 完整结构:
-     * [length][type=0x16][uuid16 0x1852][BASE...] */
+    /* periodic data = BAA AD (0x1851): LEVEL1 PD + LEVEL2 BASE,
+     * builder 已输出完整 AD 结构 ([len][0x16][uuid][pd][base]), 直接使用 */
     {
         uint16_t base_len = le_audio_base_builder_get_ad_data_size(&s_base_builder);
-        static uint8_t periodic_data[80];
-        uint16_t pos = 0;
-        periodic_data[pos++] = (uint8_t)(3U + base_len);
-        periodic_data[pos++] = BLUETOOTH_DATA_TYPE_SERVICE_DATA_16_BIT_UUID;
-        periodic_data[pos++] = 0x52;   /* 0x1852 little endian */
-        periodic_data[pos++] = 0x18;
-        memcpy(&periodic_data[pos], s_base_buffer, base_len);
-        pos += base_len;
-        gap_periodic_advertising_set_data(s_adv_handle, pos, periodic_data);
+        gap_periodic_advertising_set_data(s_adv_handle, base_len, s_base_buffer);
     }
     gap_periodic_advertising_start(s_adv_handle, 0);
     gap_extended_advertising_start(s_adv_handle, 0, 0);
@@ -309,9 +308,20 @@ static void ft_bcst_evt_log(uint16_t a, uint16_t b)
 /* BIG_CREATED 回调里 packet buffer 被事件占用, 直接 request 会在
  * hci_iso_notify 的 buffer 检查处 return, 第一包永远发不出 (实测)。
  * 延迟到下一拍再 request */
+extern volatile uint8_t  g_ft_big_evt_raw[24];
+extern volatile uint8_t  g_ft_big_evt_raw_len;
 static void ft_bcst_request_send(btstack_timer_source_t *ts)
 {
     (void)ts;
+    /* 一次性 dump LE Create BIG Complete 原始字节: 用于确定本控制器
+     * 事件布局中 Sync_Delay/Transport_Latency/PHY/NSE/BN/PTO/IRC/
+     * Max_PDU/ISO_Interval 的实际偏移 (构建 LEVEL 3 BIGInfo 用) */
+    rt_kprintf("[BCST] big evt raw (%u):", g_ft_big_evt_raw_len);
+    for (uint8_t i = 3U; i < g_ft_big_evt_raw_len; i++)
+    {
+        rt_kprintf(" %02x", g_ft_big_evt_raw[i]);
+    }
+    rt_kprintf("\n");
     hci_request_bis_can_send_now_events(s_big_params.big_handle);
     rt_kprintf("[BCST] request bis can-send (deferred)\n");
 }
