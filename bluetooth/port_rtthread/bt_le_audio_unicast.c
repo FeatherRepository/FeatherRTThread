@@ -752,7 +752,7 @@ static void ft_le_iso_handler(rt_uint8_t packet_type, rt_uint16_t channel,
     }
 
     rt_uint16_t total = (rt_uint16_t)(1U + sdu_len);
-    if (ft_alink_space(FT_ALINK) < (rt_uint32_t)(total + 2U))
+    if (ft_alink_space(FT_ALINK) < (rt_uint32_t)total)
     {
         s_stat_iso_dropped++;
         return;
@@ -767,7 +767,10 @@ static void ft_le_iso_handler(rt_uint8_t packet_type, rt_uint16_t channel,
     stage[1] = (rt_uint8_t)(total >> 8);
     stage[2] = ase->chan_alloc;   /* 0x01=L 0x02=R, M55 据此分路解码 */
     memcpy(&stage[3], &packet[offset], sdu_len);
-    if (ft_audio_produce(stage, total + 2U) == total + 2U)
+    /* 帧格式 = [len16][ch][帧体] 共 total 字节; 写入长度必须等于填充
+     * 长度 —— 曾写 total+2 把 stage 之外的栈垃圾带进 ring, M55 解析
+     * 整体错位 (丢包 88% + 解码端对象损坏死机, 实测) */
+    if (ft_audio_produce(stage, total) == total)
     {
         s_stat_iso_sdus++;
         s_stat_frames++;
