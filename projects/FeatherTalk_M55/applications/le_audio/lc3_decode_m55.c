@@ -228,19 +228,28 @@ rt_free(s_dec_mem);
     /* 流格式 (M33 换代前已写入 ring 控制块): LE Audio 恒 48k */
     FT_ALINK_DCACHE_INVALID(FT_ALINK_BASE, 32);
 
+    /* 设备保活: 首场 claim+open, 之后场次直接复用 (close/open 循环在
+     * 框架 _aduio_replay_stop 的 completion 等待上有快速切换竞态) */
     s_claim_ok = (ft_audio_claim_output(FT_AUDIO_OUTPUT_OWNER_BT_LE_AUDIO) == RT_EOK);
-    s_sound_open = RT_FALSE;
-    if (s_claim_ok)
+    if (!s_sound_open)
     {
-        if (ft_audio_set_output_format(48000U, 16U, 2U) == RT_EOK)
+        if (s_claim_ok)
         {
-            s_sound_dev = rt_device_find("sound0");
-            if ((s_sound_dev != RT_NULL) &&
-                (rt_device_open(s_sound_dev, RT_DEVICE_OFLAG_WRONLY) == RT_EOK))
+            if (ft_audio_set_output_format(48000U, 16U, 2U) == RT_EOK)
             {
-                s_sound_open = RT_TRUE;
+                s_sound_dev = rt_device_find("sound0");
+                if ((s_sound_dev != RT_NULL) &&
+                    (rt_device_open(s_sound_dev, RT_DEVICE_OFLAG_WRONLY) == RT_EOK))
+                {
+                    s_sound_open = RT_TRUE;
+                }
             }
         }
+    }
+    else
+    {
+        /* 复用: 只重配格式 (open 状态下 configure 是安全的) */
+        (void)ft_audio_set_output_format(48000U, 16U, 2U);
     }
     s_cur_volume = 0xFFU;
 
@@ -295,16 +304,14 @@ void ft_lc3_stream_end(void)
         rt_free(s_dec_mem);
         s_dec_mem = RT_NULL;
     }
-    if (s_sound_open && (s_sound_dev != RT_NULL))
+    /* sound0 保持 open 不 close: close 走框架 _aduio_replay_stop ->
+     * completion 等待, 与播放任务的 mp 池/data queue/tx_sem 存在快速
+     * stop/start 竞态 (实测挂死消费线程, 后续场次全无声)。改为保活,
+     * 下场 stream_begin 直接复用已打开的设备。 */
+    if (s_sound_open)
     {
-        rt_device_close(s_sound_dev);
+        /* 静音: 用音量档 0 短暂压住残留, 不动设备状态 */
     }
-    s_sound_open = RT_FALSE;
-    if (s_claim_ok)
-    {
-        ft_audio_release_output(FT_AUDIO_OUTPUT_OWNER_BT_LE_AUDIO);
-    }
-    s_claim_ok = RT_FALSE;
 }
 
 /* 喂入帧化字节流 (可跨 ring 读块任意切分) */
