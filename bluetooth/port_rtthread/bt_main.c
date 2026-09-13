@@ -496,12 +496,58 @@ static void bt_adv_start(void)
 /* HCI 包处理器: 状态机到达 WORKING 即启动 BLE 广播 */
 static void bt_iso_probe_print(const uint8_t *mask);
 static btstack_packet_callback_registration_t s_sm_event_reg;
+
+/* Bond-side hygiene: when the board loses its bond DB (e.g. after a reflash)
+ * a still-bonded phone reconnects with an RPA, identity resolving fails, and
+ * the peer keeps requesting encryption with LTKs we no longer have
+ * (LTK Request -> IRK Lookup Failed) until it gives up on its own. First-time
+ * pairing is unaffected (the peer sends a Pairing Request, which cancels the
+ * timer via SM_EVENT_PAIRING_STARTED). */
+#define FT_IR_FAIL_DISCONNECT_MS 5000U
+static btstack_timer_source_t s_ir_fail_timer;
+static hci_con_handle_t s_ir_fail_handle = HCI_CON_HANDLE_INVALID;
+
+static void ft_ir_fail_disconnect(struct btstack_timer_source *ts)
+{
+    hci_con_handle_t handle = s_ir_fail_handle;
+    s_ir_fail_handle = HCI_CON_HANDLE_INVALID;
+    (void)ts;
+    if (handle != HCI_CON_HANDLE_INVALID &&
+        s_gatt_connected && s_gatt_con_handle == handle)
+    {
+        rt_kprintf("[BT] identity unresolved, drop stale bonded link (handle 0x%x)\n",
+                   handle);
+        gap_disconnect(handle);
+    }
+}
+
+static void ft_ir_fail_arm(hci_con_handle_t handle)
+{
+    s_ir_fail_handle = handle;
+    s_ir_fail_timer.process = ft_ir_fail_disconnect;
+    btstack_run_loop_remove_timer(&s_ir_fail_timer);
+    btstack_run_loop_set_timer(&s_ir_fail_timer, FT_IR_FAIL_DISCONNECT_MS);
+    btstack_run_loop_add_timer(&s_ir_fail_timer);
+}
+
+static void ft_ir_fail_cancel(void)
+{
+    s_ir_fail_handle = HCI_CON_HANDLE_INVALID;
+    btstack_run_loop_remove_timer(&s_ir_fail_timer);
+}
+
 static void ft_sm_handler(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t size)
 {
     (void)channel;
     if (type != HCI_EVENT_PACKET || size < 2) return;
     if (packet[0] == SM_EVENT_JUST_WORKS_REQUEST)
         sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
+    if (packet[0] == SM_EVENT_IDENTITY_RESOLVING_FAILED)
+        ft_ir_fail_arm(sm_event_identity_resolving_failed_get_handle(packet));
+    if (packet[0] == SM_EVENT_PAIRING_STARTED ||
+        packet[0] == SM_EVENT_IDENTITY_CREATED ||
+        packet[0] == SM_EVENT_PAIRING_COMPLETE)
+        ft_ir_fail_cancel();
     if (packet[0] == SM_EVENT_PAIRING_COMPLETE) {
         g_le_connect_diag[3]++;
         g_le_connect_diag[4] = sm_event_pairing_complete_get_status(packet);
@@ -712,6 +758,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         if (disc_handle == s_gatt_con_handle) {
             s_gatt_connected = 0;
             s_notify_enabled = 0;
+            ft_ir_fail_cancel();
         }
         feathertalk_ipc_send_event(61);
         if (s_desired_on && s_bt_state == BT_READY && !s_gatt_connected)
@@ -1149,7 +1196,14 @@ INIT_COMPONENT_EXPORT(bt_control_init);
 rt_err_t bt_service_set_enabled(int on)
 {
     if (on != 0 && on != 1) return -RT_EINVAL;
-    rt_mutex_take(&s_control_lock, RT_WAITING_FOREVER);
+    /* Bounded: this runs inline in the M33 IPC thread's receive path. A
+     * FOREVER wait here can park the whole IPC loop (heartbeats included)
+     * if the owner thread is slow or stuck. Timeout surfaces as a normal
+     * service failure to the quick-status reply. */
+    if (rt_mutex_take(&s_control_lock, rt_tick_from_millisecond(200)) != RT_EOK)
+    {
+        return -RT_ETIMEOUT;
+    }
     if (on && (s_stack_setup_failed ||
         (s_stack_initialized && s_bt_state == BT_ERROR && hci_get_state() != HCI_STATE_OFF))) {
         rt_mutex_release(&s_control_lock);

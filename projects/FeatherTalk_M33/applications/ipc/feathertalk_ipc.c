@@ -99,6 +99,20 @@ static void feathertalk_ipc_flush_audio_db(void)
     }
 }
 
+/* Critical fire-and-forget frames (heartbeat / system / quick status) get one
+ * extra attempt after a short pause; the driver itself already caps each try
+ * at EDGE_IPC_SEND_BUSY_RETRY_MAX * EDGE_IPC_SEND_BUSY_DELAY_MS. Beyond that
+ * the frame is dropped and counted -- the IPC thread must always move on. */
+static rt_bool_t feathertalk_ipc_write_frame(edge_rc_frame_t *frame)
+{
+    if (rt_device_write(g_ipc_tx, 0, frame, 1) == 1)
+    {
+        return RT_TRUE;
+    }
+    rt_thread_mdelay(5);
+    return rt_device_write(g_ipc_tx, 0, frame, 1) == 1 ? RT_TRUE : RT_FALSE;
+}
+
 static rt_bool_t feathertalk_ipc_send(feathertalk_ipc_message_id_t message_id,
                                      rt_uint32_t sequence)
 {
@@ -119,7 +133,7 @@ static rt_bool_t feathertalk_ipc_send(feathertalk_ipc_message_id_t message_id,
     rt_memcpy(frame.channel, &message, sizeof(message));
     frame.seq = sequence;
 
-    if (rt_device_write(g_ipc_tx, 0, &frame, 1) != 1)
+    if (feathertalk_ipc_write_frame(&frame) != RT_TRUE)
     {
         g_error_count++;
         return RT_FALSE;
@@ -224,7 +238,7 @@ static rt_bool_t feathertalk_ipc_send_system_status(rt_uint32_t sequence)
 
     rt_memcpy(frame.channel, &message, sizeof(message));
     frame.seq = sequence;
-    if (rt_device_write(g_ipc_tx, 0, &frame, 1) != 1)
+    if (feathertalk_ipc_write_frame(&frame) != RT_TRUE)
     {
         g_error_count++;
         return RT_FALSE;
@@ -275,7 +289,7 @@ static rt_bool_t feathertalk_ipc_send_quick_status(rt_uint32_t sequence)
 #endif
     rt_memcpy(frame.channel, &message, sizeof(message));
     frame.seq = sequence;
-    if (rt_device_write(g_ipc_tx, 0, &frame, 1) != 1)
+    if (feathertalk_ipc_write_frame(&frame) != RT_TRUE)
     {
         g_error_count++;
         return RT_FALSE;
