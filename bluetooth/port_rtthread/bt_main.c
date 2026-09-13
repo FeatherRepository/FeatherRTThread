@@ -193,7 +193,8 @@ static void ft_trace_packet(uint8_t type, uint8_t incoming,
         if (cid == 4) capture = length; /* ATT */
         if (cid == 6) capture = 9;      /* SMP: opcode only, never keys */
     } else if (type == HCI_EVENT_PACKET && length >= 2) {
-        if (packet[0] == 5 || packet[0] == 8 || packet[0] == 0x30 ||
+        if (packet[0] == 3 || packet[0] == 4 || packet[0] == 5 ||
+            packet[0] == 8 || packet[0] == 0x30 ||
             packet[0] == 0x3e) capture = length;
     }
     if (!capture) return;
@@ -405,6 +406,30 @@ static void bt_classic_eir_setup(void)
 
 static le_advertising_set_t s_le_adv;
 static uint8_t s_le_adv_handle, s_le_adv_registered;
+/* A second BLE advertising set supplies scan-response-compatible discovery.
+ * Both sets use HCI extended commands; BR/EDR remains disabled in LE-only mode. */
+static le_advertising_set_t s_le_discovery_adv;
+static uint8_t s_le_discovery_handle, s_le_discovery_registered;
+static const le_extended_advertising_parameters_t s_le_discovery_params = {
+    .advertising_event_properties = 0x13, /* BLE legacy connectable/scannable */
+    .primary_advertising_interval_min = 160,
+    .primary_advertising_interval_max = 192,
+    .primary_advertising_channel_map = 7,
+    .own_address_type = BD_ADDR_TYPE_LE_PUBLIC,
+    .primary_advertising_phy = 1,
+    .secondary_advertising_phy = 1,
+    .advertising_sid = 1,
+};
+static const uint8_t s_le_discovery_data[] = {
+#if FEATHERTALK_BT_LE_AUDIO_ONLY
+    2, 0x01, 0x06,
+#else
+    2, 0x01, 0x02,
+#endif
+    12, 0x09, 'F','e','a','t','h','e','r','T','a','l','k',
+    11, 0x03, 0x50, 0x18, 0x4e, 0x18, 0x53, 0x18,
+    0x44, 0x18, 0x55, 0x18
+};
 static const le_extended_advertising_parameters_t s_le_adv_params = {
     .advertising_event_properties = 1,
     .primary_advertising_interval_min = 160,
@@ -418,7 +443,11 @@ static const le_extended_advertising_parameters_t s_le_adv_params = {
 /* BAP Unicast Server General Announcement, CAP Acceptor, TMAS UMR.
  * Persistent storage is required by the asynchronous GAP advertising API. */
 static const uint8_t s_le_adv_data[] = {
+#if FEATHERTALK_BT_LE_AUDIO_ONLY
     2, 0x01, 0x06,
+#else
+    2, 0x01, 0x02, /* LE discoverable, BR/EDR supported */
+#endif
     12, 0x09, 'F','e','a','t','h','e','r','T','a','l','k',
     /* UUID list supports OS service filters in addition to announcements. */
     11, 0x03, 0x50, 0x18, 0x4e, 0x18, 0x53, 0x18,
@@ -431,6 +460,10 @@ static void bt_adv_enable(void)
 {
     int rc = gap_extended_advertising_start(s_le_adv_handle, 0, 0);
     if (rc) { s_bt_err = rc; rt_kprintf("[BT] extended adv start rc=%d\n", rc); }
+    if (s_le_discovery_registered) {
+        rc = gap_extended_advertising_start(s_le_discovery_handle, 0, 0);
+        if (rc) s_bt_err = rc;
+    }
     BT_CP(63);
 }
 static void bt_adv_set_data(void)
@@ -447,6 +480,15 @@ static void bt_adv_start(void)
                                                  &s_le_adv_handle);
         if (rc) { s_bt_err = rc; return; }
         s_le_adv_registered = 1;
+    }
+    if (!s_le_discovery_registered) {
+        int rc = gap_extended_advertising_setup(&s_le_discovery_adv,
+            &s_le_discovery_params, &s_le_discovery_handle);
+        if (rc) { s_bt_err = rc; return; }
+        s_le_discovery_registered = 1;
+        rc = gap_extended_advertising_set_adv_data(s_le_discovery_handle,
+            sizeof(s_le_discovery_data), s_le_discovery_data);
+        if (rc) { s_bt_err = rc; return; }
     }
     bt_adv_set_data();
 }
@@ -592,6 +634,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 g_le_connect_diag[0]++;
                 s_gatt_con_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
                 s_gatt_connected = 1;
+                gap_extended_advertising_stop(s_le_adv_handle);
+                if (s_le_discovery_registered)
+                    gap_extended_advertising_stop(s_le_discovery_handle);
                 feathertalk_ipc_send_event(60);
             }
         }

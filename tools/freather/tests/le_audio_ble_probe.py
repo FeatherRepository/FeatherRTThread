@@ -9,17 +9,25 @@ logging.basicConfig(level=logging.DEBUG if "--debug" in sys.argv else logging.WA
 
 async def main():
     found = {}
+    reported = set()
     def seen(device, adv):
         if "FeatherTalk" in (adv.local_name or device.name or ""):
-            if device.address in found:
+            raw = adv.platform_data[1]
+            event = raw.adv
+            kind = str(event.advertisement_type) if event else "unknown"
+            key = (device.address, kind)
+            if key in reported:
                 return
+            reported.add(key)
             found[device.address] = device
-            print("ADV", device.address, adv.local_name, adv.service_uuids,
+            print("ADV", device.address, kind, adv.local_name, adv.service_uuids,
                   {k: v.hex() for k,v in adv.service_data.items()}, flush=True)
     async with BleakScanner(seen, winrt={"allow_extended_advertisements": True}):
         await asyncio.sleep(10)
     if not found:
         print("NO_FEATHERTALK_ADVERTISEMENT", flush=True)
+        return
+    if "--scan-only" in sys.argv:
         return
     device = next(iter(found.values()))
     if "--unpair" in sys.argv:

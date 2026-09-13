@@ -168,6 +168,26 @@ test_lc3_watermark.py 编译实际生产函数，验证1000个正常包间空隙
 
 ## 参考资料
 
+### 小米 15 Pro：纯 LE 配对入口诊断
+
+冷启动后本机可收到 LE Audio 扩展广播，但用户多次在小米上尝试时 trace_count
+与连接计数仍为0。用户明确要求仅验证 LE Audio；短暂双模试验已撤回。
+当前 FEATHERTALK_BT_LE_AUDIO_ONLY=1，经典蓝牙可发现/可连接入口均关闭。
+
+增加第二组 BLE legacy connectable/scannable PDU（属性0x13），同样通过 HCI
+Extended Advertising API 配置，Flags=0x06；保留 BAP 扩展广播。
+它是 BLE 发现兼容性试验，不是 BR/EDR，也不是 A2DP 回退。
+任一 LE 连接建立后停止两组广播，断开后恢复。编译、签名、写入和校验完成，
+Windows 空中扫描确认同一地址能收到 Extended(type5) 与 ConnectableUndirected(type0)。
+用户重试后已确认可关联并播放音乐。板端 trace_count=188，LE配对status=0，
+完成 Codec/QoS/Enable，CIS 0x60/0x61建立，断开计数为0，收到VCS音量指令。
+这次证据支持 BLE 发现入口兼容性是原先小米配对失败的原因。
+M33已烧录镜像SHA256：B79CDA2DD63419985FBCC7876496085CE2E00D80C99BCA169450E8535A151149。
+成功关联/出声已验证；长时间播放的丢帧、欠载与音质仍需独立验收。
+扫描工具新增 --scan-only，避免诊断主机连接污染手机记录。
+
+## 参考链接
+
 - STM32CubeWBA / STM32WBA65I-DK1 / BLE_Audio_TMAP_Peripheral：
   STM32_WPAN/App/tmap_app.c，AudioUseCases/tmap/tmap.c。
 - Bluetooth SIG BAP：Table 3.7 Unicast Server AD format。
