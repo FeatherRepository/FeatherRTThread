@@ -767,6 +767,8 @@ static void ft_le_iso_handler(rt_uint8_t packet_type, rt_uint16_t channel,
     stage[1] = (rt_uint8_t)(total >> 8);
     stage[2] = ase->chan_alloc;   /* 0x01=L 0x02=R, M55 据此分路解码 */
     memcpy(&stage[3], &packet[offset], sdu_len);
+    /* total is the length FIELD (channel + SDU), not the wire byte count.
+     * Include the two-byte length prefix: 120-byte SDU -> 123-byte record. */
     if (ft_audio_produce(stage, total + 2U) == total + 2U)
     {
         s_stat_iso_sdus++;

@@ -167,7 +167,9 @@
 
 /* end of Interprocess Communication (IPC) */
 /* end of POSIX (Portable Operating System Interface) layer */
-#define RT_USING_CPLUSPLUS
+/* No C++ code on M55; local toolchain lacks clean-build C++ multilib
+ * headers (cxx_crt.cpp fails on -Clean rebuilds). Keep it off. */
+/* #define RT_USING_CPLUSPLUS */
 /* end of C/C++ and POSIX layer */
 
 /* Network */

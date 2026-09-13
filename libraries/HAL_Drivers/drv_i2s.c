@@ -907,13 +907,16 @@ void i2s_playback_task(void *arg)
              * UAC/BT 共用此路径, feather_i2s_diag 可读 */
             i2s_supply_stall_ms++;
             rt_thread_mdelay(1);
-#if defined(PKG_USING_WAVPLAYER) && !defined(BSP_USING_XiaoZhi)
-            if(count>=50){
+            /* close 路径 (_aduio_replay_stop) 在等 completion; 若无
+             * WAVPLAYER 宏它永远不会被释放 -> close 永久挂起, 消费线程
+             * 卡死 (LE Audio 播放停止后无声 + rt_* 断言, 实测)。
+             * 空转 50ms 即推进 completion (等价 WAVPLAYER 路径, 不依赖宏) */
+            if (count >= 50)
+            {
                 rt_completion_done(&audio->replay->cmp);
-                count=0;
+                count = 0;
             }
             count++;
-#endif
         }
         rt_audio_tx_complete(audio);
     }
