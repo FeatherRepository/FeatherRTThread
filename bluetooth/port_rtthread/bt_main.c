@@ -1334,6 +1334,15 @@ static int bt_off(int argc, char **argv)
 }
 MSH_CMD_EXPORT_ALIAS(bt_off, bt_off, power off CYW55512 BT);
 
+/* M8.2: 上电自启动蓝牙主机 (产品默认; 开发期可 bt_off 关闭)。
+ * 此前每次断电重启都需手动 bt_on, 控制台不可达时蓝牙无从开启 */
+static int bt_autostart(void)
+{
+    bt_service_start();
+    return RT_EOK;
+}
+INIT_APP_EXPORT(bt_autostart);
+
 static int bt_info(int argc, char **argv)
 {
     rt_kprintf("[BT] state=%d (0=off,1=starting,2=ready,3=stopping,4=error), uart=%s\n",
