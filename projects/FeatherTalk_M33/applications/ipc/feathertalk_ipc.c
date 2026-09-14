@@ -338,13 +338,28 @@ static void feathertalk_ipc_receive(void)
             }
             else if (command.control == FEATHERTALK_QUICK_BT_LE_ROLE)
             {
-                /* M8: LE Audio 角色 (0=OFF 1=SERVER 预留 2=BROADCAST) */
+                /* M8: LE Audio 角色 (1=SERVER 单播 2=BROADCAST 广播 0=停广播)。
+                 * 单播/广播互斥 (ISO handler 单值); start 的 -1=已在广播、
+                 * stop 的 -1=本就未广播 均视为幂等成功; -2=手机已连接拒绝 */
                 extern int ft_le_audio_broadcast_start(void);
                 extern int ft_le_audio_broadcast_stop(void);
-                int rc = (command.value == 2U) ? ft_le_audio_broadcast_start() :
-                         (command.value == 0U) ? ft_le_audio_broadcast_stop() :
-                         -RT_EINVAL;
+                int rc;
+                if (command.value == 2U)
+                {
+                    rc = ft_le_audio_broadcast_start();
+                    if (rc == -1) rc = RT_EOK;             /* 已在广播: 幂等 */
+                }
+                else if (command.value == 1U || command.value == 0U)
+                {
+                    rc = ft_le_audio_broadcast_stop();
+                    if (rc == -1) rc = RT_EOK;             /* 未在广播: 幂等 */
+                }
+                else
+                {
+                    rc = -RT_EINVAL;
+                }
                 g_quick_last_result = rc == -RT_EINVAL ? FEATHERTALK_QUICK_RESULT_INVALID :
+                    rc == -2 ? FEATHERTALK_QUICK_RESULT_FAILED :
                     rc != RT_EOK ? FEATHERTALK_QUICK_RESULT_FAILED :
                     FEATHERTALK_QUICK_RESULT_OK;
             }

@@ -334,7 +334,9 @@ static lv_obj_t *s_usb_role_buttons[2];
 /* M6-BT: 蓝牙页 A2DP 角色按钮 (与 USB 页 s_usb_role_buttons 分开) */
 static lv_obj_t *s_bt_a2dp_buttons[2];
 static lv_obj_t *s_bt_le_buttons[2];
+static lv_obj_t *s_bt_le_status;
 static uint8_t s_bt_a2dp_role;   /* 0=SINK 1=SOURCE */
+static uint8_t s_bt_le_role;     /* 0=SERVER 单播 1=BROADCAST 广播 */
 static lv_obj_t *s_usb_function_buttons[2];
 static lv_obj_t *s_usb_function_radios[2];
 static lv_obj_t *s_usb_function_status[2];
@@ -2545,6 +2547,25 @@ static void settings_radio_refresh(lv_timer_t *timer)
     if (strcmp(lv_label_get_text(label), action)) lv_label_set_text(label, action);
     if (!available || busy) lv_obj_add_state(s_settings_radio_button, LV_STATE_DISABLED);
     else lv_obj_remove_state(s_settings_radio_button, LV_STATE_DISABLED);
+
+    /* M8: LE 角色命令结果回显 (拒绝原因: 手机已连接/未断开) */
+    if (s_bt_le_status != RT_NULL && lv_obj_is_valid(s_bt_le_status) &&
+        valid && status.last_control == FEATHERTALK_QUICK_BT_LE_ROLE)
+    {
+        const char *le_result =
+            status.result == FEATHERTALK_QUICK_RESULT_PENDING ? ft_preferences_text("请求处理中…", "Working...") :
+            status.result == FEATHERTALK_QUICK_RESULT_FAILED ? ft_preferences_text("M33 拒绝/失败（手机可能已连接）", "Refused/failed on M33 (phone may be connected)") :
+            status.result == FEATHERTALK_QUICK_RESULT_INVALID ? ft_preferences_text("参数无效", "Invalid request") :
+            status.result == FEATHERTALK_QUICK_RESULT_OK ? ft_preferences_text("已生效", "Applied") :
+            RT_NULL;
+        if (le_result != RT_NULL)
+        {
+            static char le_text[96];
+            lv_snprintf(le_text, sizeof(le_text), "%s", le_result);
+            if (strcmp(lv_label_get_text(s_bt_le_status), le_text))
+                lv_label_set_text(s_bt_le_status, le_text);
+        }
+    }
 }
 static void settings_radio_deleted(lv_event_t *event)
 {
@@ -2683,6 +2704,42 @@ static void settings_bt_a2dp_role_clicked_cb(lv_event_t *event)
     settings_bt_role_refresh();
 }
 
+static void settings_bt_le_role_refresh(void)
+{
+    for (int i = 0; i < 2; i++)
+    {
+        lv_obj_t *btn = s_bt_le_buttons[i];
+        if (btn == RT_NULL || !lv_obj_is_valid(btn)) continue;
+        if ((int)s_bt_le_role == i)
+        {
+            lv_obj_add_state(btn, LV_STATE_CHECKED);
+            lv_obj_set_style_border_color(btn, lv_color_hex(0x2196F3), LV_PART_MAIN | LV_STATE_CHECKED);
+            lv_obj_set_style_border_width(btn, 2, LV_PART_MAIN | LV_STATE_CHECKED);
+        }
+        else
+        {
+            lv_obj_remove_state(btn, LV_STATE_CHECKED);
+            lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
+        }
+    }
+}
+
+/* M8: LE Audio 角色切换回调 (0=SERVER 单播 1=BROADCAST 广播)。
+ * 协议值: QUICK_BT_LE_ROLE value 1=SERVER 2=BROADCAST; M33 单播/广播
+ * 互斥 (ISO handler 单值), 切 SERVER 会停掉广播, 手机连入也自动回单播 */
+static void settings_bt_le_role_clicked_cb(lv_event_t *event)
+{
+    uint8_t role = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
+    if (role == s_bt_le_role) return;
+    (void)feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_LE_ROLE,
+                                            role == 1U ? 2U : 1U);
+    s_bt_le_role = role;
+    settings_bt_le_role_refresh();
+    if (s_bt_le_status != RT_NULL && lv_obj_is_valid(s_bt_le_status))
+        lv_label_set_text(s_bt_le_status,
+                          ft_preferences_text("请求已发送到 M33…", "Request sent to M33..."));
+}
+
 static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
 {
     const ft_ui_layout_t *layout = ft_layout_get();
@@ -2756,35 +2813,44 @@ static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
     lv_obj_set_style_text_color(label, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
     lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
 
-    /* -- LE AUDIO（M8 占位） -- */
+    /* -- LE AUDIO（M8: 单播/广播互斥, ISO handler 单值仲裁） -- */
     caption = lv_label_create(page);
-    lv_label_set_text(caption, ft_preferences_text("LE AUDIO 角色（M8 预留）", "LE AUDIO role (M8 reserved)"));
+    lv_label_set_text(caption, ft_preferences_text("LE AUDIO 角色", "LE AUDIO role"));
     lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
     row = lv_obj_create(page);
     style_layout_container(row);
     lv_obj_set_size(row, lv_pct(100), layout->control_height);
     lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_add_state(row, LV_STATE_DISABLED);
     track_object(&s_bt_le_buttons[0],
                  create_flat_button(row,
                     ft_preferences_text("SERVER 被连（出声）", "SERVER (render)"),
-                    RT_NULL, RT_NULL));
+                    settings_bt_le_role_clicked_cb, (void *)(uintptr_t)0U));
     track_object(&s_bt_le_buttons[1],
                  create_flat_button(row,
                     ft_preferences_text("BROADCAST 广播", "BROADCAST (cast)"),
-                    RT_NULL, RT_NULL));
+                    settings_bt_le_role_clicked_cb, (void *)(uintptr_t)1U));
     lv_obj_set_width(s_bt_le_buttons[0], 0);
     lv_obj_set_width(s_bt_le_buttons[1], 0);
     lv_obj_set_flex_grow(s_bt_le_buttons[0], 1);
     lv_obj_set_flex_grow(s_bt_le_buttons[1], 1);
+    settings_bt_le_role_refresh();
+
+    track_object(&s_bt_le_status, lv_label_create(page));
+    lv_obj_set_width(s_bt_le_status, lv_pct(100));
+    lv_label_set_long_mode(s_bt_le_status, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_bt_le_status, ft_preferences_text(
+        "SERVER = 手机连入放歌（默认）；BROADCAST = Auracast 广播正弦测试音。手机连入时广播自动退出。",
+        "SERVER = phone connects and plays (default); BROADCAST = Auracast test tone. Broadcast exits automatically when a phone connects."));
+    lv_obj_set_style_text_color(s_bt_le_status, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_bt_le_status, ft_layout_font(12), LV_PART_MAIN);
 
     label = lv_label_create(page);
     lv_obj_set_width(label, lv_pct(100));
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(label, ft_preferences_text(
-        "LE Audio（CIS 单播 / Auracast 广播）：功能开发中，待测试手机到位后开放。",
-        "LE Audio (CIS unicast / Auracast broadcast): under development."));
+        "LE Audio（CIS 单播 / Auracast 广播）：单播与广播互斥，同一时间只有一个活跃。",
+        "LE Audio (CIS unicast / Auracast broadcast): unicast and broadcast are mutually exclusive."));
     lv_obj_set_style_text_color(label, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
     lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
 

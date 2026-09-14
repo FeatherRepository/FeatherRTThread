@@ -340,9 +340,11 @@ static void ft_notify_timer_handler(struct btstack_timer_source *ts)
 }
 
 /* M8.1: LE-only 验证开关 (1 = 关闭 Classic 可发现/可连, 广播 flags 声明
- * 无 BR/EDR, 强制手机走 LE Audio/LC3; 0 = 双模常规形态) */
+ * 无 BR/EDR, 强制手机走 LE Audio/LC3; 0 = 双模常规形态)。
+ * M8.x 双模阶段: A2DP Sink/Source + AVRCP 本就无条件初始化, 置 0 即恢复
+ * Classic 可见 (TODO: 迁移到 rtconfig/Kconfig 正式配置项) */
 #ifndef FEATHERTALK_BT_LE_AUDIO_ONLY
-#define FEATHERTALK_BT_LE_AUDIO_ONLY 1
+#define FEATHERTALK_BT_LE_AUDIO_ONLY 0
 #endif
 
 /* 广播保活: 连接尝试失败(未建立)时, 控制器会停广播且不产生断开事件,
