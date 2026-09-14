@@ -838,7 +838,15 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
     case HCI_EVENT_META_GAP:
         if (packet[2] == GAP_SUBEVENT_LE_CONNECTION_COMPLETE) {
             if (gap_subevent_le_connection_complete_get_status(packet) == 0)
+            {
                 s_acl_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
+                /* 手机连入即退出广播模式: 单播/广播互斥 (ISO handler 单值),
+                 * stop 内部会把 ISO handler 归还给单播 */
+                {
+                    extern int ft_le_audio_broadcast_stop(void);
+                    (void)ft_le_audio_broadcast_stop();
+                }
+            }
             break;
         }
         if (packet[2] == GAP_SUBEVENT_CIS_CREATED)
@@ -905,6 +913,13 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
 }
 
 /* ---- 初始化 / 诊断 ---- */
+/* ISO handler 是单值注册: 广播源启动时会抢占, 停止/被顶掉时由广播侧
+ * 调本函数归还。CIS 音频数据经此派发, 归还前单播收不到任何音频 */
+void ft_le_audio_unicast_attach_iso_handler(void)
+{
+    hci_register_iso_packet_handler(&ft_le_iso_handler);
+}
+
 void ft_le_audio_init(void)
 {
     s_send_cb.callback = ft_le_send_next; s_send_cb.context = RT_NULL;

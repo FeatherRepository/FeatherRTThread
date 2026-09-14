@@ -83,6 +83,9 @@ static rt_uint8_t s_frame_r[FT_BCST_OCTETS];
 
 static btstack_timer_source_t s_request_timer;
 
+static void ft_bcst_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
+                                rt_uint8_t *packet, rt_uint16_t size);
+
 /* 统计 */
 static rt_uint32_t s_stat_iso_sent;
 static rt_uint32_t s_stat_enc_frames;
@@ -247,6 +250,17 @@ int ft_le_audio_broadcast_start(void)
 {
     if (s_active) return -1;
 
+    /* 单播/广播互斥: 手机已连接时启动会抢走 ISO handler, 单播音频
+     * 将被静默丢弃。此时拒绝广播启动, 由用户先断开手机 */
+    {
+        extern int bt_service_connected(void);
+        if (bt_service_connected())
+        {
+            rt_kprintf("[BCST] refuse start: phone connected (unicast owns ISO)\n");
+            return -2;
+        }
+    }
+
     /* LC3 编码器一次分配复用 */
     if (s_enc_mem == RT_NULL)
     {
@@ -271,6 +285,10 @@ int ft_le_audio_broadcast_start(void)
     s_enc_ready = RT_TRUE;
     s_phase = 0U;
 
+    /* ISO handler 单值注册: 广播启动时抢占, 停止时归还 (见 stop)。
+     * BIS_CAN_SEND_NOW 与 BIS 数据都经此派发 */
+    hci_register_iso_packet_handler(&ft_bcst_hci_handler);
+
     ft_bcst_setup_advertising();
     ft_bcst_setup_big();
     s_active = RT_TRUE;
@@ -287,7 +305,12 @@ int ft_le_audio_broadcast_stop(void)
     gap_periodic_advertising_stop(s_adv_handle);
     gap_extended_advertising_stop(s_adv_handle);
     s_active = RT_FALSE;
-    rt_kprintf("[BCST] stop: sent=%lu enc=%lu busy=%lu\\n",
+    /* ISO handler 归还给单播 (单值注册; CIS 音频依赖它派发) */
+    {
+        extern void ft_le_audio_unicast_attach_iso_handler(void);
+        ft_le_audio_unicast_attach_iso_handler();
+    }
+    rt_kprintf("[BCST] stop: sent=%lu enc=%lu busy=%lu\n",
                (unsigned long)s_stat_iso_sent, (unsigned long)s_stat_enc_frames,
                (unsigned long)s_stat_send_busy);
     feathertalk_ipc_send_event(85U);
@@ -313,6 +336,7 @@ extern volatile uint8_t  g_ft_big_evt_raw_len;
 static void ft_bcst_request_send(btstack_timer_source_t *ts)
 {
     (void)ts;
+    if (!s_active) return;   /* stop 已发生, 不再 request */
     /* 一次性 dump LE Create BIG Complete 原始字节: 用于确定本控制器
      * 事件布局中 Sync_Delay/Transport_Latency/PHY/NSE/BN/PTO/IRC/
      * Max_PDU/ISO_Interval 的实际偏移 (构建 LEVEL 3 BIGInfo 用) */
@@ -382,10 +406,8 @@ void ft_le_audio_broadcast_init(void)
 {
     s_hci_event_reg.callback = &ft_bcst_hci_handler;
     hci_add_event_handler(&s_hci_event_reg);
-    /* 关键: hci_register_iso_packet_handler 是单值注册, BIS_CAN_SEND_NOW
-     * 事件经此派发; 不注册则事件落入 unicast 的 handler 被静默丢弃
-     * (实测 iso_sent=0 根因)。unicast/broadcast 不同时活跃, 覆盖安全 */
-    hci_register_iso_packet_handler(&ft_bcst_hci_handler);
+    /* 注意: ISO packet handler 是单值注册, 此处不注册 (init 时抢注会
+     * 让单播 CIS 音频被静默丢弃)。注册/归还都在 start/stop 里交接 */
     rt_kprintf("[BCST] broadcast source ready (msh bt_bcast_start)\n");
 }
 
