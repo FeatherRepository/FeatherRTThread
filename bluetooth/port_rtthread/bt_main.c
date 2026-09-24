@@ -538,10 +538,27 @@ static void ft_ir_fail_cancel(void)
     btstack_run_loop_remove_timer(&s_ir_fail_timer);
 }
 
+static void ft_sm_handler(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t size);
+
+/* LE Audio 专用诊断环 (SWD 读): 手机双模下不建 LE 音频链路时,
+ * 按此序列定位断点 —— LE 连接 -> 加密 -> 配对 -> MTU/GATT 探测 */
+volatile uint16_t g_leaud_log[16][2];
+volatile uint8_t  g_leaud_log_pos;
+static void leaud_log(uint16_t a, uint16_t b)
+{
+    uint8_t i = g_leaud_log_pos % 16U;
+    g_leaud_log[i][0] = a;
+    g_leaud_log[i][1] = b;
+    g_leaud_log_pos++;
+}
+
 static void ft_sm_handler(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t size)
 {
     (void)channel;
     if (type != HCI_EVENT_PACKET || size < 2) return;
+    /* LE 音频诊断: SM 事件序列 (a=0x5B00|SM 事件码, b=PAIRING_COMPLETE status) */
+    leaud_log(0x5B00U | (packet[0] & 0xFFU),
+              packet[0] == SM_EVENT_PAIRING_COMPLETE ? sm_event_pairing_complete_get_status(packet) : 0);
     if (packet[0] == SM_EVENT_JUST_WORKS_REQUEST)
         sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
     if (packet[0] == SM_EVENT_IDENTITY_RESOLVING_FAILED)
@@ -577,6 +594,53 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     /* 全事件记录: 定位"连接事件到底来没来" (GDB 可读) */
     bt_evt_log(0xE000U | packet[0],
                (packet[0] == 0x3EU && size > 2U) ? packet[2] : 0xEEEEU);
+
+    /* LE 音频诊断: a=事件标识, b=状态/关键字节
+     * 加密: [2]=status [3..4]=handle; 断开: [4]=reason */
+    switch (packet[0])
+    {
+    case HCI_EVENT_ENCRYPTION_CHANGE:
+        leaud_log(0x0008 | ((size > 5U && packet[5]) ? 0x8000U : 0U),
+                  size > 2U ? packet[2] : 0xFEU);
+        break;
+    case HCI_EVENT_ENCRYPTION_KEY_REFRESH_COMPLETE:
+        leaud_log(0x0030, size > 2U ? packet[2] : 0xFEU);
+        break;
+    case HCI_EVENT_DISCONNECTION_COMPLETE:
+        leaud_log(0x0005, size > 4U ? packet[4] : 0xFEU);
+        break;
+    case ATT_EVENT_MTU_EXCHANGE_COMPLETE:
+        leaud_log(0x00B5, 0);
+        break;
+    case HCI_EVENT_LE_META:
+        if (size > 2U)
+        {
+            switch (packet[2])
+            {
+            case 0x01U:  /* LE Connection Complete: [3]=status */
+                leaud_log(0x3E01, size > 3U ? packet[3] : 0xFEU);
+                break;
+            case 0x0AU:  /* LE Enhanced Connection Complete: [3]=status */
+                leaud_log(0x3E0A, size > 3U ? packet[3] : 0xFEU);
+                break;
+            case 0x0DU:  /* LE Extended Connection Complete: [3]=status */
+                leaud_log(0x3E0D, size > 3U ? packet[3] : 0xFEU);
+                break;
+            case 0x08U:  /* LE Encryption Change: [3]=status [4]=enabled */
+                leaud_log(0x3E08 | ((size > 4U && packet[4]) ? 0x8000U : 0U),
+                          size > 3U ? packet[3] : 0xFEU);
+                break;
+            case 0x05U:  /* LE Long Term Key Request: [3]=status 无, 仅标记 */
+                leaud_log(0x3E05, 0);
+                break;
+            default:
+                break;
+            }
+        }
+        break;
+    default:
+        break;
+    }
 
     /* M8.0 探针: 拦截 Read_Local_Supported_Commands 应答, 解码 LE ISO 能力 */
     if (s_iso_probe_pending &&

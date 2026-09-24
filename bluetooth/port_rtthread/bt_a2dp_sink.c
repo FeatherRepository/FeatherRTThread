@@ -85,6 +85,11 @@ static rt_uint32_t s_media_hdr_err;     /* RTP/SBC 头解析失败计数 */
 static rt_uint32_t s_stream_starts;
 static rt_uint8_t  s_last_volume_pct = 0xFFU;
 
+/* AVRCP 连接失败也可见: M33 控制台不可达, SWD 读 diag 才是观测手段 */
+volatile rt_uint32_t g_a2dp_diag[8]; /* [0]=avrcp_established [1]=avrcp_released
+ * [2]=avrcp_failed(值=status) [3]=vol_events [4]=a2dp_stream_started
+ * [5..7]=保留 */
+
 /* ring 控制块登记流格式并换代 (M55 consumer 监测 fmt_gen) */
 static void bt_a2dp_ring_publish_format(rt_uint32_t rate)
 {
@@ -225,6 +230,7 @@ static void bt_a2dp_sink_packet_handler(uint8_t packet_type, uint16_t channel,
         s_media_dropped = 0;
         s_media_hdr_err = 0;
         s_stream_starts++;
+        g_a2dp_diag[4]++;
         /* 登记协商格式 + 换代 -> M55 claim sound0 开流 */
         bt_a2dp_ring_publish_format(s_negotiated_rate ? s_negotiated_rate : 48000U);
         rt_kprintf("[A2DP] stream started: %u Hz -> ring gen %lu\n",
@@ -262,6 +268,7 @@ static void bt_a2dp_sink_packet_handler(uint8_t packet_type, uint16_t channel,
 }
 
 /* ---- AVRCP ---- */
+/* ---- AVRCP ---- */
 static void bt_avrcp_packet_handler(uint8_t packet_type, uint16_t channel,
                                     uint8_t *packet, uint16_t size)
 {
@@ -276,10 +283,12 @@ static void bt_avrcp_packet_handler(uint8_t packet_type, uint16_t channel,
         {
             rt_kprintf("[AVRCP] connection failed, status 0x%02x\n",
                        avrcp_subevent_connection_established_get_status(packet));
+            g_a2dp_diag[2] = avrcp_subevent_connection_established_get_status(packet);
             return;
         }
         s_avrcp_cid = avrcp_subevent_connection_established_get_avrcp_cid(packet);
         rt_kprintf("[AVRCP] connected, cid 0x%02x\n", s_avrcp_cid);
+        g_a2dp_diag[0]++;
         /* 声明支持绝对音量通知 -> 对端 SetAbsoluteVolume 才有回报 */
         avrcp_target_support_event(s_avrcp_cid, AVRCP_NOTIFICATION_EVENT_VOLUME_CHANGED);
         avrcp_controller_get_supported_events(s_avrcp_cid);
@@ -288,6 +297,7 @@ static void bt_avrcp_packet_handler(uint8_t packet_type, uint16_t channel,
         rt_kprintf("[AVRCP] released, cid 0x%02x\n",
                    avrcp_subevent_connection_released_get_avrcp_cid(packet));
         s_avrcp_cid = 0;
+        g_a2dp_diag[1]++;
         break;
     default:
         break;
@@ -311,6 +321,7 @@ static void bt_avrcp_target_packet_handler(uint8_t packet_type, uint16_t channel
         s_last_volume_pct = (rt_uint8_t)pct;
         FT_ALINK->volume_percent = pct;
         FT_ALINK_DCACHE_CLEAN(FT_ALINK_BASE, 32);
+        g_a2dp_diag[3]++;
         rt_kprintf("[AVRCP] volume %u (%u%%)\n", (unsigned)vol, (unsigned)pct);
         break;
     }
