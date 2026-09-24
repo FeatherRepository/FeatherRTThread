@@ -437,6 +437,10 @@ static uint8_t s_le_discovery_data[] = {
  * 对待本机 (发现 ASCS 并建立 LE 音频关系), 配对完成后切回双模。
  * 背景: HyperOS 对已按经典配对的设备不做 LE 事后探测, 开关永不出现 */
 static int s_le_only_pairing;
+int bt_service_le_pairing_mode(void)
+{
+    return s_le_only_pairing;
+}
 static const le_extended_advertising_parameters_t s_le_adv_params = {
     .advertising_event_properties = 1,
     .primary_advertising_interval_min = 160,

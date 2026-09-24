@@ -154,6 +154,21 @@ static void ft_le_streaming_refresh(void)
     {
         ft_le_ring_stop();
     }
+    /* M8.x 双模共存: CIS 流期间暂停经典 page scan (空口 TDM 冲突实测
+     * 造成 ~30% CIS 丢包/卡顿)。流结束恢复, 让 A2DP 可再次连入 */
+    if (any)
+    {
+        gap_connectable_control(0);
+        rt_kprintf("[LEA] CIS streaming: classic page scan paused\n");
+    }
+    else
+    {
+        extern int bt_service_le_pairing_mode(void);
+        if (!bt_service_le_pairing_mode())
+        {
+            gap_connectable_control(1);
+        }
+    }
 }
 
 /* ---- ASE State 值编码 (ASCS 读取/通知同构) ---- */
