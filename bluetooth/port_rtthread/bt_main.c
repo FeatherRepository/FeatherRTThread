@@ -422,7 +422,7 @@ static const le_extended_advertising_parameters_t s_le_discovery_params = {
     .secondary_advertising_phy = 1,
     .advertising_sid = 1,
 };
-static const uint8_t s_le_discovery_data[] = {
+static uint8_t s_le_discovery_data[] = {
 #if FEATHERTALK_BT_LE_AUDIO_ONLY
     2, 0x01, 0x06,
 #else
@@ -432,6 +432,11 @@ static const uint8_t s_le_discovery_data[] = {
     11, 0x03, 0x50, 0x18, 0x4e, 0x18, 0x53, 0x18,
     0x44, 0x18, 0x55, 0x18
 };
+/* M8.x 双模顺序绑定: LE 优先配对模式 (运行时)。开启后广播 flags 改
+ * 0x06 (LE-only) 且关闭经典可发现/可连 —— 手机在配对时以 LE 音频设备
+ * 对待本机 (发现 ASCS 并建立 LE 音频关系), 配对完成后切回双模。
+ * 背景: HyperOS 对已按经典配对的设备不做 LE 事后探测, 开关永不出现 */
+static int s_le_only_pairing;
 static const le_extended_advertising_parameters_t s_le_adv_params = {
     .advertising_event_properties = 1,
     .primary_advertising_interval_min = 160,
@@ -444,7 +449,7 @@ static const le_extended_advertising_parameters_t s_le_adv_params = {
 };
 /* BAP Unicast Server General Announcement, CAP Acceptor, TMAS UMR.
  * Persistent storage is required by the asynchronous GAP advertising API. */
-static const uint8_t s_le_adv_data[] = {
+static uint8_t s_le_adv_data[] = {
 #if FEATHERTALK_BT_LE_AUDIO_ONLY
     2, 0x01, 0x06,
 #else
@@ -456,8 +461,48 @@ static const uint8_t s_le_adv_data[] = {
     0x44, 0x18, 0x55, 0x18,
     9, 0x16, 0x4e, 0x18, 0, 7, 0, 0, 0, 0,
     4, 0x16, 0x53, 0x18, 0,
-    5, 0x16, 0x55, 0x18, 8, 0
+    5, 0x16, 0x55, 0x18, 8, 0,
+    /* M8.x: Fast Pair Model ID 服务数据 (0xFE2C) —— 触发手机主动连 LE
+     * (seeker 连入读 Model ID, 顺带完成 GATT 发现, ASCS 入缓存)。
+     * 未注册调试 Model ID 0x544654, 与 ft_gatt.gatt 的 FP 服务一致 */
+    7, 0x16, 0x2c, 0xfe, 0x54, 0x46, 0x54,
 };
+
+/* M8.x: LE 优先配对模式开关 (经 IPC QUICK_BT_LE_ROLE value=3 驱动)。
+ * on: 广播 flags 改 0x06 + 关经典可发现/可连 + 断开既有经典 ACL,
+ *     手机只能以 LE 配对本机 (发现 ASCS, 建立 LE 音频关系)。
+ * off: 恢复双模形态。 */
+int bt_service_set_le_pairing_mode(int on)
+{
+    if (on != 0 && on != 1) return -RT_EINVAL;
+    if (s_le_only_pairing == on) return RT_EOK;
+    s_le_only_pairing = on;
+    s_le_adv_data[2]       = on ? 0x06 : 0x02;
+    s_le_discovery_data[2] = on ? 0x06 : 0x02;
+    if (s_bt_state != BT_READY) return RT_EOK;
+    if (on)
+    {
+        gap_discoverable_control(0);
+        gap_connectable_control(0);
+        if (s_classic_connected && s_classic_handle != HCI_CON_HANDLE_INVALID)
+        {
+            gap_disconnect(s_classic_handle);
+        }
+    }
+    else
+    {
+        gap_discoverable_control(1);
+        gap_connectable_control(1);
+    }
+    bt_adv_set_data();
+    if (s_le_discovery_registered)
+    {
+        (void)gap_extended_advertising_set_adv_data(s_le_discovery_handle,
+            sizeof(s_le_discovery_data), s_le_discovery_data);
+    }
+    rt_kprintf("[BT] LE pairing mode %s\n", on ? "ON (flags 0x06)" : "OFF (dual-mode)");
+    return RT_EOK;
+}
 static void bt_adv_enable(void)
 {
     int rc = gap_extended_advertising_start(s_le_adv_handle, 0, 0);
@@ -504,8 +549,12 @@ static btstack_packet_callback_registration_t s_sm_event_reg;
  * the peer keeps requesting encryption with LTKs we no longer have
  * (LTK Request -> IRK Lookup Failed) until it gives up on its own. First-time
  * pairing is unaffected (the peer sends a Pairing Request, which cancels the
- * timer via SM_EVENT_PAIRING_STARTED). */
+ * timer via SM_EVENT_PAIRING_STARTED).
+ * M8.x 双模: 本定时器会踢掉手机的全部 LE 连接 (RPA 解析失败在 LE 库为空时
+ * 必然发生), 加密链路永远建不起来 -> ASCS 无法入缓存 -> LE 音频开关不出现。
+ * 双模期间停用主动断链, 仅保留日志标记; LE bond 持久化落地后再评估恢复。 */
 #define FT_IR_FAIL_DISCONNECT_MS 5000U
+#define FT_IR_FAIL_DROP_ENABLE 0
 static btstack_timer_source_t s_ir_fail_timer;
 static hci_con_handle_t s_ir_fail_handle = HCI_CON_HANDLE_INVALID;
 
@@ -514,6 +563,7 @@ static void ft_ir_fail_disconnect(struct btstack_timer_source *ts)
     hci_con_handle_t handle = s_ir_fail_handle;
     s_ir_fail_handle = HCI_CON_HANDLE_INVALID;
     (void)ts;
+#if FT_IR_FAIL_DROP_ENABLE
     if (handle != HCI_CON_HANDLE_INVALID &&
         s_gatt_connected && s_gatt_con_handle == handle)
     {
@@ -521,6 +571,13 @@ static void ft_ir_fail_disconnect(struct btstack_timer_source *ts)
                    handle);
         gap_disconnect(handle);
     }
+#else
+    if (handle != HCI_CON_HANDLE_INVALID)
+    {
+        rt_kprintf("[BT] identity unresolved on handle 0x%x (keep, dual-mode)\n",
+                   handle);
+    }
+#endif
 }
 
 static void ft_ir_fail_arm(hci_con_handle_t handle)
@@ -607,7 +664,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         leaud_log(0x0030, size > 2U ? packet[2] : 0xFEU);
         break;
     case HCI_EVENT_DISCONNECTION_COMPLETE:
-        leaud_log(0x0005, size > 4U ? packet[4] : 0xFEU);
+        /* 布局: [2]=status [3..4]=handle [5]=reason */
+        leaud_log(0x0005, size > 5U ? packet[5] : 0xFEU);
         break;
     case ATT_EVENT_MTU_EXCHANGE_COMPLETE:
         leaud_log(0x00B5, 0);
@@ -684,8 +742,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
              * (实测: 小米15U 只连经典 A2DP, 从不发起 LE 连接) */
             bt_classic_eir_setup();
 #if !FEATHERTALK_BT_LE_AUDIO_ONLY
-            gap_discoverable_control(1);
-            gap_connectable_control(1);
+            /* 运行时 LE 优先配对模式下同样关闭经典可发现/可连 */
+            gap_discoverable_control(s_le_only_pairing ? 0 : 1);
+            gap_connectable_control(s_le_only_pairing ? 0 : 1);
 #else
             /* LE-only 验证: 关闭 Classic 可发现/可连, 手机无 A2DP 可走 */
             gap_discoverable_control(0);
@@ -816,7 +875,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         {
             s_classic_connected = 0;
             rt_kprintf("[BT] Classic disconnected, back to discoverable\n");
-            if (s_desired_on && s_bt_state == BT_READY && !FEATHERTALK_BT_LE_AUDIO_ONLY) {
+            if (s_desired_on && s_bt_state == BT_READY && !FEATHERTALK_BT_LE_AUDIO_ONLY && !s_le_only_pairing) {
                 gap_discoverable_control(1);
                 gap_connectable_control(1);
             }

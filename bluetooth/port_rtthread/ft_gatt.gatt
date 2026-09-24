@@ -55,6 +55,14 @@ PRIMARY_SERVICE, ORG_BLUETOOTH_SERVICE_COMMON_AUDIO_SERVICE
 PRIMARY_SERVICE, 0x1855
 CHARACTERISTIC, ORG_BLUETOOTH_CHARACTERISTIC_TMAP_ROLE, READ, 08 00
 
+// M8.x: Fast Pair Service (0xFE2C) —— 触发手机主动连 LE 的标准路径:
+// 手机 seeker 看到 FP 广播(Model ID 服务数据)后会连接 LE 读 Model ID,
+// 顺带完成全量 GATT 发现 -> ASCS 入缓存 -> LE 音频开关出现。
+// Model ID 为未注册调试值 (0x544654), FP 服务器查询会失败, 但 LE 连接
+// 与 GATT 发现照常发生 (触发目的即达成)。
+PRIMARY_SERVICE, 0xFE2C
+CHARACTERISTIC, 0x1234, READ, 54 46 54
+
 // FT Data custom service (128-bit UUID, 必须最后): phone <-> device
 //  - CMD  (write): phone -> device command channel
 //  - NTF  (notify): device -> phone status channel

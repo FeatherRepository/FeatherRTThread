@@ -388,6 +388,34 @@ static int bt_bcast_stop(int argc, char **argv)
 }
 MSH_CMD_EXPORT(bt_bcast_stop, Ask M33 to stop Auracast broadcast source);
 
+/* M8.x: LE 优先配对模式 —— 以 LE-only 形态配对 (手机发现 ASCS 并建立
+ * LE 音频关系), 配对完成后用 bt_dual_mode 切回双模 */
+static int bt_pairing_mode(int argc, char **argv)
+{
+    int rc;
+
+    (void)argc;
+    (void)argv;
+    rc = feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_LE_ROLE, 3U);
+    rt_kprintf("bt_pairing_mode: LE-only pairing %s (delete phone pairing, then re-pair)\n",
+               (rc == RT_EOK) ? "queued" : "rejected (busy)");
+    return 0;
+}
+MSH_CMD_EXPORT(bt_pairing_mode, Ask M33 to enter LE-only pairing mode);
+
+static int bt_dual_mode(int argc, char **argv)
+{
+    int rc;
+
+    (void)argc;
+    (void)argv;
+    rc = feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_LE_ROLE, 1U);
+    rt_kprintf("bt_dual_mode: back to dual-mode %s\n",
+               (rc == RT_EOK) ? "queued" : "rejected (busy)");
+    return 0;
+}
+MSH_CMD_EXPORT(bt_dual_mode, Ask M33 to return to dual-mode operation);
+
 int feathertalk_ipc_start(void)
 {
     rt_err_t result;
