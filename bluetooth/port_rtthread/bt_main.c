@@ -428,7 +428,7 @@ static uint8_t s_le_discovery_data[] = {
 #else
     2, 0x01, 0x02,
 #endif
-    12, 0x09, 'F','e','a','t','h','e','r','T','a','l','k',
+    15, 0x09, 'F','e','a','t','h','e','r','T','a','l','k','-','L','E',
     11, 0x03, 0x50, 0x18, 0x4e, 0x18, 0x53, 0x18,
     0x44, 0x18, 0x55, 0x18
 };
@@ -459,7 +459,7 @@ static uint8_t s_le_adv_data[] = {
 #else
     2, 0x01, 0x02, /* LE discoverable, BR/EDR supported */
 #endif
-    12, 0x09, 'F','e','a','t','h','e','r','T','a','l','k',
+    15, 0x09, 'F','e','a','t','h','e','r','T','a','l','k','-','L','E',
     /* UUID list supports OS service filters in addition to announcements. */
     11, 0x03, 0x50, 0x18, 0x4e, 0x18, 0x53, 0x18,
     0x44, 0x18, 0x55, 0x18,
@@ -1464,13 +1464,52 @@ static int bt_off(int argc, char **argv)
 MSH_CMD_EXPORT_ALIAS(bt_off, bt_off, power off CYW55512 BT);
 
 /* M8.2: 上电自启动蓝牙主机 (产品默认; 开发期可 bt_off 关闭)。
- * 此前每次断电重启都需手动 bt_on, 控制台不可达时蓝牙无从开启 */
+ * 此前每次断电重启都需手动 bt_on, 控制台不可达时蓝牙无从开启。
+ * 久置冷启动死机排查: 自启动延迟 3s —— 冷启动瞬间 BT HCD 下载的电流
+ * 浪涌与显示/IPC/flash 挂载叠加, 是 USB 供电边缘触发欠压复位/锁死的
+ * 头号嫌疑; 错峰启动消除浪涌叠加, 复位原因由 g_boot_reset_cause 捕获 */
 static int bt_autostart(void)
 {
     bt_service_start();
     return RT_EOK;
 }
-INIT_APP_EXPORT(bt_autostart);
+static rt_timer_t s_autostart_timer;
+static void bt_autostart_delayed(void *param)
+{
+    (void)param;
+    rt_kprintf("[BT] autostart (delayed 3s)\n");
+    bt_autostart();
+}
+static int bt_autostart_schedule(void)
+{
+    s_autostart_timer = rt_timer_create("btauto", bt_autostart_delayed,
+                                        RT_NULL, rt_tick_from_millisecond(3000),
+                                        RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER);
+    if (s_autostart_timer != RT_NULL)
+    {
+        rt_timer_start(s_autostart_timer);
+    }
+    else
+    {
+        bt_autostart();   /* 定时器耗尽: 退回立即启动 */
+    }
+    return RT_EOK;
+}
+INIT_APP_EXPORT(bt_autostart_schedule);
+
+/* ---- 久置冷启动死机排查: 复位原因捕获 (SWD 读) ----
+ * SRSS RES_CAUSE 位: bit0=WDT bit1=ACT_FAULT bit2=DPSLP_FAULT
+ * bit3=调试复位 bit4..6=SOFT bit8..11=MCWDT0..3; 全 0 = POR/XRES */
+volatile uint32_t g_boot_reset_cause;
+volatile uint32_t g_boot_reset_cause2;
+static int bt_reset_cause_capture(void)
+{
+    extern uint32_t Cy_SysLib_GetResetReason(void);
+    g_boot_reset_cause = Cy_SysLib_GetResetReason();
+    g_boot_reset_cause2 = *(volatile uint32_t *)(SRSS_BASE + 0x1BD4UL);
+    return RT_EOK;
+}
+INIT_BOARD_EXPORT(bt_reset_cause_capture);
 
 static int bt_info(int argc, char **argv)
 {

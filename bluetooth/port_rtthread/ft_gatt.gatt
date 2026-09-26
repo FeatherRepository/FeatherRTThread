@@ -7,7 +7,9 @@
 // 16-bit" 的续询实测会丢掉后续服务 (M8.1 PACS/ASCS 被吞的根因)。
 
 PRIMARY_SERVICE, GAP_SERVICE
-CHARACTERISTIC, GAP_DEVICE_NAME, READ, "FeatherTalk"
+// M8.x: LE 侧名字带 -LE 后缀, 与经典侧 "FeatherTalk" (A2DP) 区分,
+// 手机上可直接分辨走的哪条传输
+CHARACTERISTIC, GAP_DEVICE_NAME, READ, "FeatherTalk-LE"
 // GAP Appearance: unknown (0x0000)
 CHARACTERISTIC, GAP_APPEARANCE, READ, 00 00
 
