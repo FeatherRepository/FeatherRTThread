@@ -635,6 +635,19 @@ static void ft_sm_handler(uint8_t type, uint16_t channel, uint8_t *packet, uint1
         rt_kprintf("[BT] SMP pairing status=0x%02x reason=0x%02x\n",
             sm_event_pairing_complete_get_status(packet),
             sm_event_pairing_complete_get_reason(packet));
+        /* M8.x: LE bond 持久化 —— 配对成功即发布 le_device_db 到共享块
+         * (M55 落盘 /flash/bt_le_bond.bin), 重启/重烧后免重配 */
+        if (sm_event_pairing_complete_get_status(packet) == 0U)
+        {
+            extern void ft_le_bond_publish(void);
+            ft_le_bond_publish();
+        }
+    }
+    if (packet[0] == SM_EVENT_IDENTITY_CREATED)
+    {
+        /* IRK/身份地址此时才最终入库, 再发布一次补全 */
+        extern void ft_le_bond_publish(void);
+        ft_le_bond_publish();
     }
 }
 static volatile int s_iso_probe_pending;
@@ -1176,6 +1189,11 @@ static int bt_bringup(void)
     sm_set_authentication_requirements(SM_AUTHREQ_BONDING | SM_AUTHREQ_SECURE_CONNECTION);
     s_sm_event_reg.callback = ft_sm_handler;
     sm_add_event_handler(&s_sm_event_reg);
+    /* M8.x: LE bond 持久化 —— 把共享块 LE 段灌回 le_device_db (有界等待) */
+    {
+        extern void ft_le_bond_load(void);
+        ft_le_bond_load();
+    }
     att_server_init(profile_data, att_read_callback, att_write_callback);
     att_server_register_packet_handler(packet_handler);
     /* M8.1: LE Audio Unicast Server (PACS/ASCS/CIS acceptor/ISO 收流) */
