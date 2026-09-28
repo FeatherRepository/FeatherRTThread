@@ -104,6 +104,12 @@ static hci_con_handle_t s_acl_handle = HCI_CON_HANDLE_INVALID;
 static rt_uint8_t      s_streaming;        /* ring 数据面已开 (任一 ASE Streaming) */
 static btstack_packet_callback_registration_t s_hci_event_reg;
 
+/* M8.x 三态互斥: 单播流状态查询 (广播守卫/UI 互斥用) */
+int ft_le_audio_unicast_streaming(void)
+{
+    return s_streaming;
+}
+
 /* 统计 (msh bt_le_stats) */
 static rt_uint32_t s_stat_iso_sdus;
 static rt_uint32_t s_stat_iso_dropped;   /* ring 满丢弃 */
@@ -148,6 +154,12 @@ static void ft_le_streaming_refresh(void)
     }
     if (any && !s_streaming)
     {
+        /* M8.x 三态互斥: CIS 流建立即挂起 A2DP 流 (若手机误同时推流),
+         * 保证同一时刻只有一条到喇叭的音频路径 */
+        {
+            extern void bt_a2dp_sink_suspend_if_active(const char *why);
+            bt_a2dp_sink_suspend_if_active("CIS unicast start");
+        }
         ft_le_ring_start();
     }
     else if (!any && s_streaming)
@@ -826,6 +838,17 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
             }
             if (match != RT_NULL)
             {
+                /* M8.x 三态互斥: 广播源活跃时 ISO 数据面归广播 (handler 单值),
+                 * 此时拒绝 CIS 请求 —— 单播/广播不可同时收发 */
+                {
+                    extern int ft_le_audio_broadcast_active(void);
+                    if (ft_le_audio_broadcast_active())
+                    {
+                        (void)gap_cis_reject(cis_handle);
+                        rt_kprintf("[LEA] CIS reject: broadcast active (ISO owned)\n");
+                        break;
+                    }
+                }
                 match->cis_handle = cis_handle;
                 (void)gap_cis_accept(cis_handle);
                 rt_kprintf("[LEA] CIS accept: ase=%u cis=0x%04x (cig=%u cis_id=%u)\n",

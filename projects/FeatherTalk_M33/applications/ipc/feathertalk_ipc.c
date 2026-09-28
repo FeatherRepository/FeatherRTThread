@@ -271,6 +271,19 @@ static rt_bool_t feathertalk_ipc_send_quick_status(rt_uint32_t sequence)
     {
         message.connected |= (uint8_t)FEATHERTALK_QUICK_CAP_BLUETOOTH;
     }
+    /* M8.x 三态互斥: 音频状态附载在 connected 高半字节 (低 4 位为能力位),
+     * UI 据此做按钮互斥 (LE 单播 ↔ A2DP 互斥; 广播与 A2DP 可共存) */
+    {
+        extern int ft_le_audio_unicast_streaming(void);
+        extern int bt_a2dp_sink_streaming(void);
+        extern int ft_le_audio_broadcast_active(void);
+        if (ft_le_audio_unicast_streaming())
+            message.connected |= (uint8_t)FEATHERTALK_AUDIO_FLAG_LE_UNICAST;
+        if (bt_a2dp_sink_streaming())
+            message.connected |= (uint8_t)FEATHERTALK_AUDIO_FLAG_A2DP_SINK;
+        if (ft_le_audio_broadcast_active())
+            message.connected |= (uint8_t)FEATHERTALK_AUDIO_FLAG_BROADCAST;
+    }
 #endif
     message.wifi_signal_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
     message.brightness_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;

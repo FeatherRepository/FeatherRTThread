@@ -70,6 +70,12 @@ static le_extended_advertising_parameters_t s_ext_params;
 static uint8_t                  s_adv_handle;
 static hci_con_handle_t         s_bis_handle[FT_BCST_NUM_BIS];
 static rt_bool_t                s_active;
+
+/* M8.x 三态互斥: 广播源活跃状态查询 (单播 CIS 守卫/UI 互斥用) */
+int ft_le_audio_broadcast_active(void)
+{
+    return s_active ? 1 : 0;
+}
 static rt_bool_t                s_big_created;
 static btstack_packet_callback_registration_t s_hci_event_reg;
 
@@ -250,13 +256,13 @@ int ft_le_audio_broadcast_start(void)
 {
     if (s_active) return -1;
 
-    /* 单播/广播互斥: 手机已连接时启动会抢走 ISO handler, 单播音频
-     * 将被静默丢弃。此时拒绝广播启动, 由用户先断开手机 */
+    /* M8.x 三态互斥: 只在 LE 单播流活跃时拒绝 (ISO 数据面归单播)。
+     * A2DP 经典连接时放行 —— 转发场景 (A2DP 收流 + Auracast 出局) 合法共存 */
     {
-        extern int bt_service_connected(void);
-        if (bt_service_connected())
+        extern int ft_le_audio_unicast_streaming(void);
+        if (ft_le_audio_unicast_streaming())
         {
-            rt_kprintf("[BCST] refuse start: phone connected (unicast owns ISO)\n");
+            rt_kprintf("[BCST] refuse start: LE unicast streaming (ISO owned)\n");
             return -2;
         }
     }

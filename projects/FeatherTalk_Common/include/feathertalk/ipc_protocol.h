@@ -86,6 +86,17 @@ typedef enum
     FEATHERTALK_QUICK_RESULT_PENDING     = 5
 } feathertalk_quick_result_t;
 
+/* M8.x 三态互斥: 双模音频状态标志, 附载在 quick_status.connected 的
+ * 高半字节 (低 4 位是能力位掩码, 高 4 位空闲) —— 不改 ABI/线帧布局。
+ * UI 用它做按钮互斥: LE 单播流活跃 ↔ A2DP 流活跃 二者互斥;
+ * 广播与 A2DP 可共存 (转发场景), 广播与 LE 单播互斥 (ISO 单值)。 */
+#define FEATHERTALK_AUDIO_FLAG_LE_UNICAST  (1U << 4)
+#define FEATHERTALK_AUDIO_FLAG_A2DP_SINK   (1U << 5)
+#define FEATHERTALK_AUDIO_FLAG_BROADCAST   (1U << 6)
+#define FEATHERTALK_AUDIO_FLAG_MASK        (FEATHERTALK_AUDIO_FLAG_LE_UNICAST | \
+                                            FEATHERTALK_AUDIO_FLAG_A2DP_SINK | \
+                                            FEATHERTALK_AUDIO_FLAG_BROADCAST)
+
 typedef struct
 {
     uint16_t abi_version;

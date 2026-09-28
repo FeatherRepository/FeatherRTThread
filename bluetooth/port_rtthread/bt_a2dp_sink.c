@@ -43,6 +43,10 @@
 /* audio_link_m33.c 的 producer 写入口 (写 ring + 门铃) */
 extern rt_uint32_t ft_audio_produce(const rt_uint8_t *data, rt_uint32_t len);
 
+/* M8.x 三态互斥: 定义在后, 事件处理器在前 —— 前向声明 */
+void bt_a2dp_sink_suspend_if_active(const char *why);
+int bt_a2dp_sink_streaming(void);
+
 /* 采样率自适应决策 (实测修正): 恢复声明全部采样率+声道模式, bitpool 2-53。
  * 曾试 48k-only (0x1F) 想省掉 44.1k->48k 重采样, 实测手机 (Android) 看到
  * 48k-only 能力后会发畸形的 SET_CONFIGURATION (Media Codec capability 长度
@@ -231,6 +235,15 @@ static void bt_a2dp_sink_packet_handler(uint8_t packet_type, uint16_t channel,
         s_media_hdr_err = 0;
         s_stream_starts++;
         g_a2dp_diag[4]++;
+        /* M8.x 三态互斥: LE 单播流活跃时立即挂起 A2DP 流 —— 同一时刻
+         * 只有一条到喇叭的音频路径 (射频 TDM 冲突实测 30% CIS 丢包) */
+        {
+            extern int ft_le_audio_unicast_streaming(void);
+            if (ft_le_audio_unicast_streaming())
+            {
+                bt_a2dp_sink_suspend_if_active("LE unicast active");
+            }
+        }
         /* 登记协商格式 + 换代 -> M55 claim sound0 开流 */
         bt_a2dp_ring_publish_format(s_negotiated_rate ? s_negotiated_rate : 48000U);
         rt_kprintf("[A2DP] stream started: %u Hz -> ring gen %lu\n",
@@ -353,6 +366,27 @@ static void bt_avrcp_controller_packet_handler(uint8_t packet_type, uint16_t cha
 }
 
 /* ---- setup: bt_main.c 在 sdp_init 之后调用 ---- */
+/* ---- M8.x 三态互斥: A2DP 流挂起助手 ----
+ * LE 单播流建立时调用; AVDTP suspend 让手机停止推流 (链路保持,
+ * 手机侧音频路由本来就要求单活跃)。 why 仅用于日志定位 */
+void bt_a2dp_sink_suspend_if_active(const char *why)
+{
+    if (s_stream_state != FT_A2DP_STATE_PLAYING || s_a2dp_cid == 0)
+    {
+        return;
+    }
+    (void)avdtp_suspend_stream(s_a2dp_cid, s_stream_endpoint.a2dp_local_seid);
+    s_stream_state = FT_A2DP_STATE_PAUSED;
+    bt_a2dp_ring_publish_format(0U);   /* 流停: M55 关 sound0 */
+    rt_kprintf("[A2DP] suspended (%s)\n", why);
+}
+
+/* M8.x 三态互斥: A2DP 流状态查询 (IPC 音频状态附载/UI 互斥用) */
+int bt_a2dp_sink_streaming(void)
+{
+    return s_stream_state == FT_A2DP_STATE_PLAYING;
+}
+
 void bt_a2dp_sink_quiesce(void)
 {
     s_stream_state = FT_A2DP_STATE_CLOSED; /* Drop any media received while halting. */

@@ -2566,6 +2566,50 @@ static void settings_radio_refresh(lv_timer_t *timer)
                 lv_label_set_text(s_bt_le_status, le_text);
         }
     }
+
+    /* M8.x 三态互斥: 按钮可用性随音频状态实时置灰/恢复
+     * (LE 单播流 ↔ A2DP 流互斥; 广播只与单播互斥, A2DP 连接时保持可用
+     *  —— 转发场景: A2DP 收流 + Auracast 出局) */
+    {
+        uint8_t audio = valid ? (uint8_t)(status.connected & FEATHERTALK_AUDIO_FLAG_MASK) : 0U;
+        bool uc_streaming = (audio & FEATHERTALK_AUDIO_FLAG_LE_UNICAST) != 0U;
+        bool a2_streaming = (audio & FEATHERTALK_AUDIO_FLAG_A2DP_SINK) != 0U;
+        for (int i = 0; i < 2; i++)
+        {
+            lv_obj_t *btn = s_bt_a2dp_buttons[i];
+            if (btn != RT_NULL && lv_obj_is_valid(btn))
+            {
+                if (uc_streaming) lv_obj_add_state(btn, LV_STATE_DISABLED);
+                else lv_obj_remove_state(btn, LV_STATE_DISABLED);
+            }
+            btn = s_bt_le_buttons[i];
+            if (btn != RT_NULL && lv_obj_is_valid(btn))
+            {
+                /* buttons[0]=SERVER: A2DP 流活跃时禁用;
+                 * buttons[1]=BROADCAST: LE 单播流活跃时禁用 */
+                bool disable = (i == 0) ? a2_streaming : uc_streaming;
+                if (disable) lv_obj_add_state(btn, LV_STATE_DISABLED);
+                else lv_obj_remove_state(btn, LV_STATE_DISABLED);
+            }
+        }
+        if (s_bt_le_status != RT_NULL && lv_obj_is_valid(s_bt_le_status) &&
+            !(valid && status.last_control == FEATHERTALK_QUICK_BT_LE_ROLE))
+        {
+            const char *mutex_hint =
+                uc_streaming ? ft_preferences_text("LE 单播播放中：A2DP/广播已互斥",
+                                                   "LE unicast playing: A2DP/broadcast locked out") :
+                a2_streaming ? ft_preferences_text("A2DP 播放中：SERVER 已互斥（BROADCAST 可转发）",
+                                                   "A2DP playing: SERVER locked out (BROADCAST allowed)") :
+                RT_NULL;
+            if (mutex_hint != RT_NULL)
+            {
+                static char mutex_text[112];
+                lv_snprintf(mutex_text, sizeof(mutex_text), "%s", mutex_hint);
+                if (strcmp(lv_label_get_text(s_bt_le_status), mutex_text))
+                    lv_label_set_text(s_bt_le_status, mutex_text);
+            }
+        }
+    }
 }
 static void settings_radio_deleted(lv_event_t *event)
 {
