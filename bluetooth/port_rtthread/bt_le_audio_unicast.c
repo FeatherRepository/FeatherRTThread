@@ -104,6 +104,11 @@ static hci_con_handle_t s_acl_handle = HCI_CON_HANDLE_INVALID;
 static rt_uint8_t      s_streaming;        /* ring 数据面已开 (任一 ASE Streaming) */
 static btstack_packet_callback_registration_t s_hci_event_reg;
 
+/* M8.x: CIS 请求诊断 (SWD 读) —— 右声道 CIS 未建立时定位:
+ * [0]=CIS 请求接受数 [1]=请求总数 [2]=无匹配拒绝数
+ * [3]=CIS 建立完成数 [4]=最近 cig [5]=最近 cis_id */
+volatile uint32_t g_cis_diag[8];
+
 /* M8.x 三态互斥: 单播流状态查询 (广播守卫/UI 互斥用) */
 int ft_le_audio_unicast_streaming(void)
 {
@@ -865,17 +870,23 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
                     if (ft_le_audio_broadcast_active())
                     {
                         (void)gap_cis_reject(cis_handle);
+                        g_cis_diag[1]++;
+                        g_cis_diag[4] = cig_id; g_cis_diag[5] = cis_id;
                         rt_kprintf("[LEA] CIS reject: broadcast active (ISO owned)\n");
                         break;
                     }
                 }
                 match->cis_handle = cis_handle;
+                g_cis_diag[0]++;
+                g_cis_diag[4] = cig_id; g_cis_diag[5] = cis_id;
                 (void)gap_cis_accept(cis_handle);
                 rt_kprintf("[LEA] CIS accept: ase=%u cis=0x%04x (cig=%u cis_id=%u)\n",
                            match->ase_id, cis_handle, cig_id, cis_id);
             }
             else
             {
+                g_cis_diag[2]++;
+                g_cis_diag[4] = cig_id; g_cis_diag[5] = cis_id;
                 (void)gap_cis_reject(cis_handle);
                 rt_kprintf("[LEA] CIS reject: cig=%u cis_id=%u (no QoS match)\n",
                            cig_id, cis_id);
@@ -923,6 +934,7 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
             rt_uint8_t status = gap_subevent_cis_created_get_status(packet);
             hci_con_handle_t cis_handle =
                 gap_subevent_cis_created_get_cis_con_handle(packet);
+            if (status == 0U) g_cis_diag[3]++; else g_cis_diag[6]++;
             for (rt_uint32_t i = 0U; i < FT_LE_ASE_NUM; i++)
             {
                 if (s_ase[i].cis_handle == cis_handle)
