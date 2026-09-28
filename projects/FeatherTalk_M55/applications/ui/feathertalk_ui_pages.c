@@ -2669,9 +2669,17 @@ static void settings_radio_refresh(lv_timer_t *timer)
                     ft_preferences_text("通道：仅 LE 音频（经典扫描已关，LE 广播发播中）",
                                         "Transport: LE only (classic scan off)"));
             else if (t_classic)
+            {
+                /* 经典通道 + 未连接: 提示手机侧需忽略旧配对重新扫描
+                 * (Android 对已配对地址隐藏扫描结果, 旧 LE bond 不删
+                 *  则永远搜不到/连不上 —— 实测用户卡点) */
+                bool any_conn = valid && (status.connected & FEATHERTALK_QUICK_CAP_BLUETOOTH);
                 lv_snprintf(path_text, sizeof(path_text), "%s",
-                    ft_preferences_text("通道：仅经典 A2DP（LE 可连接广播已停）",
-                                        "Transport: classic only (LE connectable adv off)"));
+                    any_conn ? ft_preferences_text("经典通道：已连接",
+                                                   "Classic: connected") :
+                               ft_preferences_text("经典通道：请在手机上忽略本设备后重新搜索配对",
+                                                   "Classic: forget device on phone and re-scan"));
+            }
             else
                 lv_snprintf(path_text, sizeof(path_text), "%s",
                     ft_preferences_text("当前路径：空闲（A2DP 与 LE 单播互斥，广播可与 A2DP 共存）",
