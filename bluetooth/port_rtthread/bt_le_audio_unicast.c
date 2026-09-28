@@ -884,6 +884,17 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
                     extern int ft_le_audio_broadcast_stop(void);
                     (void)ft_le_audio_broadcast_stop();
                 }
+                /* M8.x 防御: 新 ACL 建立时强制全量 ASE 复位 —— 防此前
+                 * 会话残留态导致手机只能配出部分声道 (实测故障形态:
+                 * ch_mask 3→1, 单声道缺半帧 ~45% PLC = 歌曲重现/回声) */
+                for (rt_uint32_t i = 0U; i < FT_LE_ASE_NUM; i++)
+                {
+                    if (s_ase[i].state != FT_ASE_IDLE)
+                    {
+                        ft_le_ase_reset(&s_ase[i]);
+                    }
+                    s_ase[i].cis_handle = HCI_CON_HANDLE_INVALID;
+                }
             }
             break;
         }
