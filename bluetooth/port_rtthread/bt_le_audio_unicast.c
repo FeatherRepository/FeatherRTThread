@@ -442,6 +442,26 @@ static void ft_le_handle_qos_config(const rt_uint8_t *p, rt_uint32_t len)
 static void ft_le_handle_enable(const rt_uint8_t *p, rt_uint32_t len)
 {
     if (len < 2U) { s_stat_op_err++; return; }
+    /* M8.x 三态互斥: A2DP 播放中拒绝 ASE Enable —— 手机收到错误后按
+     * 自身策略回退 A2DP 或稍后重试; 避免双流竞态与静默挂起陷阱 */
+    {
+        extern int bt_a2dp_sink_streaming(void);
+        if (bt_a2dp_sink_streaming())
+        {
+            rt_uint8_t n = p[0];
+            const rt_uint8_t *q = &p[1];
+            rt_kprintf("[LEA] ASE enable rejected: A2DP streaming\n");
+            for (rt_uint8_t i = 0U; i < n; i++)
+            {
+                if ((rt_uint32_t)(q - p) + 2U > len) break;
+                ft_ase_t *ase = ft_le_ase_by_id(q[0]);
+                if (ase != RT_NULL) ft_le_ase_notify(ase, FT_LE_ERR_INVALID_ASE_STATE);
+                q += 2 + q[1];
+            }
+            s_stat_op_err++;
+            return;
+        }
+    }
     rt_uint8_t n = p[0];
     const rt_uint8_t *q = &p[1];
     for (rt_uint8_t i = 0U; i < n; i++)
