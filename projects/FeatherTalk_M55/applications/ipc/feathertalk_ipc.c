@@ -416,6 +416,25 @@ static int bt_dual_mode(int argc, char **argv)
 }
 MSH_CMD_EXPORT(bt_dual_mode, Ask M33 to return to dual-mode operation);
 
+/* M8.x 音频通道手动切换: bt_transport <0|1|2> (0=双模 1=仅LE 2=仅经典)。
+ * 与 UI 音频通道行走同一条 IPC 路径, 供无 UI 调试/验证用 */
+static int bt_transport(int argc, char **argv)
+{
+    int rc;
+
+    if (argc != 2)
+    {
+        rt_kprintf("usage: bt_transport <0|1|2>  (0=dual 1=LE-only 2=classic-only)\n");
+        return -1;
+    }
+    rc = feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_TRANSPORT,
+                                           (uint8_t)atoi(argv[1]));
+    rt_kprintf("bt_transport %s: %s\n", argv[1],
+               (rc == RT_EOK) ? "queued" : "rejected (busy)");
+    return 0;
+}
+MSH_CMD_EXPORT(bt_transport, Set audio transport: 0=dual 1=LE-only 2=classic-only);
+
 int feathertalk_ipc_start(void)
 {
     rt_err_t result;
