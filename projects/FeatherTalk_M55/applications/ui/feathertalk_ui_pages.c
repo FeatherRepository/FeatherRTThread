@@ -2578,7 +2578,10 @@ static void settings_radio_refresh(lv_timer_t *timer)
                                                                 FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY)) : 0U;
         bool t_le = (transport & FEATHERTALK_TRANSPORT_FLAG_LE_ONLY) != 0U;
         bool t_classic = (transport & FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY) != 0U;
-        /* 音频通道按钮选中态 (双模=都不选) + CHECKED 可视样式 */
+        bool uc_streaming = (audio & FEATHERTALK_AUDIO_FLAG_LE_UNICAST) != 0U;
+        bool a2_streaming = (audio & FEATHERTALK_AUDIO_FLAG_A2DP_SINK) != 0U;
+        bool bc_active = (audio & FEATHERTALK_AUDIO_FLAG_BROADCAST) != 0U;
+        /* 音频通道按钮: 单一选中循环 (0=经典 1=LE) */
         for (int i = 0; i < 2; i++)
         {
             lv_obj_t *btn = s_bt_transport_buttons[i];
@@ -2598,37 +2601,46 @@ static void settings_radio_refresh(lv_timer_t *timer)
                 lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
             }
         }
-        bool uc_streaming = (audio & FEATHERTALK_AUDIO_FLAG_LE_UNICAST) != 0U;
-        bool a2_streaming = (audio & FEATHERTALK_AUDIO_FLAG_A2DP_SINK) != 0U;
-        bool bc_active = (audio & FEATHERTALK_AUDIO_FLAG_BROADCAST) != 0U;
-        /* 通道按钮选中态 */
-        for (int i = 0; i < 2; i++)
-        {
-            lv_obj_t *btn = s_bt_transport_buttons[i];
-            if (btn == RT_NULL || !lv_obj_is_valid(btn)) continue;
-            bool selected = (i == 0) ? t_le : t_classic;
-            if (selected) lv_obj_add_state(btn, LV_STATE_CHECKED);
-            else lv_obj_remove_state(btn, LV_STATE_CHECKED);
-            lv_obj_set_style_border_width(btn, selected ? 2 : 0, LV_PART_MAIN | LV_STATE_CHECKED);
-        }
+        /* A2DP 角色: 仅经典/双模时可用且按角色高亮; 仅 LE 时整体禁用无高亮 */
         for (int i = 0; i < 2; i++)
         {
             lv_obj_t *btn = s_bt_a2dp_buttons[i];
-            if (btn != RT_NULL && lv_obj_is_valid(btn))
+            if (btn == RT_NULL || !lv_obj_is_valid(btn)) continue;
+            if (t_le || uc_streaming)
             {
-                if (uc_streaming || t_le) lv_obj_add_state(btn, LV_STATE_DISABLED);
-                else lv_obj_remove_state(btn, LV_STATE_DISABLED);
+                lv_obj_add_state(btn, LV_STATE_DISABLED);
+                lv_obj_remove_state(btn, LV_STATE_CHECKED);
+                lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
             }
-            btn = s_bt_le_buttons[i];
-            if (btn != RT_NULL && lv_obj_is_valid(btn))
+            else
             {
-                /* buttons[0]=SERVER: A2DP 流/广播活跃/仅经典通道时禁用;
-                 * buttons[1]=BROADCAST: LE 单播流活跃时禁用 */
-                bool disable = (i == 0) ? (a2_streaming || bc_active || t_classic)
-                                        : uc_streaming;
-                if (disable) lv_obj_add_state(btn, LV_STATE_DISABLED);
-                else lv_obj_remove_state(btn, LV_STATE_DISABLED);
+                lv_obj_remove_state(btn, LV_STATE_DISABLED);
+                if ((int)s_bt_a2dp_role == i)
+                {
+                    lv_obj_add_state(btn, LV_STATE_CHECKED);
+                    lv_obj_set_style_border_color(btn, lv_color_hex(0x2196F3),
+                                                  LV_PART_MAIN | LV_STATE_CHECKED);
+                    lv_obj_set_style_border_width(btn, 2,
+                                                  LV_PART_MAIN | LV_STATE_CHECKED);
+                }
+                else
+                {
+                    lv_obj_remove_state(btn, LV_STATE_CHECKED);
+                    lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
+                }
             }
+        }
+        /* LE 角色: SERVER 在 A2DP 流/广播/仅经典时禁用; BROADCAST 在
+         * LE 单播流活跃时禁用 */
+        for (int i = 0; i < 2; i++)
+        {
+            lv_obj_t *btn = s_bt_le_buttons[i];
+            if (btn == RT_NULL || !lv_obj_is_valid(btn)) continue;
+            bool disable = (i == 0) ? (a2_streaming || bc_active || t_classic)
+                                    : uc_streaming;
+            if (disable) lv_obj_add_state(btn, LV_STATE_DISABLED);
+            else lv_obj_remove_state(btn, LV_STATE_DISABLED);
+        }
         }
         /* 常显音频路径指示 (含空闲/广播/通道态, 让三态模型随时可见) */
         if (s_bt_le_status != RT_NULL && lv_obj_is_valid(s_bt_le_status) &&
