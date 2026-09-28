@@ -277,6 +277,18 @@ void ft_sbc_stream_begin(void)
             {
                 s_sound_open = RT_TRUE;
             }
+            else
+            {
+                /* M8.x: keep-open 复用 —— LC3 路径流结束后 sound0 保持
+                 * open 只释放 owner (防快速 stop/start 竞态挂死)。本场
+                 * claim 已成功 = 设备的 open 归本场所有, open 返回失败
+                 * 即为复用场景: 按已打开处理 (实测 A2DP 静音根因: open
+                 * 失败 -> 解码照跑但无人出声)。格式尽力校正 (SBC 恒
+                 * 48k/16/2, 与 LC3 保活格式相同, 失败也无碍) */
+                (void)ft_audio_set_output_format(48000U, 16U, 2U);
+                s_sound_open = RT_TRUE;
+                rt_kprintf("[SBC] sound0 reused (keep-open from prior session)\n");
+            }
         }
     }
     s_cur_volume = 0xFFU;   /* 等 M33 报 AVRCP 音量 */
