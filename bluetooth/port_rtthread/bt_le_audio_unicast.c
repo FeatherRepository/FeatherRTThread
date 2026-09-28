@@ -460,25 +460,13 @@ static void ft_le_handle_qos_config(const rt_uint8_t *p, rt_uint32_t len)
 static void ft_le_handle_enable(const rt_uint8_t *p, rt_uint32_t len)
 {
     if (len < 2U) { s_stat_op_err++; return; }
-    /* M8.x 三态互斥: A2DP 播放中拒绝 ASE Enable —— 手机收到错误后按
-     * 自身策略回退 A2DP 或稍后重试; 避免双流竞态与静默挂起陷阱 */
+    /* M8.x 三态互斥 (LE 优先让位式): A2DP 播放中收到 ASE Enable →
+     * 先挂起 A2DP 流 (手机可感知, 重按播放即恢复), 再接受使能。
+     * 不做拒绝式防御 —— 拒绝会让 ASE 卡在 QOS_CONFIGURED, 手机不再
+     * 重试, 声道永久缺失 (实测 FR 卡死 + 回声根因) */
     {
-        extern int bt_a2dp_sink_streaming(void);
-        if (bt_a2dp_sink_streaming())
-        {
-            rt_uint8_t n = p[0];
-            const rt_uint8_t *q = &p[1];
-            rt_kprintf("[LEA] ASE enable rejected: A2DP streaming\n");
-            for (rt_uint8_t i = 0U; i < n; i++)
-            {
-                if ((rt_uint32_t)(q - p) + 2U > len) break;
-                ft_ase_t *ase = ft_le_ase_by_id(q[0]);
-                if (ase != RT_NULL) ft_le_ase_notify(ase, FT_LE_ERR_INVALID_ASE_STATE);
-                q += 2 + q[1];
-            }
-            s_stat_op_err++;
-            return;
-        }
+        extern void bt_a2dp_sink_suspend_if_active(const char *why);
+        bt_a2dp_sink_suspend_if_active("ASE enable (LE wins)");
     }
     rt_uint8_t n = p[0];
     const rt_uint8_t *q = &p[1];
