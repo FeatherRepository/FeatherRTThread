@@ -185,6 +185,19 @@ static void bt_a2dp_media_handler(uint8_t seid, uint8_t *packet, uint16_t size)
 }
 
 /* ---- A2DP 事件 (HCI_EVENT_A2DP_META) ---- */
+/* M8.x 三态互斥: A2DP 流停止的 fmt=0 发布 (LE 单播流活跃时跳过 ——
+ * 与 unicast 侧 ft_le_ring_stop 的守卫对称, 互不拆除对方输出) */
+static void bt_a2dp_publish_stop_fmt(void)
+{
+    extern int ft_le_audio_unicast_streaming(void);
+    if (ft_le_audio_unicast_streaming())
+    {
+        rt_kprintf("[A2DP] stop fmt suppressed (LE unicast owns output)\n");
+        return;
+    }
+    bt_a2dp_ring_publish_format(0U);
+}
+
 static void bt_a2dp_sink_packet_handler(uint8_t packet_type, uint16_t channel,
                                         uint8_t *packet, uint16_t size)
 {
@@ -252,14 +265,14 @@ static void bt_a2dp_sink_packet_handler(uint8_t packet_type, uint16_t channel,
 
     case A2DP_SUBEVENT_STREAM_SUSPENDED:
         s_stream_state = FT_A2DP_STATE_PAUSED;
-        bt_a2dp_ring_publish_format(0U);   /* fmt_rate=0: 流停, M55 关 sound0 */
+        bt_a2dp_publish_stop_fmt();
         rt_kprintf("[A2DP] stream suspended (packets %lu, dropped %lu)\n",
                    (unsigned long)s_media_packets, (unsigned long)s_media_dropped);
         break;
 
     case A2DP_SUBEVENT_STREAM_RELEASED:
         s_stream_state = FT_A2DP_STATE_CLOSED;
-        bt_a2dp_ring_publish_format(0U);
+        bt_a2dp_publish_stop_fmt();
         rt_kprintf("[A2DP] stream released (packets %lu, bytes %lu, dropped %lu)\n",
                    (unsigned long)s_media_packets, (unsigned long)s_media_bytes,
                    (unsigned long)s_media_dropped);

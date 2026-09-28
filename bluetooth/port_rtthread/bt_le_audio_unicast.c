@@ -139,6 +139,19 @@ static void ft_le_ring_start(void)
 
 static void ft_le_ring_stop(void)
 {
+    /* M8.x 三态互斥防竞态: 若 A2DP 流正在播放 (迁移时序: 手机先建
+     * A2DP 流、后释放 CIS), 此处发布 fmt=0 会让 M55 关掉 A2DP 刚打开
+     * 的 sound0 = 静音陷阱。此时跳过 fmt=0 发布, 让 A2DP 会话继续;
+     * 本模块的 ASE 状态复位照常进行。 */
+    {
+        extern int bt_a2dp_sink_streaming(void);
+        if (bt_a2dp_sink_streaming())
+        {
+            s_streaming = 0U;
+            rt_kprintf("[LEA] ring stop suppressed (A2DP owns output)\n");
+            return;
+        }
+    }
     FT_ALINK->fmt_rate = 0U;
     FT_ALINK->flags    = 0U;
     __DMB();
