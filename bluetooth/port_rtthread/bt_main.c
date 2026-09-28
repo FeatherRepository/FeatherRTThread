@@ -357,6 +357,7 @@ static void ft_notify_timer_handler(struct btstack_timer_source *ts)
 static btstack_timer_source_t s_adv_keepalive_timer;
 static void bt_adv_set_data(void);
 static void bt_adv_enable(void);
+static void bt_adv_start(void);
 /* M8.x 音频通道模式 (用户可在 UI 直接选择发 BLE 还是经典):
  * 0=双模 (两套发现机制都开, 默认)  1=仅 LE (只发 LE 广播, 经典扫描关)
  * 2=仅经典 (LE 可连接广播停, 经典扫描开; 广播源 handle3 不受影响,
@@ -365,7 +366,8 @@ static void bt_adv_enable(void);
 #define FT_TRANSPORT_DUAL         0
 #define FT_TRANSPORT_LE_ONLY      1
 #define FT_TRANSPORT_CLASSIC_ONLY 2
-static int s_audio_transport;
+/* 开机默认经典 A2DP (用户设定): 只开经典扫描, LE 可连接广播不发 */
+static int s_audio_transport = FT_TRANSPORT_CLASSIC_ONLY;
 int bt_service_le_pairing_mode(void)
 {
     return s_audio_transport == FT_TRANSPORT_LE_ONLY;
@@ -498,12 +500,17 @@ int bt_service_set_audio_transport(int mode)
     s_le_discovery_data[2] = s_le_adv_data[2];
     if (mode == FT_TRANSPORT_LE_ONLY)
     {
-        /* 仅 LE: 经典扫描关, 断既有经典 ACL; LE 广播带 0x06 flags 重发 */
+        /* 仅 LE: 经典扫描关, 断既有经典 ACL; LE 广播带 0x06 flags 重发
+         * (从开机经典默认态切来时广播集未注册, bt_adv_start 会注册) */
         gap_discoverable_control(0);
         gap_connectable_control(0);
         if (s_classic_connected && s_classic_handle != HCI_CON_HANDLE_INVALID)
         {
             gap_disconnect(s_classic_handle);
+        }
+        if (!s_le_adv_registered || !s_le_discovery_registered)
+        {
+            bt_adv_start();
         }
         bt_adv_set_data();
     }
@@ -528,9 +535,13 @@ int bt_service_set_audio_transport(int mode)
     }
     else
     {
-        /* 双模: 两套发现机制都开 */
+        /* 双模: 两套发现机制都开 (从仅经典切出时广播集未注册, 先注册) */
         gap_discoverable_control(1);
         gap_connectable_control(1);
+        if (!s_le_adv_registered || !s_le_discovery_registered)
+        {
+            bt_adv_start();
+        }
         bt_adv_set_data();
     }
     if (mode != FT_TRANSPORT_CLASSIC_ONLY && s_le_discovery_registered)
@@ -790,7 +801,11 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                        local_addr[3], local_addr[4], local_addr[5]);
             feathertalk_ipc_send_event(40);
             BT_CP(60);
-            bt_adv_start();
+            /* 开机默认经典 A2DP 通道时: 不启动 LE 可连接广播 */
+            if (s_audio_transport != FT_TRANSPORT_CLASSIC_ONLY)
+            {
+                bt_adv_start();
+            }
             /* M4a: Classic 可见+可连 (与 LE 广播并存, 双模标准做法)。
              * 这些是 gap task 型 API, 经 hci_run 排队发送, 不与上面的
              * adv 串行链冲突 */
@@ -804,6 +819,17 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             /* 仅 LE 模式关闭经典可发现/可连; 双模/仅经典均开 */
             gap_discoverable_control(s_audio_transport == FT_TRANSPORT_LE_ONLY ? 0 : 1);
             gap_connectable_control(s_audio_transport == FT_TRANSPORT_LE_ONLY ? 0 : 1);
+            /* 仅经典模式: READY 判定不经过 LE 广播链 (0x2039), 直接就绪 */
+            if (s_audio_transport == FT_TRANSPORT_CLASSIC_ONLY)
+            {
+                s_bt_state = 2;
+                ft_radio_set_state(FT_RADIO_BT, FT_RADIO_READY, 0);
+                rt_kprintf("[BT] classic-only ready (A2DP discoverable)\n");
+                feathertalk_ipc_send_event(41);
+                sm_init();
+                sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
+                sm_set_authentication_requirements(SM_AUTHREQ_BONDING | SM_AUTHREQ_SECURE_CONNECTION);
+            }
 #else
             /* LE-only 验证: 关闭 Classic 可发现/可连, 手机无 A2DP 可走 */
             gap_discoverable_control(0);
