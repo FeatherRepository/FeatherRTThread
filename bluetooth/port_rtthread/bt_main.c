@@ -357,6 +357,23 @@ static void ft_notify_timer_handler(struct btstack_timer_source *ts)
 static btstack_timer_source_t s_adv_keepalive_timer;
 static void bt_adv_set_data(void);
 static void bt_adv_enable(void);
+/* M8.x 音频通道模式 (用户可在 UI 直接选择发 BLE 还是经典):
+ * 0=双模 (两套发现机制都开, 默认)  1=仅 LE (只发 LE 广播, 经典扫描关)
+ * 2=仅经典 (LE 可连接广播停, 经典扫描开; 广播源 handle3 不受影响,
+ *   转发场景 —— A2DP 收流 + Auracast 出局 —— 在经典模式下照常可用)。
+ * 原 LE 优先配对模式 = 仅 LE 模式的复用 (HyperOS 配对判型需要)。 */
+#define FT_TRANSPORT_DUAL         0
+#define FT_TRANSPORT_LE_ONLY      1
+#define FT_TRANSPORT_CLASSIC_ONLY 2
+static int s_audio_transport;
+int bt_service_le_pairing_mode(void)
+{
+    return s_audio_transport == FT_TRANSPORT_LE_ONLY;
+}
+int bt_service_audio_transport(void)
+{
+    return s_audio_transport;
+}
 static void ft_adv_keepalive_handler(struct btstack_timer_source *ts)
 {
     if (s_desired_on && s_bt_state == BT_STARTING)
@@ -372,9 +389,11 @@ static void ft_adv_keepalive_handler(struct btstack_timer_source *ts)
             bt_adv_enable();     /* enable 步被丢弃: 幂等重发 */
         }
     }
-    if ((s_bt_state == BT_READY) && s_desired_on && !s_gatt_connected)
+    if ((s_bt_state == BT_READY) && s_desired_on && !s_gatt_connected &&
+        s_audio_transport != FT_TRANSPORT_CLASSIC_ONLY)
     {
-        /* 控制器若已在广播, 此命令幂等; 若假死则救活 */
+        /* 控制器若已在广播, 此命令幂等; 若假死则救活。
+         * 仅经典模式: LE 可连接广播被用户关闭, 保活不得复活它 */
         bt_adv_enable();
     }
     btstack_run_loop_set_timer(ts, 3000);
@@ -432,15 +451,6 @@ static uint8_t s_le_discovery_data[] = {
     11, 0x03, 0x50, 0x18, 0x4e, 0x18, 0x53, 0x18,
     0x44, 0x18, 0x55, 0x18
 };
-/* M8.x 双模顺序绑定: LE 优先配对模式 (运行时)。开启后广播 flags 改
- * 0x06 (LE-only) 且关闭经典可发现/可连 —— 手机在配对时以 LE 音频设备
- * 对待本机 (发现 ASCS 并建立 LE 音频关系), 配对完成后切回双模。
- * 背景: HyperOS 对已按经典配对的设备不做 LE 事后探测, 开关永不出现 */
-static int s_le_only_pairing;
-int bt_service_le_pairing_mode(void)
-{
-    return s_le_only_pairing;
-}
 static const le_extended_advertising_parameters_t s_le_adv_params = {
     .advertising_event_properties = 1,
     .primary_advertising_interval_min = 160,
@@ -476,36 +486,68 @@ static uint8_t s_le_adv_data[] = {
  * on: 广播 flags 改 0x06 + 关经典可发现/可连 + 断开既有经典 ACL,
  *     手机只能以 LE 配对本机 (发现 ASCS, 建立 LE 音频关系)。
  * off: 恢复双模形态。 */
-int bt_service_set_le_pairing_mode(int on)
+/* M8.x 音频通道切换 (UI 音频通道行 / IPC 驱动)。仅 READY 态可切
+ * (避免与启动期广播链竞态); 模式为运行态, 重启回双模。 */
+int bt_service_set_audio_transport(int mode)
 {
-    if (on != 0 && on != 1) return -RT_EINVAL;
-    if (s_le_only_pairing == on) return RT_EOK;
-    s_le_only_pairing = on;
-    s_le_adv_data[2]       = on ? 0x06 : 0x02;
-    s_le_discovery_data[2] = on ? 0x06 : 0x02;
-    if (s_bt_state != BT_READY) return RT_EOK;
-    if (on)
+    if (mode < FT_TRANSPORT_DUAL || mode > FT_TRANSPORT_CLASSIC_ONLY) return -RT_EINVAL;
+    if (s_audio_transport == mode) return RT_EOK;
+    if (s_bt_state != BT_READY) return -RT_EBUSY;
+    s_audio_transport = mode;
+    s_le_adv_data[2]       = (mode == FT_TRANSPORT_LE_ONLY) ? 0x06 : 0x02;
+    s_le_discovery_data[2] = s_le_adv_data[2];
+    if (mode == FT_TRANSPORT_LE_ONLY)
     {
+        /* 仅 LE: 经典扫描关, 断既有经典 ACL; LE 广播带 0x06 flags 重发 */
         gap_discoverable_control(0);
         gap_connectable_control(0);
         if (s_classic_connected && s_classic_handle != HCI_CON_HANDLE_INVALID)
         {
             gap_disconnect(s_classic_handle);
         }
+        bt_adv_set_data();
+    }
+    else if (mode == FT_TRANSPORT_CLASSIC_ONLY)
+    {
+        /* 仅经典: LE 可连接广播停 (广播源 handle3 不在管辖, 转发可用),
+         * LE 链路断开 —— 手机重连时将发现 LE 不可连 */
+        gap_discoverable_control(1);
+        gap_connectable_control(1);
+        if (s_gatt_connected && s_gatt_con_handle != HCI_CON_HANDLE_INVALID)
+        {
+            gap_disconnect(s_gatt_con_handle);
+        }
+        if (s_le_adv_registered)
+        {
+            (void)gap_extended_advertising_stop(s_le_adv_handle);
+        }
+        if (s_le_discovery_registered)
+        {
+            (void)gap_extended_advertising_stop(s_le_discovery_handle);
+        }
     }
     else
     {
+        /* 双模: 两套发现机制都开 */
         gap_discoverable_control(1);
         gap_connectable_control(1);
+        bt_adv_set_data();
     }
-    bt_adv_set_data();
-    if (s_le_discovery_registered)
+    if (mode != FT_TRANSPORT_CLASSIC_ONLY && s_le_discovery_registered)
     {
         (void)gap_extended_advertising_set_adv_data(s_le_discovery_handle,
             sizeof(s_le_discovery_data), s_le_discovery_data);
     }
-    rt_kprintf("[BT] LE pairing mode %s\n", on ? "ON (flags 0x06)" : "OFF (dual-mode)");
+    rt_kprintf("[BT] audio transport -> %s\n",
+               mode == FT_TRANSPORT_LE_ONLY ? "LE_ONLY" :
+               mode == FT_TRANSPORT_CLASSIC_ONLY ? "CLASSIC_ONLY" : "DUAL");
+    feathertalk_ipc_send_event(86);
     return RT_EOK;
+}
+
+int bt_service_set_le_pairing_mode(int on)
+{
+    return bt_service_set_audio_transport(on ? FT_TRANSPORT_LE_ONLY : FT_TRANSPORT_DUAL);
 }
 static void bt_adv_enable(void)
 {
@@ -759,9 +801,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
              * (实测: 小米15U 只连经典 A2DP, 从不发起 LE 连接) */
             bt_classic_eir_setup();
 #if !FEATHERTALK_BT_LE_AUDIO_ONLY
-            /* 运行时 LE 优先配对模式下同样关闭经典可发现/可连 */
-            gap_discoverable_control(s_le_only_pairing ? 0 : 1);
-            gap_connectable_control(s_le_only_pairing ? 0 : 1);
+            /* 仅 LE 模式关闭经典可发现/可连; 双模/仅经典均开 */
+            gap_discoverable_control(s_audio_transport == FT_TRANSPORT_LE_ONLY ? 0 : 1);
+            gap_connectable_control(s_audio_transport == FT_TRANSPORT_LE_ONLY ? 0 : 1);
 #else
             /* LE-only 验证: 关闭 Classic 可发现/可连, 手机无 A2DP 可走 */
             gap_discoverable_control(0);
@@ -781,12 +823,14 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         if (opcode == 0x2006)
         {
             g_adv_cc_status[ADV_CC_PARAMS] = status;
-            if (status == 0U && s_desired_on && s_bt_state != BT_STOPPING) bt_adv_set_data();
+            if (status == 0U && s_desired_on && s_bt_state != BT_STOPPING &&
+                s_audio_transport != FT_TRANSPORT_CLASSIC_ONLY) bt_adv_set_data();
         }
         else if (opcode == 0x2008)
         {
             g_adv_cc_status[ADV_CC_DATA] = status;
-            if (status == 0U && s_desired_on && s_bt_state != BT_STOPPING) bt_adv_enable();
+            if (status == 0U && s_desired_on && s_bt_state != BT_STOPPING &&
+                s_audio_transport != FT_TRANSPORT_CLASSIC_ONLY) bt_adv_enable();
         }
         else if (opcode == 0x2039)
         {
@@ -892,7 +936,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         {
             s_classic_connected = 0;
             rt_kprintf("[BT] Classic disconnected, back to discoverable\n");
-            if (s_desired_on && s_bt_state == BT_READY && !FEATHERTALK_BT_LE_AUDIO_ONLY && !s_le_only_pairing) {
+            if (s_desired_on && s_bt_state == BT_READY && !FEATHERTALK_BT_LE_AUDIO_ONLY && s_audio_transport != FT_TRANSPORT_LE_ONLY) {
                 gap_discoverable_control(1);
                 gap_connectable_control(1);
             }

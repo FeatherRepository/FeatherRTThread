@@ -64,8 +64,15 @@ typedef enum
     /* M6-BT: 蓝牙角色控制 (value = 目标角色枚举) */
     FEATHERTALK_QUICK_BT_A2DP_ROLE = 4,   /* value: 0=SINK 1=SOURCE */
     FEATHERTALK_QUICK_BT_LE_ROLE   = 5,   /* value: 0=OFF 1=SERVER 2=BROADCAST (M8) */
+    /* M8.x 音频通道: UI 直接选择板子发 BLE 还是经典 (value = 目标通道) */
+    FEATHERTALK_QUICK_BT_TRANSPORT = 6,   /* value: 0=DUAL 1=LE_ONLY 2=CLASSIC_ONLY */
     FEATHERTALK_QUICK_COUNT
 } feathertalk_quick_control_t;
+
+/* M8.x 音频通道模式标志, 附载在 quick_status.enabled 高半字节
+ * (低 4 位为能力位; 两位都清 = 双模默认态) */
+#define FEATHERTALK_TRANSPORT_FLAG_LE_ONLY      (1U << 4)
+#define FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY (1U << 5)
 
 typedef enum
 {

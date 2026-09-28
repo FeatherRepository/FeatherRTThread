@@ -284,6 +284,14 @@ static rt_bool_t feathertalk_ipc_send_quick_status(rt_uint32_t sequence)
         if (ft_le_audio_broadcast_active())
             message.connected |= (uint8_t)FEATHERTALK_AUDIO_FLAG_BROADCAST;
     }
+    /* M8.x 音频通道模式附载在 enabled 高半字节 (两位全清 = 双模) */
+    {
+        extern int bt_service_audio_transport(void);
+        if (bt_service_audio_transport() == 1)
+            message.enabled |= (uint8_t)FEATHERTALK_TRANSPORT_FLAG_LE_ONLY;
+        else if (bt_service_audio_transport() == 2)
+            message.enabled |= (uint8_t)FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY;
+    }
 #endif
     message.wifi_signal_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
     message.brightness_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
@@ -383,6 +391,14 @@ static void feathertalk_ipc_receive(void)
                     rc == -2 ? FEATHERTALK_QUICK_RESULT_FAILED :
                     rc != RT_EOK ? FEATHERTALK_QUICK_RESULT_FAILED :
                     FEATHERTALK_QUICK_RESULT_OK;
+            }
+            else if (command.control == FEATHERTALK_QUICK_BT_TRANSPORT)
+            {
+                /* M8.x 音频通道: 0=双模 1=仅LE 2=仅经典 (UI 直接切换) */
+                extern int bt_service_set_audio_transport(int mode);
+                g_quick_last_result =
+                    bt_service_set_audio_transport((int)command.value) == RT_EOK ?
+                    FEATHERTALK_QUICK_RESULT_OK : FEATHERTALK_QUICK_RESULT_FAILED;
             }
             else
 #endif

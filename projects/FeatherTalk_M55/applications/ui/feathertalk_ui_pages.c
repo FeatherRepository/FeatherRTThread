@@ -335,6 +335,7 @@ static lv_obj_t *s_usb_role_buttons[2];
 static lv_obj_t *s_bt_a2dp_buttons[2];
 static lv_obj_t *s_bt_le_buttons[2];
 static lv_obj_t *s_bt_le_status;
+static lv_obj_t *s_bt_transport_buttons[2];   /* [0]=LE 音频 [1]=经典 A2DP */
 static uint8_t s_bt_a2dp_role;   /* 0=SINK 1=SOURCE */
 static uint8_t s_bt_le_role;     /* 0=SERVER 单播 1=BROADCAST 广播 */
 static lv_obj_t *s_usb_function_buttons[2];
@@ -2567,33 +2568,49 @@ static void settings_radio_refresh(lv_timer_t *timer)
         }
     }
 
-    /* M8.x 三态互斥: 按钮可用性随音频状态实时置灰/恢复
+    /* M8.x 三态互斥 + 音频通道: 按钮可用性随音频状态实时置灰/恢复
      * (LE 单播流 ↔ A2DP 流互斥; 广播与 A2DP 可共存 —— 转发场景;
-     *  广播与单播互斥: 广播活跃时 SERVER 也置灰) */
+     *  广播与单播互斥: 广播活跃时 SERVER 也置灰;
+     *  音频通道: 仅LE → A2DP 角色区整体禁用, 仅经典 → SERVER 禁用) */
     {
         uint8_t audio = valid ? (uint8_t)(status.connected & FEATHERTALK_AUDIO_FLAG_MASK) : 0U;
+        uint8_t transport = valid ? (uint8_t)(status.enabled & (FEATHERTALK_TRANSPORT_FLAG_LE_ONLY |
+                                                                FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY)) : 0U;
+        bool t_le = (transport & FEATHERTALK_TRANSPORT_FLAG_LE_ONLY) != 0U;
+        bool t_classic = (transport & FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY) != 0U;
         bool uc_streaming = (audio & FEATHERTALK_AUDIO_FLAG_LE_UNICAST) != 0U;
         bool a2_streaming = (audio & FEATHERTALK_AUDIO_FLAG_A2DP_SINK) != 0U;
         bool bc_active = (audio & FEATHERTALK_AUDIO_FLAG_BROADCAST) != 0U;
+        /* 通道按钮选中态 */
+        for (int i = 0; i < 2; i++)
+        {
+            lv_obj_t *btn = s_bt_transport_buttons[i];
+            if (btn == RT_NULL || !lv_obj_is_valid(btn)) continue;
+            bool selected = (i == 0) ? t_le : t_classic;
+            if (selected) lv_obj_add_state(btn, LV_STATE_CHECKED);
+            else lv_obj_remove_state(btn, LV_STATE_CHECKED);
+            lv_obj_set_style_border_width(btn, selected ? 2 : 0, LV_PART_MAIN | LV_STATE_CHECKED);
+        }
         for (int i = 0; i < 2; i++)
         {
             lv_obj_t *btn = s_bt_a2dp_buttons[i];
             if (btn != RT_NULL && lv_obj_is_valid(btn))
             {
-                if (uc_streaming) lv_obj_add_state(btn, LV_STATE_DISABLED);
+                if (uc_streaming || t_le) lv_obj_add_state(btn, LV_STATE_DISABLED);
                 else lv_obj_remove_state(btn, LV_STATE_DISABLED);
             }
             btn = s_bt_le_buttons[i];
             if (btn != RT_NULL && lv_obj_is_valid(btn))
             {
-                /* buttons[0]=SERVER: A2DP 流或广播活跃时禁用 (单播互斥);
+                /* buttons[0]=SERVER: A2DP 流/广播活跃/仅经典通道时禁用;
                  * buttons[1]=BROADCAST: LE 单播流活跃时禁用 */
-                bool disable = (i == 0) ? (a2_streaming || bc_active) : uc_streaming;
+                bool disable = (i == 0) ? (a2_streaming || bc_active || t_classic)
+                                        : uc_streaming;
                 if (disable) lv_obj_add_state(btn, LV_STATE_DISABLED);
                 else lv_obj_remove_state(btn, LV_STATE_DISABLED);
             }
         }
-        /* 常显音频路径指示 (含空闲/广播态, 让三态模型随时可见) */
+        /* 常显音频路径指示 (含空闲/广播/通道态, 让三态模型随时可见) */
         if (s_bt_le_status != RT_NULL && lv_obj_is_valid(s_bt_le_status) &&
             !(valid && status.last_control == FEATHERTALK_QUICK_BT_LE_ROLE &&
               status.result == FEATHERTALK_QUICK_RESULT_PENDING))
@@ -2615,6 +2632,14 @@ static void settings_radio_refresh(lv_timer_t *timer)
                 lv_snprintf(path_text, sizeof(path_text), "%s",
                     ft_preferences_text("当前路径：Auracast 广播中（SERVER 已互斥）",
                                         "Path: Auracast broadcasting (SERVER locked)"));
+            else if (t_le)
+                lv_snprintf(path_text, sizeof(path_text), "%s",
+                    ft_preferences_text("通道：仅 LE 音频（经典扫描已关，LE 广播发播中）",
+                                        "Transport: LE only (classic scan off)"));
+            else if (t_classic)
+                lv_snprintf(path_text, sizeof(path_text), "%s",
+                    ft_preferences_text("通道：仅经典 A2DP（LE 可连接广播已停）",
+                                        "Transport: classic only (LE connectable adv off)"));
             else
                 lv_snprintf(path_text, sizeof(path_text), "%s",
                     ft_preferences_text("当前路径：空闲（A2DP 与 LE 单播互斥，广播可与 A2DP 共存）",
@@ -2759,6 +2784,18 @@ static void settings_bt_a2dp_role_clicked_cb(lv_event_t *event)
     (void)feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_A2DP_ROLE, role);
     s_bt_a2dp_role = role;
     settings_bt_role_refresh();
+}
+
+/* M8.x 音频通道切换回调 (0=双模 1=仅LE 2=仅经典)。
+ * 仅LE = 只发 BLE 广播 (经典扫描关); 仅经典 = LE 可连接广播停。
+ * 切换请求发 M33 后由刷新器按 enabled 高半字节标志回显选中态 */
+static void settings_bt_transport_clicked_cb(lv_event_t *event)
+{
+    uint8_t mode = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
+    (void)feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_TRANSPORT, mode);
+    if (s_bt_le_status != RT_NULL && lv_obj_is_valid(s_bt_le_status))
+        lv_label_set_text(s_bt_le_status,
+                          ft_preferences_text("通道切换请求已发送…", "Transport switch sent..."));
 }
 
 static void settings_bt_le_role_refresh(void)
@@ -2908,6 +2945,37 @@ static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
     lv_label_set_text(label, ft_preferences_text(
         "LE Audio（CIS 单播 / Auracast 广播）：单播与广播互斥，同一时间只有一个活跃。",
         "LE Audio (CIS unicast / Auracast broadcast): unicast and broadcast are mutually exclusive."));
+    lv_obj_set_style_text_color(label, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
+
+    /* -- 音频通道（M8.x: 直接选择板子发 BLE 还是经典） -- */
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("音频通道", "Audio transport"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), layout->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    track_object(&s_bt_transport_buttons[0],
+                 create_flat_button(row,
+                    ft_preferences_text("LE 音频", "LE audio"),
+                    settings_bt_transport_clicked_cb, (void *)(uintptr_t)1U));
+    track_object(&s_bt_transport_buttons[1],
+                 create_flat_button(row,
+                    ft_preferences_text("经典 A2DP", "Classic A2DP"),
+                    settings_bt_transport_clicked_cb, (void *)(uintptr_t)2U));
+    lv_obj_set_width(s_bt_transport_buttons[0], 0);
+    lv_obj_set_width(s_bt_transport_buttons[1], 0);
+    lv_obj_set_flex_grow(s_bt_transport_buttons[0], 1);
+    lv_obj_set_flex_grow(s_bt_transport_buttons[1], 1);
+
+    label = lv_label_create(page);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(label, ft_preferences_text(
+        "LE 音频 = 只发 BLE 广播（经典扫描关）；经典 A2DP = 只开经典扫描（LE 可连接广播停）。默认双模。",
+        "LE audio = BLE advertising only (classic scan off); Classic A2DP = classic scan only (LE adv off). Dual-mode by default."));
     lv_obj_set_style_text_color(label, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
     lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
 
