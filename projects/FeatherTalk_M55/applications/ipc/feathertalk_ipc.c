@@ -1,12 +1,20 @@
 #include <rtdevice.h>
 #include <rtthread.h>
 #include <rthw.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <drv_ipc.h>
 #include <feathertalk/ipc_protocol.h>
 
 #include "feathertalk_ipc.h"
 #include "feathertalk_wifi.h"
+
+/* M8.x: 音频通道选择持久化文件 (B+C 方案: UI 切换落盘, 重启恢复) */
+#define FT_TRANSPORT_CFG_FILE "/flash/ft_transport.cfg"
+#define FT_TRANSPORT_RESTORE_TIMEOUT_MS 60000
+static void feathertalk_transport_restore_entry(void *param);
 
 #define FEATHERTALK_REPORT_INTERVAL_MS 10000U
 
@@ -482,7 +490,46 @@ int feathertalk_ipc_start(void)
     }
 
     rt_thread_startup(g_ipc_thread);
+
+    /* M8.x (B+C): 音频通道选择恢复 —— 等 M33 蓝牙就绪 (有界) 后把
+     * 上次保存的通道发给 M33 应用。独立线程, 不阻塞 IPC 主循环 */
+    {
+        rt_thread_t t = rt_thread_create("ft_tcfg",
+                                         feathertalk_transport_restore_entry,
+                                         RT_NULL, 1024, 20, 10);
+        if (t != RT_NULL) rt_thread_startup(t);
+    }
     return RT_EOK;
+}
+
+/* 启动恢复: 等 M33 蓝牙 enabled (最多 60s), 读文件应用保存的通道 */
+static void feathertalk_transport_restore_entry(void *param)
+{
+    uint8_t rec[2] = {0, 0};
+    int fd;
+    (void)param;
+    rt_thread_mdelay(3000);   /* 等 /flash 挂载 */
+    fd = open(FT_TRANSPORT_CFG_FILE, O_RDONLY | O_BINARY, 0);
+    if (fd < 0) return;   /* 无保存记录: 用默认 (经典) */
+    if (read(fd, rec, 2) != 2 || rec[0] > 2 || rec[1] != (uint8_t)(0x5A ^ rec[0]))
+    {
+        close(fd);
+        return;
+    }
+    close(fd);
+    /* 等 M33 蓝牙就绪 (quick status enabled 位) */
+    for (int i = 0; i < FT_TRANSPORT_RESTORE_TIMEOUT_MS / 500; i++)
+    {
+        feathertalk_quick_status_t st;
+        if (feathertalk_ipc_get_quick_status(&st) == RT_EOK &&
+            (st.enabled & FEATHERTALK_QUICK_CAP_BLUETOOTH))
+        {
+            break;
+        }
+        rt_thread_mdelay(500);
+    }
+    rt_kprintf("[IPC] restore audio transport %u (saved)\n", rec[0]);
+    (void)feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_TRANSPORT, rec[0]);
 }
 
 void feathertalk_ipc_set_lvgl_ready(void)
@@ -570,6 +617,16 @@ int feathertalk_ipc_set_quick_control(uint8_t control, uint8_t value)
     if (control == FEATHERTALK_QUICK_WIFI) {
         if (value > 1U) return -RT_EINVAL;
         return feathertalk_wifi_enable(value != 0U);
+    }
+    /* M8.x: 音频通道选择持久化 (B+C 方案) —— UI/msh 切通道时落盘,
+     * 启动恢复线程在 M33 蓝牙就绪后自动应用 */
+    if (control == FEATHERTALK_QUICK_BT_TRANSPORT) {
+        int fd = open(FT_TRANSPORT_CFG_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0666);
+        if (fd >= 0) {
+            uint8_t rec[2] = { value, (uint8_t)(0x5A ^ value) };  /* 值 + 校验字节 */
+            (void)write(fd, rec, 2);
+            close(fd);
+        }
     }
     level = rt_hw_interrupt_disable();
     if (g_quick_command_pending)
