@@ -2578,14 +2578,25 @@ static void settings_radio_refresh(lv_timer_t *timer)
                                                                 FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY)) : 0U;
         bool t_le = (transport & FEATHERTALK_TRANSPORT_FLAG_LE_ONLY) != 0U;
         bool t_classic = (transport & FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY) != 0U;
-        /* 音频通道按钮选中态 (双模=都不选) */
+        /* 音频通道按钮选中态 (双模=都不选) + CHECKED 可视样式 */
         for (int i = 0; i < 2; i++)
         {
             lv_obj_t *btn = s_bt_transport_buttons[i];
             if (btn == RT_NULL || !lv_obj_is_valid(btn)) continue;
             bool sel = (i == 0) ? t_classic : t_le;
-            if (sel) lv_obj_add_state(btn, LV_STATE_CHECKED);
-            else lv_obj_remove_state(btn, LV_STATE_CHECKED);
+            if (sel)
+            {
+                lv_obj_add_state(btn, LV_STATE_CHECKED);
+                lv_obj_set_style_border_color(btn, lv_color_hex(0x2196F3),
+                                              LV_PART_MAIN | LV_STATE_CHECKED);
+                lv_obj_set_style_border_width(btn, 2,
+                                              LV_PART_MAIN | LV_STATE_CHECKED);
+            }
+            else
+            {
+                lv_obj_remove_state(btn, LV_STATE_CHECKED);
+                lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
+            }
         }
         bool uc_streaming = (audio & FEATHERTALK_AUDIO_FLAG_LE_UNICAST) != 0U;
         bool a2_streaming = (audio & FEATHERTALK_AUDIO_FLAG_A2DP_SINK) != 0U;
