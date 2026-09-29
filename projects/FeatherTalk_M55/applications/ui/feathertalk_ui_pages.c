@@ -659,6 +659,37 @@ static lv_obj_t *create_state_button(lv_obj_t *parent, const char *text,
     return button;
 }
 
+/* M8.x: 三组按钮统一的选中态视觉 —— 激活=橙底白字, 未激活=蓝底白字,
+ * 锁定(禁用)=暗底暗字。所有音频按钮共用, 保证观感一致 */
+#define FT_BTN_BG_ACTIVE   0xFF8C00U
+#define FT_BTN_BG_NORMAL   0x1565C0U
+#define FT_BTN_BG_LOCKED   0x3A2A2AU
+#define FT_BTN_FG          0xFFFFFFU
+#define FT_BTN_FG_DIM      0x808080U
+
+static void ft_state_button_apply(lv_obj_t *btn, int state)
+{
+    uint32_t bg;
+    uint32_t fg;
+    if (btn == RT_NULL || !lv_obj_is_valid(btn)) return;
+    if (state < 0)   /* locked */
+    {
+        bg = FT_BTN_BG_LOCKED; fg = FT_BTN_FG_DIM;
+        lv_obj_add_state(btn, LV_STATE_DISABLED);
+    }
+    else
+    {
+        lv_obj_remove_state(btn, LV_STATE_DISABLED);
+        bg = state ? FT_BTN_BG_ACTIVE : FT_BTN_BG_NORMAL;
+        fg = FT_BTN_FG;
+    }
+    lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN | LV_STATE_DISABLED);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_text_color(btn, lv_color_hex(fg), LV_PART_MAIN);
+}
+
 static lv_obj_t *create_flat_button(lv_obj_t *parent, const char *text,
                                     lv_event_cb_t callback, void *user_data)
 {
@@ -2603,57 +2634,22 @@ static void settings_radio_refresh(lv_timer_t *timer)
     bool a2_streaming = (audio & FEATHERTALK_AUDIO_FLAG_A2DP_SINK) != 0U;
     bool bc_active = (audio & FEATHERTALK_AUDIO_FLAG_BROADCAST) != 0U;
     {
-        /* 按钮配色 (用户指定): 当前激活=橙底白字, 未激活=蓝底白字。
-         * 颜色显式覆盖默认/CHECKED/DISABLED 三个状态, 主题色不再干扰 */
-        #define FT_BTN_BG_ACTIVE   0xFF8C00U
-        #define FT_BTN_BG_NORMAL   0x1565C0U
-        #define FT_BTN_BG_LOCKED   0x3A2A2AU
-        #define FT_BTN_FG          0xFFFFFFU
-        #define FT_BTN_FG_DIM      0x909090U
+        /* 三组按钮统一视觉: 激活橙/未激活蓝/锁定暗 (ft_state_button_apply) */
         for (int i = 0; i < 2; i++)
         {
-            lv_obj_t *btn = s_bt_transport_buttons[i];
-            if (btn == RT_NULL || !lv_obj_is_valid(btn)) continue;
-            bool sel = (i == 0) ? t_classic : t_le;
-            uint32_t bg = sel ? FT_BTN_BG_ACTIVE : FT_BTN_BG_NORMAL;
-            lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN);
-            lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN | LV_STATE_CHECKED);
-            lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN | LV_STATE_DISABLED);
-            lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
-            lv_obj_set_style_text_color(btn, lv_color_hex(FT_BTN_FG), LV_PART_MAIN);
+            ft_state_button_apply(s_bt_transport_buttons[i],
+                                  (i == 0) ? (t_classic ? 1 : 0) : (t_le ? 1 : 0));
         }
-        /* A2DP 角色: 仅经典/双模时可用且按角色高亮; 仅 LE 时整体禁用 */
         for (int i = 0; i < 2; i++)
         {
-            lv_obj_t *btn = s_bt_a2dp_buttons[i];
-            if (btn == RT_NULL || !lv_obj_is_valid(btn)) continue;
-            if (t_le || uc_streaming)
-            {
-                lv_obj_add_state(btn, LV_STATE_DISABLED);
-                lv_obj_set_style_bg_color(btn, lv_color_hex(FT_BTN_BG_LOCKED), LV_PART_MAIN);
-                lv_obj_set_style_bg_color(btn, lv_color_hex(FT_BTN_BG_LOCKED), LV_PART_MAIN | LV_STATE_DISABLED);
-                lv_obj_set_style_text_color(btn, lv_color_hex(FT_BTN_FG_DIM), LV_PART_MAIN);
-            }
-            else
-            {
-                lv_obj_remove_state(btn, LV_STATE_DISABLED);
-                bool role_sel = ((int)s_bt_a2dp_role == i);
-                uint32_t bg = role_sel ? FT_BTN_BG_ACTIVE : FT_BTN_BG_NORMAL;
-                lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN);
-                lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN | LV_STATE_CHECKED);
-                lv_obj_set_style_text_color(btn, lv_color_hex(FT_BTN_FG), LV_PART_MAIN);
-            }
+            ft_state_button_apply(s_bt_a2dp_buttons[i],
+                                  (t_le || uc_streaming) ? -1 : ((int)s_bt_a2dp_role == i));
         }
-        /* LE 角色: SERVER 在 A2DP 流/广播/仅经典时禁用; BROADCAST 在
-         * LE 单播流活跃时禁用 */
         for (int i = 0; i < 2; i++)
         {
-            lv_obj_t *btn = s_bt_le_buttons[i];
-            if (btn == RT_NULL || !lv_obj_is_valid(btn)) continue;
-            bool disable = (i == 0) ? (a2_streaming || bc_active || t_classic)
-                                    : uc_streaming;
-            if (disable) lv_obj_add_state(btn, LV_STATE_DISABLED);
-            else lv_obj_remove_state(btn, LV_STATE_DISABLED);
+            bool locked = (i == 0) ? (a2_streaming || bc_active || t_classic)
+                                   : uc_streaming;
+            ft_state_button_apply(s_bt_le_buttons[i], locked ? -1 : 0);
         }
         /* 常显音频路径指示 (含空闲/广播/通道态, 让三态模型随时可见) */
         if (s_bt_le_status != RT_NULL && lv_obj_is_valid(s_bt_le_status) &&
