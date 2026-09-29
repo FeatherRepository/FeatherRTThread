@@ -178,9 +178,9 @@ static void ft_bcst_build_base(void)
 static uint8_t s_ext_adv_data[] = {
     6, 0x16, 0x52, 0x18,
     (FT_BCST_ID >> 16) & 0xFF, (FT_BCST_ID >> 8) & 0xFF, FT_BCST_ID & 0xFF,
-    6, 0x16, 0x56, 0x18, 0x00, 0x00,        /* features: 未加密/无质量位; metadata 空 */
-    4, 0x19, 0x00, 0x0A,                    /* Appearance 0x0A00 */
-    13, 0x30, 'F', 'T', '-', 'B', 'c', 'a', 's', 't', '-', '0', '1',
+    5, 0x16, 0x56, 0x18, 0x00, 0x00,        /* features: 未加密/无质量位; metadata 空 */
+    3, 0x19, 0x00, 0x0A,                    /* Appearance 0x0A00 */
+    12, 0x30, 'F', 'T', '-', 'B', 'c', 'a', 's', 't', '-', '0', '1',
     12, 0x09, 'F', 'e', 'a', 't', 'h', 'e', 'r', 'T', 'a', 'l', 'k',
 };
 
