@@ -335,7 +335,7 @@ static lv_obj_t *s_usb_role_buttons[2];
 static lv_obj_t *s_bt_a2dp_buttons[2];
 static lv_obj_t *s_bt_le_buttons[2];
 static lv_obj_t *s_bt_le_status;
-static lv_obj_t *s_bt_transport_buttons[2];   /* [0]=LE 音频 [1]=经典 A2DP */
+static lv_obj_t *s_bt_transport_buttons[2];   /* [0]=经典 A2DP [1]=LE 音频 (与页面创建顺序一致) */
 static uint8_t s_bt_a2dp_role;   /* 0=SINK 1=SOURCE */
 static uint8_t s_bt_le_role;     /* 0=SERVER 单播 1=BROADCAST 广播 */
 static lv_obj_t *s_usb_function_buttons[2];
@@ -635,6 +635,28 @@ static lv_obj_t *create_text_page(lv_obj_t *parent, const char *title,
     lv_obj_set_style_text_font(description, ft_layout_font(16), LV_PART_MAIN);
     lv_obj_set_style_text_line_space(description, ft_layout_px(8), LV_PART_MAIN);
     return page;
+}
+
+/* M8.x: 音频通道/角色按钮专用创建 —— 不注册 accent (主题强调色系统
+ * 会覆盖自管理的选中色, 实测橙底白字被主题刷回), 颜色完全由
+ * settings_radio_refresh 按通道/角色状态自绘 */
+static lv_obj_t *create_state_button(lv_obj_t *parent, const char *text,
+                                     lv_event_cb_t callback, void *user_data)
+{
+    lv_obj_t *button = lv_button_create(parent);
+    lv_obj_t *label = lv_label_create(button);
+    lv_obj_set_height(button, ft_layout_get()->control_height);
+    lv_obj_set_style_radius(button, 0, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(button, 0, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x1565C0), LV_PART_MAIN);
+    lv_obj_set_style_text_color(button, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, ft_layout_font(14), LV_PART_MAIN);
+    lv_obj_center(label);
+    if (callback != RT_NULL) lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
+    return button;
 }
 
 static lv_obj_t *create_flat_button(lv_obj_t *parent, const char *text,
@@ -2919,11 +2941,11 @@ static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
     lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     track_object(&s_bt_transport_buttons[0],
-                 create_flat_button(row,
+                 create_state_button(row,
                     ft_preferences_text("经典 A2DP", "Classic A2DP"),
                     settings_bt_transport_clicked_cb, (void *)(uintptr_t)2U));
     track_object(&s_bt_transport_buttons[1],
-                 create_flat_button(row,
+                 create_state_button(row,
                     ft_preferences_text("LE 音频", "LE audio"),
                     settings_bt_transport_clicked_cb, (void *)(uintptr_t)1U));
     lv_obj_set_width(s_bt_transport_buttons[0], 0);
@@ -2951,11 +2973,11 @@ static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
     lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     track_object(&s_bt_a2dp_buttons[0],
-                 create_flat_button(row,
+                 create_state_button(row,
                     ft_preferences_text("SINK 音箱（接收推流）", "SINK speaker (receive)"),
                     settings_bt_a2dp_role_clicked_cb, (void *)(uintptr_t)0U));
     track_object(&s_bt_a2dp_buttons[1],
-                 create_flat_button(row,
+                 create_state_button(row,
                     ft_preferences_text("SOURCE 转发（发送到耳机）", "SOURCE forward (send)"),
                     settings_bt_a2dp_role_clicked_cb, (void *)(uintptr_t)1U));
     lv_obj_set_width(s_bt_a2dp_buttons[0], 0);
@@ -2984,11 +3006,11 @@ static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
     lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     track_object(&s_bt_le_buttons[0],
-                 create_flat_button(row,
+                 create_state_button(row,
                     ft_preferences_text("SERVER 被连（出声）", "SERVER (render)"),
                     settings_bt_le_role_clicked_cb, (void *)(uintptr_t)0U));
     track_object(&s_bt_le_buttons[1],
-                 create_flat_button(row,
+                 create_state_button(row,
                     ft_preferences_text("BROADCAST 广播", "BROADCAST (cast)"),
                     settings_bt_le_role_clicked_cb, (void *)(uintptr_t)1U));
     lv_obj_set_width(s_bt_le_buttons[0], 0);
