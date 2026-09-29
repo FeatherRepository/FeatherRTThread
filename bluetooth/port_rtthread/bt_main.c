@@ -367,7 +367,7 @@ static void bt_adv_start(void);
 #define FT_TRANSPORT_LE_ONLY      1
 #define FT_TRANSPORT_CLASSIC_ONLY 2
 /* 开机默认经典 A2DP (用户设定): 只开经典扫描, LE 可连接广播不发 */
-static int s_audio_transport = FT_TRANSPORT_CLASSIC_ONLY;
+static int s_audio_transport = FT_TRANSPORT_DUAL;   /* 开机默认双模 (A 方案: 两种发现机制都开) */
 int bt_service_le_pairing_mode(void)
 {
     return s_audio_transport == FT_TRANSPORT_LE_ONLY;
@@ -801,7 +801,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                        local_addr[3], local_addr[4], local_addr[5]);
             feathertalk_ipc_send_event(40);
             BT_CP(60);
-            /* 开机默认经典 A2DP 通道时: 不启动 LE 可连接广播 */
+            /* 双模/仅 LE 通道: 启动 LE 可连接广播; 仅经典通道跳过 */
             if (s_audio_transport != FT_TRANSPORT_CLASSIC_ONLY)
             {
                 bt_adv_start();
