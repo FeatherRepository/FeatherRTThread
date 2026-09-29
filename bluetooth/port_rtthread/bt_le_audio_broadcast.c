@@ -313,12 +313,17 @@ static int ft_bcst_start_owned(void)
     return 0;
 }
 
-/* stop 第二阶段: BIG_TERMINATED 事件回调后执行 (或 1s 兜底 timer)。
- * 与 gap_big_terminate 错峰, 避免 controller 事件连环突发 */
-static void ft_bcst_stop_phase2(void)
+/* ---- stop 多阶段拆除 (全部 owner 线程上下文) ----
+ * phase1: gap_big_terminate
+ * phase2 (BIG_TERMINATED 后): 停 periodic + disable 扩展广播
+ * phase3 (200ms 后): gap_extended_advertising_remove —— 必须!
+ *   btstack gap_extended_advertising_stop 只清 ENABLED 位, set 永远留在
+ *   le_advertising_sets 链表; 下轮 setup 会给已在链表的 storage 重新分配
+ *   handle 并 add -> 链表自环, hci_run 死循环, btloop 卡死 (实测第二轮
+ *   start 广播子系统整体崩: ISO 停滞 + 可连接广播陪葬)
+ * finish (SET_REMOVED 后 / 1s 兜底): 归还 ISO handler, 状态收尾 */
+static void ft_bcst_stop_finish(void)
 {
-    gap_periodic_advertising_stop(s_adv_handle);
-    gap_extended_advertising_stop(s_adv_handle);
     /* ISO handler 归还给单播 (单值注册; CIS 音频依赖它派发) */
     {
         extern void ft_le_audio_unicast_attach_iso_handler(void);
@@ -331,10 +336,44 @@ static void ft_bcst_stop_phase2(void)
     feathertalk_ipc_send_event(85U);
 }
 
+static void ft_bcst_stop_phase3(btstack_timer_source_t *ts);
+
+static void ft_bcst_remove_guard(btstack_timer_source_t *ts)
+{
+    (void)ts;
+    /* SET_REMOVED 未到 (命令失败/事件丢失): 强制收尾, 避免 ISO handler
+     * 与状态永久挂起; set 若残留, 下轮 start 的 setup 仍可能异常 */
+    if (s_stopping)
+    {
+        rt_kprintf("[BCST] stop guard: SET_REMOVED timeout, force finish\n");
+        ft_bcst_stop_finish();
+    }
+}
+
+static void ft_bcst_stop_phase3(btstack_timer_source_t *ts)
+{
+    (void)ts;
+    gap_extended_advertising_remove(s_adv_handle);
+    s_stop_guard_timer.process = &ft_bcst_remove_guard;
+    btstack_run_loop_set_timer(&s_stop_guard_timer, 1000);
+    btstack_run_loop_add_timer(&s_stop_guard_timer);
+}
+
+static void ft_bcst_stop_phase2(void)
+{
+    gap_periodic_advertising_stop(s_adv_handle);
+    gap_extended_advertising_stop(s_adv_handle);
+    /* HCI 命令按序执行, disable 生效后 controller 才会处理 remove;
+     * 留 200ms 再排 remove (btstack REMOVE_SET 任务不检查 enabled 态) */
+    s_stop_guard_timer.process = &ft_bcst_stop_phase3;
+    btstack_run_loop_set_timer(&s_stop_guard_timer, 200);
+    btstack_run_loop_add_timer(&s_stop_guard_timer);
+}
+
 static void ft_bcst_stop_guard(btstack_timer_source_t *ts)
 {
     (void)ts;
-    /* BIG_TERMINATED 未到 (命令失败/事件丢失): 兜底完成第二阶段 */
+    /* BIG_TERMINATED 未到 (命令失败/事件丢失): 兜底进入 phase2 */
     if (s_stopping)
     {
         rt_kprintf("[BCST] stop guard: BIG_TERMINATED timeout, force phase2\n");
@@ -474,11 +513,20 @@ static void ft_bcst_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
         else if (hci_event_gap_meta_get_subevent_code(packet) == GAP_SUBEVENT_BIG_TERMINATED)
         {
             rt_kprintf("[BCST] BIG terminated\n");
-            /* stop 第二阶段: 事件驱动错峰 (1s 兜底 timer 在 s_stopping 时才生效) */
+            /* phase2: 事件驱动错峰 (1s 兜底 timer 在 s_stopping 时才生效) */
             if (s_stopping)
             {
                 btstack_run_loop_remove_timer(&s_stop_guard_timer);
                 ft_bcst_stop_phase2();
+            }
+        }
+        else if (hci_event_gap_meta_get_subevent_code(packet) == GAP_SUBEVENT_ADVERTISING_SET_REMOVED)
+        {
+            /* phase3 完成: adv set 已从 btstack 链表摘除, 复用安全 */
+            if (s_stopping)
+            {
+                btstack_run_loop_remove_timer(&s_stop_guard_timer);
+                ft_bcst_stop_finish();
             }
         }
         break;
