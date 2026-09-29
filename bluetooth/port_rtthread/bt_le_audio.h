@@ -18,7 +18,11 @@ int ft_le_audio_att_write(hci_con_handle_t con_handle, rt_uint16_t att_handle,
 
 #endif /* FT_BT_LE_AUDIO_H */
 
-/* M8.2: Auracast 广播源 (bt_le_audio_broadcast.c) */
+/* M8.2: Auracast 广播源 (bt_le_audio_broadcast.c)
+ * start/stop 为线程安全入口 (IPC/msh 线程), 经 owner 线程信箱执行 */
 void ft_le_audio_broadcast_init(void);
 int  ft_le_audio_broadcast_start(void);
 int  ft_le_audio_broadcast_stop(void);
+/* owner 线程内延迟停 (LE ACL 建立时单播 packet_handler 调用;
+ * 拆 BIG 与连接建立事件错峰, 防连接反复断) */
+void ft_le_audio_broadcast_stop_deferred(void);

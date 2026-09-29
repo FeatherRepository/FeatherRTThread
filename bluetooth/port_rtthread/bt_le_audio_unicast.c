@@ -910,11 +910,13 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
             if (gap_subevent_le_connection_complete_get_status(packet) == 0)
             {
                 s_acl_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
-                /* 手机连入即退出广播模式: 单播/广播互斥 (ISO handler 单值),
-                 * stop 内部会把 ISO handler 归还给单播 */
+                /* 手机连入即退出广播模式: 单播/广播互斥 (ISO handler 单值)。
+                 * 延迟停: 拆 BIG 的命令/事件与连接建立错峰, 防连接反复断
+                 * (实测直停时连接 0x13/0x3E 反复建立断开); stop 内部会把
+                 * ISO handler 归还给单播 */
                 {
-                    extern int ft_le_audio_broadcast_stop(void);
-                    (void)ft_le_audio_broadcast_stop();
+                    extern void ft_le_audio_broadcast_stop_deferred(void);
+                    ft_le_audio_broadcast_stop_deferred();
                 }
                 /* M8.x 防御: 新 ACL 建立时强制全量 ASE 复位 —— 防此前
                  * 会话残留态导致手机只能配出部分声道 (实测故障形态:

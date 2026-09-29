@@ -26,6 +26,7 @@
 #include "gap.h"
 #include "btstack_util.h"
 #include "ble/att_server.h"
+#include "bt_service.h"    /* bt_service_run_callback: owner 线程信箱 */
 #include "ft_gatt.h"
 
 #include "bt_le_audio.h"
@@ -70,6 +71,13 @@ static le_extended_advertising_parameters_t s_ext_params;
 static uint8_t                  s_adv_handle;
 static hci_con_handle_t         s_bis_handle[FT_BCST_NUM_BIS];
 static rt_bool_t                s_active;
+/* stop 两阶段态: TRUE = BIG terminate 已发, 等 BIG_TERMINATED 后补停
+ * periodic/ext adv 并归还 ISO handler。根治 stop 事件风暴:
+ * big_terminate/periodic_stop/ext_stop 三命令连发时 controller 事件
+ * 突发冲掉 HCI UART 字节 (H4 无重同步) -> 事件流失步坏死, 板子从此
+ * "连得上空中、看不见主机" (2026-09-29 蓝牙连不上根因) */
+static rt_bool_t                s_stopping;
+static btstack_timer_source_t   s_stop_guard_timer;
 
 /* M8.x 三态互斥: 广播源活跃状态查询 (单播 CIS 守卫/UI 互斥用) */
 int ft_le_audio_broadcast_active(void)
@@ -252,9 +260,10 @@ static void ft_bcst_setup_big(void)
     s_big_created = RT_TRUE;
 }
 
-int ft_le_audio_broadcast_start(void)
+static int ft_bcst_start_owned(void)
 {
     if (s_active) return -1;
+    if (s_stopping) return -1;   /* BIG/adv set 拆除中, 防复用 */
 
     /* M8.x 三态互斥: 只在 LE 单播流活跃时拒绝 (ISO 数据面归单播)。
      * A2DP 经典连接时放行 —— 转发场景 (A2DP 收流 + Auracast 出局) 合法共存 */
@@ -304,22 +313,104 @@ int ft_le_audio_broadcast_start(void)
     return 0;
 }
 
-int ft_le_audio_broadcast_stop(void)
+/* stop 第二阶段: BIG_TERMINATED 事件回调后执行 (或 1s 兜底 timer)。
+ * 与 gap_big_terminate 错峰, 避免 controller 事件连环突发 */
+static void ft_bcst_stop_phase2(void)
 {
-    if (!s_active) return -1;
-    (void)gap_big_terminate(s_big_params.big_handle);
     gap_periodic_advertising_stop(s_adv_handle);
     gap_extended_advertising_stop(s_adv_handle);
-    s_active = RT_FALSE;
     /* ISO handler 归还给单播 (单值注册; CIS 音频依赖它派发) */
     {
         extern void ft_le_audio_unicast_attach_iso_handler(void);
         ft_le_audio_unicast_attach_iso_handler();
     }
+    s_stopping = RT_FALSE;
     rt_kprintf("[BCST] stop: sent=%lu enc=%lu busy=%lu\n",
                (unsigned long)s_stat_iso_sent, (unsigned long)s_stat_enc_frames,
                (unsigned long)s_stat_send_busy);
     feathertalk_ipc_send_event(85U);
+}
+
+static void ft_bcst_stop_guard(btstack_timer_source_t *ts)
+{
+    (void)ts;
+    /* BIG_TERMINATED 未到 (命令失败/事件丢失): 兜底完成第二阶段 */
+    if (s_stopping)
+    {
+        rt_kprintf("[BCST] stop guard: BIG_TERMINATED timeout, force phase2\n");
+        ft_bcst_stop_phase2();
+    }
+}
+
+/* ---- owner 线程内实际拆除 (btloop 上下文; 所有 gap_/run_loop API
+ * 只允许 owner 线程调, 否则 btstack 状态跨线程腐坏: IPC 线程直发
+ * big_terminate 曾致 HCI 事件流失步坏死, 板子"空中连得上、主机看不见") ---- */
+static void ft_bcst_stop_owned(void)
+{
+    s_stopping = RT_TRUE;
+    (void)gap_big_terminate(s_big_params.big_handle);
+    s_stop_guard_timer.process = &ft_bcst_stop_guard;
+    btstack_run_loop_set_timer(&s_stop_guard_timer, 1000);
+    btstack_run_loop_add_timer(&s_stop_guard_timer);
+}
+
+/* 连接触发的延迟停: LE ACL 建立时拆 BIG 的命令/事件与连接完成事件
+ * 叠加曾致连接反复建立/断开 (0x13/0x3E)。延后 200ms 让链路先稳定。
+ * 调用方: 单播 packet_handler (owner 上下文)。s_active 立即清除,
+ * UI/互斥守卫即刻生效; 实际拆除延后。 */
+static btstack_timer_source_t s_stop_defer_timer;
+static void ft_bcst_stop_deferred_fire(btstack_timer_source_t *ts)
+{
+    (void)ts;
+    ft_bcst_stop_owned();
+}
+void ft_le_audio_broadcast_stop_deferred(void)
+{
+    if (!s_active) return;
+    s_active = RT_FALSE;
+    s_stop_defer_timer.process = &ft_bcst_stop_deferred_fire;
+    btstack_run_loop_set_timer(&s_stop_defer_timer, 200);
+    btstack_run_loop_add_timer(&s_stop_defer_timer);
+}
+
+/* ---- 线程安全入口 (IPC/msh 线程): 投递给 btloop owner 线程执行 ---- */
+static volatile uint8_t s_bcast_req;   /* 0=无 1=start 2=stop */
+static void ft_bcst_owned_trampoline(void)
+{
+    uint8_t op = s_bcast_req;
+    s_bcast_req = 0U;
+    if (op == 1U)
+    {
+        (void)ft_bcst_start_owned();
+    }
+    else if (op == 2U)
+    {
+        ft_bcst_stop_owned();
+    }
+}
+
+int ft_le_audio_broadcast_start(void)
+{
+    if (s_active || s_bcast_req != 0U) return -1;
+    s_bcast_req = 1U;
+    if (bt_service_run_callback(&ft_bcst_owned_trampoline) != RT_EOK)
+    {
+        s_bcast_req = 0U;
+        return -2;
+    }
+    return 0;
+}
+
+int ft_le_audio_broadcast_stop(void)
+{
+    if (!s_active || s_bcast_req != 0U) return -1;
+    s_active = RT_FALSE;          /* 互斥/UI 语义立即生效 */
+    s_bcast_req = 2U;
+    if (bt_service_run_callback(&ft_bcst_owned_trampoline) != RT_EOK)
+    {
+        s_bcast_req = 0U;
+        return -1;
+    }
     return 0;
 }
 
@@ -382,7 +473,13 @@ static void ft_bcst_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
         }
         else if (hci_event_gap_meta_get_subevent_code(packet) == GAP_SUBEVENT_BIG_TERMINATED)
         {
-            rt_kprintf("[BCST] BIG terminated\\n");
+            rt_kprintf("[BCST] BIG terminated\n");
+            /* stop 第二阶段: 事件驱动错峰 (1s 兜底 timer 在 s_stopping 时才生效) */
+            if (s_stopping)
+            {
+                btstack_run_loop_remove_timer(&s_stop_guard_timer);
+                ft_bcst_stop_phase2();
+            }
         }
         break;
 
