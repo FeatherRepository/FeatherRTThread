@@ -262,6 +262,14 @@ static uint16_t att_read_callback(hci_con_handle_t con_handle, uint16_t att_hand
 {
     (void)con_handle;
     g_le_connect_diag[6] = att_handle;
+    /* M8.x: Database Hash (0x2B2A) 读路由 (Robust Caching) */
+    {
+        extern uint16_t ft_gatt_hash_read(uint16_t offset, uint8_t *buffer, uint16_t buffer_size);
+        if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_DATABASE_HASH_01_VALUE_HANDLE)
+        {
+            return ft_gatt_hash_read(offset, buffer, buffer_size);
+        }
+    }
     /* M8.1: LE Audio ASE 状态读取先行路由 (0xFFFF = 非本模块句柄) */
     {
         uint16_t le_rc = ft_le_audio_att_read(att_handle, offset, buffer, buffer_size);
@@ -799,6 +807,11 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             rt_kprintf("[BT] HCI WORKING, addr %02x:%02x:%02x:%02x:%02x:%02x\n",
                        local_addr[0], local_addr[1], local_addr[2],
                        local_addr[3], local_addr[4], local_addr[5]);
+            /* M8.x: GATT Database Hash 计算 (btstack_crypto 异步 CMAC) */
+            {
+                extern void ft_gatt_hash_start(void);
+                ft_gatt_hash_start();
+            }
             feathertalk_ipc_send_event(40);
             BT_CP(60);
             /* 双模/仅 LE 通道: 启动 LE 可连接广播; 仅经典通道跳过 */

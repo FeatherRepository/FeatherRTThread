@@ -14,7 +14,10 @@ CHARACTERISTIC, GAP_DEVICE_NAME, READ, "FeatherTalk-LE"
 CHARACTERISTIC, GAP_APPEARANCE, READ, 00 00
 
 PRIMARY_SERVICE, GATT_SERVICE
-// Database Hash omitted until robust caching and deterministic CMAC are supported.
+// M8.x: Database Hash (0x2B2A, Robust Caching) —— 值由 ft_gatt_hash.c
+// 在栈 WORKING 后用 AES-CMAC(zero key, profile_data 属性序列) 计算,
+// 读回调路由到 ft_gatt_hash_read。表内容编译期固定, hash 固定。
+CHARACTERISTIC, ORG_BLUETOOTH_CHARACTERISTIC_DATABASE_HASH, READ | DYNAMIC,
 
 // Device Information Service (0x180A), static read-only strings
 PRIMARY_SERVICE, ORG_BLUETOOTH_SERVICE_DEVICE_INFORMATION
