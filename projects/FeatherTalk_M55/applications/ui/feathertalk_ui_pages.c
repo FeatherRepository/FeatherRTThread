@@ -2581,20 +2581,24 @@ static void settings_radio_refresh(lv_timer_t *timer)
         bool uc_streaming = (audio & FEATHERTALK_AUDIO_FLAG_LE_UNICAST) != 0U;
         bool a2_streaming = (audio & FEATHERTALK_AUDIO_FLAG_A2DP_SINK) != 0U;
         bool bc_active = (audio & FEATHERTALK_AUDIO_FLAG_BROADCAST) != 0U;
-        /* 三组按钮统一显示: 选中=实心蓝底白字, 未选中=深灰底。
-         * 不依赖主题 CHECKED 色 (红/蓝不可辨), 激活态一目了然 */
+        /* 按钮配色 (用户指定): 当前激活=橙底白字, 未激活=蓝底白字。
+         * 颜色显式覆盖默认/CHECKED/DISABLED 三个状态, 主题色不再干扰 */
+        #define FT_BTN_BG_ACTIVE   0xFF8C00U
+        #define FT_BTN_BG_NORMAL   0x1565C0U
+        #define FT_BTN_BG_LOCKED   0x3A2A2AU
+        #define FT_BTN_FG          0xFFFFFFU
+        #define FT_BTN_FG_DIM      0x909090U
         for (int i = 0; i < 2; i++)
         {
             lv_obj_t *btn = s_bt_transport_buttons[i];
             if (btn == RT_NULL || !lv_obj_is_valid(btn)) continue;
             bool sel = (i == 0) ? t_classic : t_le;
-            lv_obj_set_style_bg_color(btn, lv_color_hex(sel ? 0x1565C0 : 0x1A1A1A),
-                                      LV_PART_MAIN);
+            uint32_t bg = sel ? FT_BTN_BG_ACTIVE : FT_BTN_BG_NORMAL;
+            lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN);
+            lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN | LV_STATE_CHECKED);
+            lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN | LV_STATE_DISABLED);
             lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
-            lv_obj_set_style_text_color(btn, lv_color_hex(sel ? 0xFFFFFF : 0x909090),
-                                        LV_PART_MAIN);
-            lv_obj_set_style_border_width(btn, sel ? 2 : 0, LV_PART_MAIN);
-            lv_obj_set_style_border_color(btn, lv_color_hex(0x4FC3F7), LV_PART_MAIN);
+            lv_obj_set_style_text_color(btn, lv_color_hex(FT_BTN_FG), LV_PART_MAIN);
         }
         bool uc_streaming = (audio & FEATHERTALK_AUDIO_FLAG_LE_UNICAST) != 0U;
         bool a2_streaming = (audio & FEATHERTALK_AUDIO_FLAG_A2DP_SINK) != 0U;
@@ -2607,17 +2611,18 @@ static void settings_radio_refresh(lv_timer_t *timer)
             if (t_le || uc_streaming)
             {
                 lv_obj_add_state(btn, LV_STATE_DISABLED);
-                lv_obj_set_style_bg_color(btn, lv_color_hex(0x3A1A1A), LV_PART_MAIN);
-                lv_obj_set_style_text_color(btn, lv_color_hex(0x804040), LV_PART_MAIN);
+                lv_obj_set_style_bg_color(btn, lv_color_hex(FT_BTN_BG_LOCKED), LV_PART_MAIN);
+                lv_obj_set_style_bg_color(btn, lv_color_hex(FT_BTN_BG_LOCKED), LV_PART_MAIN | LV_STATE_DISABLED);
+                lv_obj_set_style_text_color(btn, lv_color_hex(FT_BTN_FG_DIM), LV_PART_MAIN);
             }
             else
             {
                 lv_obj_remove_state(btn, LV_STATE_DISABLED);
                 bool role_sel = ((int)s_bt_a2dp_role == i);
-                lv_obj_set_style_bg_color(btn,
-                    lv_color_hex(role_sel ? 0x1565C0 : 0x1A1A1A), LV_PART_MAIN);
-                lv_obj_set_style_text_color(btn,
-                    lv_color_hex(role_sel ? 0xFFFFFF : 0xB0B0B0), LV_PART_MAIN);
+                uint32_t bg = role_sel ? FT_BTN_BG_ACTIVE : FT_BTN_BG_NORMAL;
+                lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN);
+                lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN | LV_STATE_CHECKED);
+                lv_obj_set_style_text_color(btn, lv_color_hex(FT_BTN_FG), LV_PART_MAIN);
             }
         }
         /* LE 角色: SERVER 在 A2DP 流/广播/仅经典时禁用; BROADCAST 在
