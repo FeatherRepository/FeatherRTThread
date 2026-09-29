@@ -35,6 +35,7 @@ static volatile rt_uint8_t g_quick_command_control;
 static volatile rt_uint8_t g_quick_command_value;
 static volatile rt_uint32_t g_quick_command_sequence;
 static volatile rt_bool_t g_periodic_report_enabled = RT_TRUE;
+static volatile rt_bool_t g_transport_user_override = RT_FALSE;   /* M8.x: 用户手动切过通道, 恢复线程让位 */
 
 void feathertalk_ipc_set_periodic_report_enabled(bool enabled)
 {
@@ -517,9 +518,10 @@ static void feathertalk_transport_restore_entry(void *param)
         return;
     }
     close(fd);
-    /* 等 M33 蓝牙就绪 (quick status enabled 位) */
+    /* 等 M33 蓝牙就绪 (quick status enabled 位); 用户手动切换则让位 */
     for (int i = 0; i < FT_TRANSPORT_RESTORE_TIMEOUT_MS / 500; i++)
     {
+        if (g_transport_user_override) return;
         feathertalk_quick_status_t st;
         if (feathertalk_ipc_get_quick_status(&st) == RT_EOK &&
             (st.enabled & FEATHERTALK_QUICK_CAP_BLUETOOTH))
@@ -528,6 +530,7 @@ static void feathertalk_transport_restore_entry(void *param)
         }
         rt_thread_mdelay(500);
     }
+    if (g_transport_user_override) return;
     rt_kprintf("[IPC] restore audio transport %u (saved)\n", rec[0]);
     (void)feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_TRANSPORT, rec[0]);
 }
@@ -621,6 +624,7 @@ int feathertalk_ipc_set_quick_control(uint8_t control, uint8_t value)
     /* M8.x: 音频通道选择持久化 (B+C 方案) —— UI/msh 切通道时落盘,
      * 启动恢复线程在 M33 蓝牙就绪后自动应用 */
     if (control == FEATHERTALK_QUICK_BT_TRANSPORT) {
+        g_transport_user_override = RT_TRUE;   /* 用户手动切换: 恢复线程让位 */
         int fd = open(FT_TRANSPORT_CFG_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0666);
         if (fd >= 0) {
             uint8_t rec[2] = { value, (uint8_t)(0x5A ^ value) };  /* 值 + 校验字节 */
