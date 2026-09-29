@@ -2594,15 +2594,15 @@ static void settings_radio_refresh(lv_timer_t *timer)
      * (LE 单播流 ↔ A2DP 流互斥; 广播与 A2DP 可共存 —— 转发场景;
      *  广播与单播互斥: 广播活跃时 SERVER 也置灰;
      *  音频通道: 仅LE → A2DP 角色区整体禁用, 仅经典 → SERVER 禁用) */
+    uint8_t audio = valid ? (uint8_t)(status.connected & FEATHERTALK_AUDIO_FLAG_MASK) : 0U;
+    uint8_t transport = valid ? (uint8_t)(status.enabled & (FEATHERTALK_TRANSPORT_FLAG_LE_ONLY |
+                                                            FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY)) : 0U;
+    bool t_le = (transport & FEATHERTALK_TRANSPORT_FLAG_LE_ONLY) != 0U;
+    bool t_classic = (transport & FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY) != 0U;
+    bool uc_streaming = (audio & FEATHERTALK_AUDIO_FLAG_LE_UNICAST) != 0U;
+    bool a2_streaming = (audio & FEATHERTALK_AUDIO_FLAG_A2DP_SINK) != 0U;
+    bool bc_active = (audio & FEATHERTALK_AUDIO_FLAG_BROADCAST) != 0U;
     {
-        uint8_t audio = valid ? (uint8_t)(status.connected & FEATHERTALK_AUDIO_FLAG_MASK) : 0U;
-        uint8_t transport = valid ? (uint8_t)(status.enabled & (FEATHERTALK_TRANSPORT_FLAG_LE_ONLY |
-                                                                FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY)) : 0U;
-        bool t_le = (transport & FEATHERTALK_TRANSPORT_FLAG_LE_ONLY) != 0U;
-        bool t_classic = (transport & FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY) != 0U;
-        bool uc_streaming = (audio & FEATHERTALK_AUDIO_FLAG_LE_UNICAST) != 0U;
-        bool a2_streaming = (audio & FEATHERTALK_AUDIO_FLAG_A2DP_SINK) != 0U;
-        bool bc_active = (audio & FEATHERTALK_AUDIO_FLAG_BROADCAST) != 0U;
         /* 按钮配色 (用户指定): 当前激活=橙底白字, 未激活=蓝底白字。
          * 颜色显式覆盖默认/CHECKED/DISABLED 三个状态, 主题色不再干扰 */
         #define FT_BTN_BG_ACTIVE   0xFF8C00U
@@ -2622,9 +2622,6 @@ static void settings_radio_refresh(lv_timer_t *timer)
             lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
             lv_obj_set_style_text_color(btn, lv_color_hex(FT_BTN_FG), LV_PART_MAIN);
         }
-        bool uc_streaming = (audio & FEATHERTALK_AUDIO_FLAG_LE_UNICAST) != 0U;
-        bool a2_streaming = (audio & FEATHERTALK_AUDIO_FLAG_A2DP_SINK) != 0U;
-        bool bc_active = (audio & FEATHERTALK_AUDIO_FLAG_BROADCAST) != 0U;
         /* A2DP 角色: 仅经典/双模时可用且按角色高亮; 仅 LE 时整体禁用 */
         for (int i = 0; i < 2; i++)
         {
@@ -2657,7 +2654,6 @@ static void settings_radio_refresh(lv_timer_t *timer)
                                     : uc_streaming;
             if (disable) lv_obj_add_state(btn, LV_STATE_DISABLED);
             else lv_obj_remove_state(btn, LV_STATE_DISABLED);
-        }
         }
         /* 常显音频路径指示 (含空闲/广播/通道态, 让三态模型随时可见) */
         if (s_bt_le_status != RT_NULL && lv_obj_is_valid(s_bt_le_status) &&
