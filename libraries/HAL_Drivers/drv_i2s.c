@@ -243,25 +243,44 @@ static rt_err_t ifx_apply_output_format(
     const struct rt_audio_configure *previous)
 {
     rt_err_t result;
+    rt_base_t level;
+    rt_bool_t rollback_failed = RT_FALSE;
 
     if (!sound_format_supported(config) ||
         !sound_format_supported(previous))
         return -RT_EINVAL;
-    if (i2s_data_ready_flag) return -RT_EBUSY;
+
+    /* 检查 + 重编程必须原子: i2s_data_ready_flag 在 TX ISR 里清零、
+     * sound_transmit 里置位, 旧代码检查后无锁, 重配恰在在途帧的
+     * µs 级 false 窗口命中时 TDM 被 DeInit, 该帧永远完不成 ->
+     * tx_sem 不再 release, sound_thread 永久阻塞, 全系统无声。
+     * 整个 DeInit/重配在关中断临界区内完成, 与 sound_transmit 的
+     * 临界区同级互斥 (ES8388 I2C 为轮询传输, 临界区内无死锁)。
+     * 重配成功即管线已停: 临界区内 flag 不可能被置位, 保持 false;
+     * first_frame/word 偏移由 ifx_program_output_format 复位。 */
+    level = rt_hw_interrupt_disable();
+    if (i2s_data_ready_flag)
+    {
+        rt_hw_interrupt_enable(level);
+        return -RT_EBUSY;
+    }
 
     i2s_format_apply_count++;
     result = ifx_program_output_format(config);
-    if (result == RT_EOK) return RT_EOK;
-
-    i2s_format_apply_fail_count++;
-    /* The sound0 format is committed only after TDM clocks and ES8388 both
-     * accept it.  Restore the complete previous path when either layer
-     * rejects the candidate. */
-    if (ifx_program_output_format(previous) != RT_EOK)
+    if (result != RT_EOK)
     {
-        i2s_format_rollback_fail_count++;
-        LOG_E("output format rollback failed");
+        i2s_format_apply_fail_count++;
+        /* The sound0 format is committed only after TDM clocks and ES8388 both
+         * accept it.  Restore the complete previous path when either layer
+         * rejects the candidate. */
+        if (ifx_program_output_format(previous) != RT_EOK)
+        {
+            i2s_format_rollback_fail_count++;
+            rollback_failed = RT_TRUE;
+        }
     }
+    rt_hw_interrupt_enable(level);
+    if (rollback_failed) LOG_E("output format rollback failed");
     return result;
 }
 

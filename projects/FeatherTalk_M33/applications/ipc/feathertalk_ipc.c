@@ -99,6 +99,20 @@ static void feathertalk_ipc_flush_audio_db(void)
     }
 }
 
+/* Critical fire-and-forget frames (heartbeat / system / quick status) get one
+ * extra attempt after a short pause; the driver itself already caps each try
+ * at EDGE_IPC_SEND_BUSY_RETRY_MAX * EDGE_IPC_SEND_BUSY_DELAY_MS. Beyond that
+ * the frame is dropped and counted -- the IPC thread must always move on. */
+static rt_bool_t feathertalk_ipc_write_frame(edge_rc_frame_t *frame)
+{
+    if (rt_device_write(g_ipc_tx, 0, frame, 1) == 1)
+    {
+        return RT_TRUE;
+    }
+    rt_thread_mdelay(5);
+    return rt_device_write(g_ipc_tx, 0, frame, 1) == 1 ? RT_TRUE : RT_FALSE;
+}
+
 static rt_bool_t feathertalk_ipc_send(feathertalk_ipc_message_id_t message_id,
                                      rt_uint32_t sequence)
 {
@@ -119,7 +133,7 @@ static rt_bool_t feathertalk_ipc_send(feathertalk_ipc_message_id_t message_id,
     rt_memcpy(frame.channel, &message, sizeof(message));
     frame.seq = sequence;
 
-    if (rt_device_write(g_ipc_tx, 0, &frame, 1) != 1)
+    if (feathertalk_ipc_write_frame(&frame) != RT_TRUE)
     {
         g_error_count++;
         return RT_FALSE;
@@ -224,7 +238,7 @@ static rt_bool_t feathertalk_ipc_send_system_status(rt_uint32_t sequence)
 
     rt_memcpy(frame.channel, &message, sizeof(message));
     frame.seq = sequence;
-    if (rt_device_write(g_ipc_tx, 0, &frame, 1) != 1)
+    if (feathertalk_ipc_write_frame(&frame) != RT_TRUE)
     {
         g_error_count++;
         return RT_FALSE;
@@ -257,6 +271,27 @@ static rt_bool_t feathertalk_ipc_send_quick_status(rt_uint32_t sequence)
     {
         message.connected |= (uint8_t)FEATHERTALK_QUICK_CAP_BLUETOOTH;
     }
+    /* M8.x 三态互斥: 音频状态附载在 connected 高半字节 (低 4 位为能力位),
+     * UI 据此做按钮互斥 (LE 单播 ↔ A2DP 互斥; 广播与 A2DP 可共存) */
+    {
+        extern int ft_le_audio_unicast_streaming(void);
+        extern int bt_a2dp_sink_streaming(void);
+        extern int ft_le_audio_broadcast_active(void);
+        if (ft_le_audio_unicast_streaming())
+            message.connected |= (uint8_t)FEATHERTALK_AUDIO_FLAG_LE_UNICAST;
+        if (bt_a2dp_sink_streaming())
+            message.connected |= (uint8_t)FEATHERTALK_AUDIO_FLAG_A2DP_SINK;
+        if (ft_le_audio_broadcast_active())
+            message.connected |= (uint8_t)FEATHERTALK_AUDIO_FLAG_BROADCAST;
+    }
+    /* M8.x 音频通道模式附载在 enabled 高半字节 (两位全清 = 双模) */
+    {
+        extern int bt_service_audio_transport(void);
+        if (bt_service_audio_transport() == 1)
+            message.enabled |= (uint8_t)FEATHERTALK_TRANSPORT_FLAG_LE_ONLY;
+        else if (bt_service_audio_transport() == 2)
+            message.enabled |= (uint8_t)FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY;
+    }
 #endif
     message.wifi_signal_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
     message.brightness_percent = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
@@ -275,7 +310,7 @@ static rt_bool_t feathertalk_ipc_send_quick_status(rt_uint32_t sequence)
 #endif
     rt_memcpy(frame.channel, &message, sizeof(message));
     frame.seq = sequence;
-    if (rt_device_write(g_ipc_tx, 0, &frame, 1) != 1)
+    if (feathertalk_ipc_write_frame(&frame) != RT_TRUE)
     {
         g_error_count++;
         return RT_FALSE;
@@ -324,7 +359,46 @@ static void feathertalk_ipc_receive(void)
             }
             else if (command.control == FEATHERTALK_QUICK_BT_LE_ROLE)
             {
-                g_quick_last_result = FEATHERTALK_QUICK_RESULT_UNAVAILABLE;  /* M8 预留 */
+                /* M8: LE Audio 角色 (1=SERVER 双模/单播 2=BROADCAST 广播
+                 * 3=LE 优先配对模式 0=停广播)。单播/广播互斥 (ISO handler
+                 * 单值); start 的 -1=已在广播、stop 的 -1=本就未广播 均
+                 * 视为幂等成功; -2=手机已连接拒绝 */
+                extern int ft_le_audio_broadcast_start(void);
+                extern int ft_le_audio_broadcast_stop(void);
+                extern int bt_service_set_le_pairing_mode(int on);
+                int rc;
+                if (command.value == 2U)
+                {
+                    rc = ft_le_audio_broadcast_start();
+                    if (rc == -1) rc = RT_EOK;             /* 已在广播: 幂等 */
+                }
+                else if (command.value == 3U)
+                {
+                    (void)ft_le_audio_broadcast_stop();
+                    rc = bt_service_set_le_pairing_mode(1);
+                }
+                else if (command.value == 1U || command.value == 0U)
+                {
+                    (void)bt_service_set_le_pairing_mode(0);
+                    rc = ft_le_audio_broadcast_stop();
+                    if (rc == -1) rc = RT_EOK;             /* 未在广播: 幂等 */
+                }
+                else
+                {
+                    rc = -RT_EINVAL;
+                }
+                g_quick_last_result = rc == -RT_EINVAL ? FEATHERTALK_QUICK_RESULT_INVALID :
+                    rc == -2 ? FEATHERTALK_QUICK_RESULT_FAILED :
+                    rc != RT_EOK ? FEATHERTALK_QUICK_RESULT_FAILED :
+                    FEATHERTALK_QUICK_RESULT_OK;
+            }
+            else if (command.control == FEATHERTALK_QUICK_BT_TRANSPORT)
+            {
+                /* M8.x 音频通道: 0=双模 1=仅LE 2=仅经典 (UI 直接切换) */
+                extern int bt_service_set_audio_transport(int mode);
+                g_quick_last_result =
+                    bt_service_set_audio_transport((int)command.value) == RT_EOK ?
+                    FEATHERTALK_QUICK_RESULT_OK : FEATHERTALK_QUICK_RESULT_FAILED;
             }
             else
 #endif

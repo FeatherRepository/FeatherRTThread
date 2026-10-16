@@ -277,6 +277,20 @@ void ft_sbc_stream_begin(void)
             {
                 s_sound_open = RT_TRUE;
             }
+            else if (s_sound_dev != RT_NULL)
+            {
+                /* M8.x: keep-open 复用 —— LC3 路径流结束后 sound0 保持
+                 * open 只释放 owner。此时 LC3 会话已结束 (LE 断链先于
+                 * A2DP 建立), 无播放事务, close 安全: 关掉遗留句柄后
+                 * 全新打开, 设备状态干净 (实测 A2DP 静音根因: open 失败
+                 * -> 解码照跑但无人出声) */
+                rt_device_close(s_sound_dev);
+                if (rt_device_open(s_sound_dev, RT_DEVICE_OFLAG_WRONLY) == RT_EOK)
+                {
+                    s_sound_open = RT_TRUE;
+                    rt_kprintf("[SBC] sound0 reopened (stale keep-open handle)\n");
+                }
+            }
         }
     }
     s_cur_volume = 0xFFU;   /* 等 M33 报 AVRCP 音量 */

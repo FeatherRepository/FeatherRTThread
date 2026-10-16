@@ -43,6 +43,10 @@
 /* audio_link_m33.c 的 producer 写入口 (写 ring + 门铃) */
 extern rt_uint32_t ft_audio_produce(const rt_uint8_t *data, rt_uint32_t len);
 
+/* M8.x 三态互斥: 定义在后, 事件处理器在前 —— 前向声明 */
+void bt_a2dp_sink_suspend_if_active(const char *why);
+int bt_a2dp_sink_streaming(void);
+
 /* 采样率自适应决策 (实测修正): 恢复声明全部采样率+声道模式, bitpool 2-53。
  * 曾试 48k-only (0x1F) 想省掉 44.1k->48k 重采样, 实测手机 (Android) 看到
  * 48k-only 能力后会发畸形的 SET_CONFIGURATION (Media Codec capability 长度
@@ -84,6 +88,11 @@ static rt_uint32_t s_media_dropped;     /* ring 满整包丢弃计数 */
 static rt_uint32_t s_media_hdr_err;     /* RTP/SBC 头解析失败计数 */
 static rt_uint32_t s_stream_starts;
 static rt_uint8_t  s_last_volume_pct = 0xFFU;
+
+/* AVRCP 连接失败也可见: M33 控制台不可达, SWD 读 diag 才是观测手段 */
+volatile rt_uint32_t g_a2dp_diag[8]; /* [0]=avrcp_established [1]=avrcp_released
+ * [2]=avrcp_failed(值=status) [3]=vol_events [4]=a2dp_stream_started
+ * [5..7]=保留 */
 
 /* ring 控制块登记流格式并换代 (M55 consumer 监测 fmt_gen) */
 static void bt_a2dp_ring_publish_format(rt_uint32_t rate)
@@ -176,6 +185,19 @@ static void bt_a2dp_media_handler(uint8_t seid, uint8_t *packet, uint16_t size)
 }
 
 /* ---- A2DP 事件 (HCI_EVENT_A2DP_META) ---- */
+/* M8.x 三态互斥: A2DP 流停止的 fmt=0 发布 (LE 单播流活跃时跳过 ——
+ * 与 unicast 侧 ft_le_ring_stop 的守卫对称, 互不拆除对方输出) */
+static void bt_a2dp_publish_stop_fmt(void)
+{
+    extern int ft_le_audio_unicast_streaming(void);
+    if (ft_le_audio_unicast_streaming())
+    {
+        rt_kprintf("[A2DP] stop fmt suppressed (LE unicast owns output)\n");
+        return;
+    }
+    bt_a2dp_ring_publish_format(0U);
+}
+
 static void bt_a2dp_sink_packet_handler(uint8_t packet_type, uint16_t channel,
                                         uint8_t *packet, uint16_t size)
 {
@@ -225,6 +247,16 @@ static void bt_a2dp_sink_packet_handler(uint8_t packet_type, uint16_t channel,
         s_media_dropped = 0;
         s_media_hdr_err = 0;
         s_stream_starts++;
+        g_a2dp_diag[4]++;
+        /* M8.x 三态互斥: LE 单播流活跃时立即挂起 A2DP 流 —— 同一时刻
+         * 只有一条到喇叭的音频路径 (射频 TDM 冲突实测 30% CIS 丢包) */
+        {
+            extern int ft_le_audio_unicast_streaming(void);
+            if (ft_le_audio_unicast_streaming())
+            {
+                bt_a2dp_sink_suspend_if_active("LE unicast active");
+            }
+        }
         /* 登记协商格式 + 换代 -> M55 claim sound0 开流 */
         bt_a2dp_ring_publish_format(s_negotiated_rate ? s_negotiated_rate : 48000U);
         rt_kprintf("[A2DP] stream started: %u Hz -> ring gen %lu\n",
@@ -233,14 +265,14 @@ static void bt_a2dp_sink_packet_handler(uint8_t packet_type, uint16_t channel,
 
     case A2DP_SUBEVENT_STREAM_SUSPENDED:
         s_stream_state = FT_A2DP_STATE_PAUSED;
-        bt_a2dp_ring_publish_format(0U);   /* fmt_rate=0: 流停, M55 关 sound0 */
+        bt_a2dp_publish_stop_fmt();
         rt_kprintf("[A2DP] stream suspended (packets %lu, dropped %lu)\n",
                    (unsigned long)s_media_packets, (unsigned long)s_media_dropped);
         break;
 
     case A2DP_SUBEVENT_STREAM_RELEASED:
         s_stream_state = FT_A2DP_STATE_CLOSED;
-        bt_a2dp_ring_publish_format(0U);
+        bt_a2dp_publish_stop_fmt();
         rt_kprintf("[A2DP] stream released (packets %lu, bytes %lu, dropped %lu)\n",
                    (unsigned long)s_media_packets, (unsigned long)s_media_bytes,
                    (unsigned long)s_media_dropped);
@@ -262,6 +294,7 @@ static void bt_a2dp_sink_packet_handler(uint8_t packet_type, uint16_t channel,
 }
 
 /* ---- AVRCP ---- */
+/* ---- AVRCP ---- */
 static void bt_avrcp_packet_handler(uint8_t packet_type, uint16_t channel,
                                     uint8_t *packet, uint16_t size)
 {
@@ -276,10 +309,12 @@ static void bt_avrcp_packet_handler(uint8_t packet_type, uint16_t channel,
         {
             rt_kprintf("[AVRCP] connection failed, status 0x%02x\n",
                        avrcp_subevent_connection_established_get_status(packet));
+            g_a2dp_diag[2] = avrcp_subevent_connection_established_get_status(packet);
             return;
         }
         s_avrcp_cid = avrcp_subevent_connection_established_get_avrcp_cid(packet);
         rt_kprintf("[AVRCP] connected, cid 0x%02x\n", s_avrcp_cid);
+        g_a2dp_diag[0]++;
         /* 声明支持绝对音量通知 -> 对端 SetAbsoluteVolume 才有回报 */
         avrcp_target_support_event(s_avrcp_cid, AVRCP_NOTIFICATION_EVENT_VOLUME_CHANGED);
         avrcp_controller_get_supported_events(s_avrcp_cid);
@@ -288,6 +323,7 @@ static void bt_avrcp_packet_handler(uint8_t packet_type, uint16_t channel,
         rt_kprintf("[AVRCP] released, cid 0x%02x\n",
                    avrcp_subevent_connection_released_get_avrcp_cid(packet));
         s_avrcp_cid = 0;
+        g_a2dp_diag[1]++;
         break;
     default:
         break;
@@ -311,6 +347,7 @@ static void bt_avrcp_target_packet_handler(uint8_t packet_type, uint16_t channel
         s_last_volume_pct = (rt_uint8_t)pct;
         FT_ALINK->volume_percent = pct;
         FT_ALINK_DCACHE_CLEAN(FT_ALINK_BASE, 32);
+        g_a2dp_diag[3]++;
         rt_kprintf("[AVRCP] volume %u (%u%%)\n", (unsigned)vol, (unsigned)pct);
         break;
     }
@@ -342,6 +379,27 @@ static void bt_avrcp_controller_packet_handler(uint8_t packet_type, uint16_t cha
 }
 
 /* ---- setup: bt_main.c 在 sdp_init 之后调用 ---- */
+/* ---- M8.x 三态互斥: A2DP 流挂起助手 ----
+ * LE 单播流建立时调用; AVDTP suspend 让手机停止推流 (链路保持,
+ * 手机侧音频路由本来就要求单活跃)。 why 仅用于日志定位 */
+void bt_a2dp_sink_suspend_if_active(const char *why)
+{
+    if (s_stream_state != FT_A2DP_STATE_PLAYING || s_a2dp_cid == 0)
+    {
+        return;
+    }
+    (void)avdtp_suspend_stream(s_a2dp_cid, s_stream_endpoint.a2dp_local_seid);
+    s_stream_state = FT_A2DP_STATE_PAUSED;
+    bt_a2dp_ring_publish_format(0U);   /* 流停: M55 关 sound0 */
+    rt_kprintf("[A2DP] suspended (%s)\n", why);
+}
+
+/* M8.x 三态互斥: A2DP 流状态查询 (IPC 音频状态附载/UI 互斥用) */
+int bt_a2dp_sink_streaming(void)
+{
+    return s_stream_state == FT_A2DP_STATE_PLAYING;
+}
+
 void bt_a2dp_sink_quiesce(void)
 {
     s_stream_state = FT_A2DP_STATE_CLOSED; /* Drop any media received while halting. */

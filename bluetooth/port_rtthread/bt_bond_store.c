@@ -206,3 +206,91 @@ void bt_bond_store_wait_ready(uint32_t timeout_ms)
     rt_kprintf("[BOND] shared block not ready in %lu ms, starting empty\n",
                (unsigned long)timeout_ms);
 }
+
+/* ---- M8.x: LE bond 持久化 ----
+ * le_device_db (RAM) 为运行时真值; LE 段 (共享块 + M55 文件) 为传输面。
+ * 载入: bt 启动时 (M55 铺块后) 把 LE 段灌回 le_device_db;
+ * 发布: SM 配对完成/身份创建后把 le_device_db 镜像出去。
+ * 结果: 重烧/重启后手机旧 bond 直接可用, 加密链路免重配 (双模根治项) */
+#include "ble/le_device_db.h"
+
+volatile uint32_t g_le_bond_diag[4]; /* [0]=imported [1]=published [2]=db_count [3]=load_status */
+
+void ft_le_bond_load(void)
+{
+    /* 有界等待 M55 铺 LE 段 (与经典段同批发布; 通常数百毫秒内就绪) */
+    for (int i = 0; i < 40; i++)
+    {
+        FT_BOND_DCACHE_INVALID((uint32_t)FT_BOND_LE, sizeof(ft_bond_le_shared_t));
+        if (ft_bond_le_valid(FT_BOND_LE)) break;
+        rt_thread_mdelay(50);
+    }
+    FT_BOND_DCACHE_INVALID((uint32_t)FT_BOND_LE, sizeof(ft_bond_le_shared_t));
+    if (!ft_bond_le_valid(FT_BOND_LE))
+    {
+        g_le_bond_diag[3] = 1;   /* 段无效 (M55 未铺/版本不符): 空库继续 */
+        rt_kprintf("[BOND] LE section invalid/absent, empty LE db\n");
+        return;
+    }
+    uint32_t imported = 0;
+    for (uint32_t i = 0; i < FT_BOND_LE->count; i++)
+    {
+        const volatile ft_bond_le_entry_t *e = &FT_BOND_LE->entries[i];
+        if (!e->in_use) continue;
+        sm_key_t irk, ltk;
+        uint8_t rand8[8];
+        for (int k = 0; k < 16; k++) { irk[k] = e->irk[k]; ltk[k] = e->ltk[k]; }
+        for (int k = 0; k < 8; k++) rand8[k] = e->rand[k];
+        int idx = le_device_db_add(e->addr_type, (const uint8_t *)e->addr, irk);
+        if (idx < 0) continue;
+        if (e->key_size > 0)
+        {
+            le_device_db_encryption_set(idx, e->ediv, rand8, ltk,
+                                        e->key_size, e->authenticated, 0,
+                                        e->secure_connection);
+        }
+        imported++;
+    }
+    g_le_bond_diag[0] = imported;
+    rt_kprintf("[BOND] LE db restored %lu entr(y/ies) from shared block\n",
+               (unsigned long)imported);
+}
+
+void ft_le_bond_publish(void)
+{
+    ft_bond_le_entry_t table[FT_BOND_LE_MAX_ENTRIES];
+    memset(table, 0, sizeof(table));
+    int n = le_device_db_count();
+    if (n > FT_BOND_LE_MAX_ENTRIES) n = FT_BOND_LE_MAX_ENTRIES;
+    uint32_t count = 0;
+    for (int i = 0; i < n; i++)
+    {
+        int addr_type, key_size, authenticated, authorized, secure_connection;
+        uint16_t ediv;
+        uint8_t rand8[8];
+        sm_key_t irk, ltk;
+        bd_addr_t addr;
+        le_device_db_info(i, &addr_type, addr, irk);
+        le_device_db_encryption_get(i, &ediv, rand8, ltk, &key_size,
+                                    &authenticated, &authorized, &secure_connection);
+        ft_bond_le_entry_t *e = &table[count++];
+        e->in_use = 1;
+        e->addr_type = (uint8_t)addr_type;
+        memcpy(e->addr, addr, 6);
+        memcpy(e->irk, irk, 16);
+        memcpy(e->ltk, ltk, 16);
+        e->ediv = ediv;
+        memcpy(e->rand, rand8, 8);
+        e->key_size = (int8_t)key_size;
+        e->authenticated = (uint8_t)authenticated;
+        e->secure_connection = (uint8_t)secure_connection;
+    }
+    static uint32_t s_le_seq;
+    s_le_seq++;
+    ft_bond_le_serialize(FT_BOND_LE, table, count, s_le_seq);
+    FT_BOND_DCACHE_CLEAN((uint32_t)FT_BOND_LE, sizeof(ft_bond_le_shared_t));
+    g_le_bond_diag[1]++;
+    g_le_bond_diag[2] = (uint32_t)n;
+    rt_kprintf("[BOND] LE db published %lu entr(y/ies) (le_seq %lu)\n",
+               (unsigned long)count, (unsigned long)s_le_seq);
+}

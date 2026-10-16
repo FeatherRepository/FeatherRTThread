@@ -262,6 +262,14 @@ static uint16_t att_read_callback(hci_con_handle_t con_handle, uint16_t att_hand
 {
     (void)con_handle;
     g_le_connect_diag[6] = att_handle;
+    /* M8.x: Database Hash (0x2B2A) 读路由 (Robust Caching) */
+    {
+        extern uint16_t ft_gatt_hash_read(uint16_t offset, uint8_t *buffer, uint16_t buffer_size);
+        if (att_handle == ATT_CHARACTERISTIC_ORG_BLUETOOTH_CHARACTERISTIC_DATABASE_HASH_01_VALUE_HANDLE)
+        {
+            return ft_gatt_hash_read(offset, buffer, buffer_size);
+        }
+    }
     /* M8.1: LE Audio ASE 状态读取先行路由 (0xFFFF = 非本模块句柄) */
     {
         uint16_t le_rc = ft_le_audio_att_read(att_handle, offset, buffer, buffer_size);
@@ -340,9 +348,11 @@ static void ft_notify_timer_handler(struct btstack_timer_source *ts)
 }
 
 /* M8.1: LE-only 验证开关 (1 = 关闭 Classic 可发现/可连, 广播 flags 声明
- * 无 BR/EDR, 强制手机走 LE Audio/LC3; 0 = 双模常规形态) */
+ * 无 BR/EDR, 强制手机走 LE Audio/LC3; 0 = 双模常规形态)。
+ * M8.x 双模阶段: A2DP Sink/Source + AVRCP 本就无条件初始化, 置 0 即恢复
+ * Classic 可见 (TODO: 迁移到 rtconfig/Kconfig 正式配置项) */
 #ifndef FEATHERTALK_BT_LE_AUDIO_ONLY
-#define FEATHERTALK_BT_LE_AUDIO_ONLY 1
+#define FEATHERTALK_BT_LE_AUDIO_ONLY 0
 #endif
 
 /* 广播保活: 连接尝试失败(未建立)时, 控制器会停广播且不产生断开事件,
@@ -355,6 +365,25 @@ static void ft_notify_timer_handler(struct btstack_timer_source *ts)
 static btstack_timer_source_t s_adv_keepalive_timer;
 static void bt_adv_set_data(void);
 static void bt_adv_enable(void);
+static void bt_adv_start(void);
+/* M8.x 音频通道模式 (用户可在 UI 直接选择发 BLE 还是经典):
+ * 0=双模 (两套发现机制都开, 默认)  1=仅 LE (只发 LE 广播, 经典扫描关)
+ * 2=仅经典 (LE 可连接广播停, 经典扫描开; 广播源 handle3 不受影响,
+ *   转发场景 —— A2DP 收流 + Auracast 出局 —— 在经典模式下照常可用)。
+ * 原 LE 优先配对模式 = 仅 LE 模式的复用 (HyperOS 配对判型需要)。 */
+#define FT_TRANSPORT_DUAL         0
+#define FT_TRANSPORT_LE_ONLY      1
+#define FT_TRANSPORT_CLASSIC_ONLY 2
+/* 开机默认经典 A2DP (用户设定): 只开经典扫描, LE 可连接广播不发 */
+static int s_audio_transport = FT_TRANSPORT_DUAL;   /* 开机默认双模 (A 方案: 两种发现机制都开) */
+int bt_service_le_pairing_mode(void)
+{
+    return s_audio_transport == FT_TRANSPORT_LE_ONLY;
+}
+int bt_service_audio_transport(void)
+{
+    return s_audio_transport;
+}
 static void ft_adv_keepalive_handler(struct btstack_timer_source *ts)
 {
     if (s_desired_on && s_bt_state == BT_STARTING)
@@ -370,9 +399,11 @@ static void ft_adv_keepalive_handler(struct btstack_timer_source *ts)
             bt_adv_enable();     /* enable 步被丢弃: 幂等重发 */
         }
     }
-    if ((s_bt_state == BT_READY) && s_desired_on && !s_gatt_connected)
+    if ((s_bt_state == BT_READY) && s_desired_on && !s_gatt_connected &&
+        s_audio_transport != FT_TRANSPORT_CLASSIC_ONLY)
     {
-        /* 控制器若已在广播, 此命令幂等; 若假死则救活 */
+        /* 控制器若已在广播, 此命令幂等; 若假死则救活。
+         * 仅经典模式: LE 可连接广播被用户关闭, 保活不得复活它 */
         bt_adv_enable();
     }
     btstack_run_loop_set_timer(ts, 3000);
@@ -420,13 +451,13 @@ static const le_extended_advertising_parameters_t s_le_discovery_params = {
     .secondary_advertising_phy = 1,
     .advertising_sid = 1,
 };
-static const uint8_t s_le_discovery_data[] = {
+static uint8_t s_le_discovery_data[] = {
 #if FEATHERTALK_BT_LE_AUDIO_ONLY
     2, 0x01, 0x06,
 #else
     2, 0x01, 0x02,
 #endif
-    12, 0x09, 'F','e','a','t','h','e','r','T','a','l','k',
+    15, 0x09, 'F','e','a','t','h','e','r','T','a','l','k','-','L','E',
     11, 0x03, 0x50, 0x18, 0x4e, 0x18, 0x53, 0x18,
     0x44, 0x18, 0x55, 0x18
 };
@@ -442,20 +473,101 @@ static const le_extended_advertising_parameters_t s_le_adv_params = {
 };
 /* BAP Unicast Server General Announcement, CAP Acceptor, TMAS UMR.
  * Persistent storage is required by the asynchronous GAP advertising API. */
-static const uint8_t s_le_adv_data[] = {
+static uint8_t s_le_adv_data[] = {
 #if FEATHERTALK_BT_LE_AUDIO_ONLY
     2, 0x01, 0x06,
 #else
     2, 0x01, 0x02, /* LE discoverable, BR/EDR supported */
 #endif
-    12, 0x09, 'F','e','a','t','h','e','r','T','a','l','k',
+    15, 0x09, 'F','e','a','t','h','e','r','T','a','l','k','-','L','E',
     /* UUID list supports OS service filters in addition to announcements. */
     11, 0x03, 0x50, 0x18, 0x4e, 0x18, 0x53, 0x18,
     0x44, 0x18, 0x55, 0x18,
     9, 0x16, 0x4e, 0x18, 0, 7, 0, 0, 0, 0,
     4, 0x16, 0x53, 0x18, 0,
-    5, 0x16, 0x55, 0x18, 8, 0
+    5, 0x16, 0x55, 0x18, 8, 0,
+    /* M8.x: Fast Pair Model ID 服务数据 (0xFE2C) —— 触发手机主动连 LE
+     * (seeker 连入读 Model ID, 顺带完成 GATT 发现, ASCS 入缓存)。
+     * 未注册调试 Model ID 0x544654, 与 ft_gatt.gatt 的 FP 服务一致 */
+    7, 0x16, 0x2c, 0xfe, 0x54, 0x46, 0x54,
 };
+
+/* M8.x: LE 优先配对模式开关 (经 IPC QUICK_BT_LE_ROLE value=3 驱动)。
+ * on: 广播 flags 改 0x06 + 关经典可发现/可连 + 断开既有经典 ACL,
+ *     手机只能以 LE 配对本机 (发现 ASCS, 建立 LE 音频关系)。
+ * off: 恢复双模形态。 */
+/* M8.x 音频通道切换 (UI 音频通道行 / IPC 驱动)。仅 READY 态可切
+ * (避免与启动期广播链竞态); 模式为运行态, 重启回双模。 */
+int bt_service_set_audio_transport(int mode)
+{
+    if (mode < FT_TRANSPORT_DUAL || mode > FT_TRANSPORT_CLASSIC_ONLY) return -RT_EINVAL;
+    if (s_audio_transport == mode) return RT_EOK;
+    if (s_bt_state != BT_READY) return -RT_EBUSY;
+    s_audio_transport = mode;
+    s_le_adv_data[2]       = (mode == FT_TRANSPORT_LE_ONLY) ? 0x06 : 0x02;
+    s_le_discovery_data[2] = s_le_adv_data[2];
+    if (mode == FT_TRANSPORT_LE_ONLY)
+    {
+        /* 仅 LE: 经典扫描关, 断既有经典 ACL; LE 广播带 0x06 flags 重发
+         * (从开机经典默认态切来时广播集未注册, bt_adv_start 会注册) */
+        gap_discoverable_control(0);
+        gap_connectable_control(0);
+        if (s_classic_connected && s_classic_handle != HCI_CON_HANDLE_INVALID)
+        {
+            gap_disconnect(s_classic_handle);
+        }
+        if (!s_le_adv_registered || !s_le_discovery_registered)
+        {
+            bt_adv_start();
+        }
+        bt_adv_set_data();
+    }
+    else if (mode == FT_TRANSPORT_CLASSIC_ONLY)
+    {
+        /* 仅经典: LE 可连接广播停 (广播源 handle3 不在管辖, 转发可用),
+         * LE 链路断开 —— 手机重连时将发现 LE 不可连 */
+        gap_discoverable_control(1);
+        gap_connectable_control(1);
+        if (s_gatt_connected && s_gatt_con_handle != HCI_CON_HANDLE_INVALID)
+        {
+            gap_disconnect(s_gatt_con_handle);
+        }
+        if (s_le_adv_registered)
+        {
+            (void)gap_extended_advertising_stop(s_le_adv_handle);
+        }
+        if (s_le_discovery_registered)
+        {
+            (void)gap_extended_advertising_stop(s_le_discovery_handle);
+        }
+    }
+    else
+    {
+        /* 双模: 两套发现机制都开 (从仅经典切出时广播集未注册, 先注册) */
+        gap_discoverable_control(1);
+        gap_connectable_control(1);
+        if (!s_le_adv_registered || !s_le_discovery_registered)
+        {
+            bt_adv_start();
+        }
+        bt_adv_set_data();
+    }
+    if (mode != FT_TRANSPORT_CLASSIC_ONLY && s_le_discovery_registered)
+    {
+        (void)gap_extended_advertising_set_adv_data(s_le_discovery_handle,
+            sizeof(s_le_discovery_data), s_le_discovery_data);
+    }
+    rt_kprintf("[BT] audio transport -> %s\n",
+               mode == FT_TRANSPORT_LE_ONLY ? "LE_ONLY" :
+               mode == FT_TRANSPORT_CLASSIC_ONLY ? "CLASSIC_ONLY" : "DUAL");
+    feathertalk_ipc_send_event(86);
+    return RT_EOK;
+}
+
+int bt_service_set_le_pairing_mode(int on)
+{
+    return bt_service_set_audio_transport(on ? FT_TRANSPORT_LE_ONLY : FT_TRANSPORT_DUAL);
+}
 static void bt_adv_enable(void)
 {
     int rc = gap_extended_advertising_start(s_le_adv_handle, 0, 0);
@@ -496,12 +608,87 @@ static void bt_adv_start(void)
 /* HCI 包处理器: 状态机到达 WORKING 即启动 BLE 广播 */
 static void bt_iso_probe_print(const uint8_t *mask);
 static btstack_packet_callback_registration_t s_sm_event_reg;
+
+/* Bond-side hygiene: when the board loses its bond DB (e.g. after a reflash)
+ * a still-bonded phone reconnects with an RPA, identity resolving fails, and
+ * the peer keeps requesting encryption with LTKs we no longer have
+ * (LTK Request -> IRK Lookup Failed) until it gives up on its own. First-time
+ * pairing is unaffected (the peer sends a Pairing Request, which cancels the
+ * timer via SM_EVENT_PAIRING_STARTED).
+ * M8.x 双模: 本定时器会踢掉手机的全部 LE 连接 (RPA 解析失败在 LE 库为空时
+ * 必然发生), 加密链路永远建不起来 -> ASCS 无法入缓存 -> LE 音频开关不出现。
+ * 双模期间停用主动断链, 仅保留日志标记; LE bond 持久化落地后再评估恢复。 */
+#define FT_IR_FAIL_DISCONNECT_MS 5000U
+#define FT_IR_FAIL_DROP_ENABLE 0
+static btstack_timer_source_t s_ir_fail_timer;
+static hci_con_handle_t s_ir_fail_handle = HCI_CON_HANDLE_INVALID;
+
+static void ft_ir_fail_disconnect(struct btstack_timer_source *ts)
+{
+    hci_con_handle_t handle = s_ir_fail_handle;
+    s_ir_fail_handle = HCI_CON_HANDLE_INVALID;
+    (void)ts;
+#if FT_IR_FAIL_DROP_ENABLE
+    if (handle != HCI_CON_HANDLE_INVALID &&
+        s_gatt_connected && s_gatt_con_handle == handle)
+    {
+        rt_kprintf("[BT] identity unresolved, drop stale bonded link (handle 0x%x)\n",
+                   handle);
+        gap_disconnect(handle);
+    }
+#else
+    if (handle != HCI_CON_HANDLE_INVALID)
+    {
+        rt_kprintf("[BT] identity unresolved on handle 0x%x (keep, dual-mode)\n",
+                   handle);
+    }
+#endif
+}
+
+static void ft_ir_fail_arm(hci_con_handle_t handle)
+{
+    s_ir_fail_handle = handle;
+    s_ir_fail_timer.process = ft_ir_fail_disconnect;
+    btstack_run_loop_remove_timer(&s_ir_fail_timer);
+    btstack_run_loop_set_timer(&s_ir_fail_timer, FT_IR_FAIL_DISCONNECT_MS);
+    btstack_run_loop_add_timer(&s_ir_fail_timer);
+}
+
+static void ft_ir_fail_cancel(void)
+{
+    s_ir_fail_handle = HCI_CON_HANDLE_INVALID;
+    btstack_run_loop_remove_timer(&s_ir_fail_timer);
+}
+
+static void ft_sm_handler(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t size);
+
+/* LE Audio 专用诊断环 (SWD 读): 手机双模下不建 LE 音频链路时,
+ * 按此序列定位断点 —— LE 连接 -> 加密 -> 配对 -> MTU/GATT 探测 */
+volatile uint16_t g_leaud_log[16][2];
+volatile uint8_t  g_leaud_log_pos;
+static void leaud_log(uint16_t a, uint16_t b)
+{
+    uint8_t i = g_leaud_log_pos % 16U;
+    g_leaud_log[i][0] = a;
+    g_leaud_log[i][1] = b;
+    g_leaud_log_pos++;
+}
+
 static void ft_sm_handler(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t size)
 {
     (void)channel;
     if (type != HCI_EVENT_PACKET || size < 2) return;
+    /* LE 音频诊断: SM 事件序列 (a=0x5B00|SM 事件码, b=PAIRING_COMPLETE status) */
+    leaud_log(0x5B00U | (packet[0] & 0xFFU),
+              packet[0] == SM_EVENT_PAIRING_COMPLETE ? sm_event_pairing_complete_get_status(packet) : 0);
     if (packet[0] == SM_EVENT_JUST_WORKS_REQUEST)
         sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
+    if (packet[0] == SM_EVENT_IDENTITY_RESOLVING_FAILED)
+        ft_ir_fail_arm(sm_event_identity_resolving_failed_get_handle(packet));
+    if (packet[0] == SM_EVENT_PAIRING_STARTED ||
+        packet[0] == SM_EVENT_IDENTITY_CREATED ||
+        packet[0] == SM_EVENT_PAIRING_COMPLETE)
+        ft_ir_fail_cancel();
     if (packet[0] == SM_EVENT_PAIRING_COMPLETE) {
         g_le_connect_diag[3]++;
         g_le_connect_diag[4] = sm_event_pairing_complete_get_status(packet);
@@ -509,6 +696,19 @@ static void ft_sm_handler(uint8_t type, uint16_t channel, uint8_t *packet, uint1
         rt_kprintf("[BT] SMP pairing status=0x%02x reason=0x%02x\n",
             sm_event_pairing_complete_get_status(packet),
             sm_event_pairing_complete_get_reason(packet));
+        /* M8.x: LE bond 持久化 —— 配对成功即发布 le_device_db 到共享块
+         * (M55 落盘 /flash/bt_le_bond.bin), 重启/重烧后免重配 */
+        if (sm_event_pairing_complete_get_status(packet) == 0U)
+        {
+            extern void ft_le_bond_publish(void);
+            ft_le_bond_publish();
+        }
+    }
+    if (packet[0] == SM_EVENT_IDENTITY_CREATED)
+    {
+        /* IRK/身份地址此时才最终入库, 再发布一次补全 */
+        extern void ft_le_bond_publish(void);
+        ft_le_bond_publish();
     }
 }
 static volatile int s_iso_probe_pending;
@@ -529,6 +729,54 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     /* 全事件记录: 定位"连接事件到底来没来" (GDB 可读) */
     bt_evt_log(0xE000U | packet[0],
                (packet[0] == 0x3EU && size > 2U) ? packet[2] : 0xEEEEU);
+
+    /* LE 音频诊断: a=事件标识, b=状态/关键字节
+     * 加密: [2]=status [3..4]=handle; 断开: [4]=reason */
+    switch (packet[0])
+    {
+    case HCI_EVENT_ENCRYPTION_CHANGE:
+        leaud_log(0x0008 | ((size > 5U && packet[5]) ? 0x8000U : 0U),
+                  size > 2U ? packet[2] : 0xFEU);
+        break;
+    case HCI_EVENT_ENCRYPTION_KEY_REFRESH_COMPLETE:
+        leaud_log(0x0030, size > 2U ? packet[2] : 0xFEU);
+        break;
+    case HCI_EVENT_DISCONNECTION_COMPLETE:
+        /* 布局: [2]=status [3..4]=handle [5]=reason */
+        leaud_log(0x0005, size > 5U ? packet[5] : 0xFEU);
+        break;
+    case ATT_EVENT_MTU_EXCHANGE_COMPLETE:
+        leaud_log(0x00B5, 0);
+        break;
+    case HCI_EVENT_LE_META:
+        if (size > 2U)
+        {
+            switch (packet[2])
+            {
+            case 0x01U:  /* LE Connection Complete: [3]=status */
+                leaud_log(0x3E01, size > 3U ? packet[3] : 0xFEU);
+                break;
+            case 0x0AU:  /* LE Enhanced Connection Complete: [3]=status */
+                leaud_log(0x3E0A, size > 3U ? packet[3] : 0xFEU);
+                break;
+            case 0x0DU:  /* LE Extended Connection Complete: [3]=status */
+                leaud_log(0x3E0D, size > 3U ? packet[3] : 0xFEU);
+                break;
+            case 0x08U:  /* LE Encryption Change: [3]=status [4]=enabled */
+                leaud_log(0x3E08 | ((size > 4U && packet[4]) ? 0x8000U : 0U),
+                          size > 3U ? packet[3] : 0xFEU);
+                break;
+            case 0x05U:  /* LE Long Term Key Request: [3]=status 无, 仅标记 */
+                leaud_log(0x3E05, 0);
+                break;
+            default:
+                break;
+            }
+        }
+        break;
+    default:
+        break;
+    }
 
     /* M8.0 探针: 拦截 Read_Local_Supported_Commands 应答, 解码 LE ISO 能力 */
     if (s_iso_probe_pending &&
@@ -559,9 +807,18 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             rt_kprintf("[BT] HCI WORKING, addr %02x:%02x:%02x:%02x:%02x:%02x\n",
                        local_addr[0], local_addr[1], local_addr[2],
                        local_addr[3], local_addr[4], local_addr[5]);
+            /* M8.x: GATT Database Hash 计算 (btstack_crypto 异步 CMAC) */
+            {
+                extern void ft_gatt_hash_start(void);
+                ft_gatt_hash_start();
+            }
             feathertalk_ipc_send_event(40);
             BT_CP(60);
-            bt_adv_start();
+            /* 双模/仅 LE 通道: 启动 LE 可连接广播; 仅经典通道跳过 */
+            if (s_audio_transport != FT_TRANSPORT_CLASSIC_ONLY)
+            {
+                bt_adv_start();
+            }
             /* M4a: Classic 可见+可连 (与 LE 广播并存, 双模标准做法)。
              * 这些是 gap task 型 API, 经 hci_run 排队发送, 不与上面的
              * adv 串行链冲突 */
@@ -572,8 +829,20 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
              * (实测: 小米15U 只连经典 A2DP, 从不发起 LE 连接) */
             bt_classic_eir_setup();
 #if !FEATHERTALK_BT_LE_AUDIO_ONLY
-            gap_discoverable_control(1);
-            gap_connectable_control(1);
+            /* 仅 LE 模式关闭经典可发现/可连; 双模/仅经典均开 */
+            gap_discoverable_control(s_audio_transport == FT_TRANSPORT_LE_ONLY ? 0 : 1);
+            gap_connectable_control(s_audio_transport == FT_TRANSPORT_LE_ONLY ? 0 : 1);
+            /* 仅经典模式: READY 判定不经过 LE 广播链 (0x2039), 直接就绪 */
+            if (s_audio_transport == FT_TRANSPORT_CLASSIC_ONLY)
+            {
+                s_bt_state = 2;
+                ft_radio_set_state(FT_RADIO_BT, FT_RADIO_READY, 0);
+                rt_kprintf("[BT] classic-only ready (A2DP discoverable)\n");
+                feathertalk_ipc_send_event(41);
+                sm_init();
+                sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
+                sm_set_authentication_requirements(SM_AUTHREQ_BONDING | SM_AUTHREQ_SECURE_CONNECTION);
+            }
 #else
             /* LE-only 验证: 关闭 Classic 可发现/可连, 手机无 A2DP 可走 */
             gap_discoverable_control(0);
@@ -593,12 +862,14 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         if (opcode == 0x2006)
         {
             g_adv_cc_status[ADV_CC_PARAMS] = status;
-            if (status == 0U && s_desired_on && s_bt_state != BT_STOPPING) bt_adv_set_data();
+            if (status == 0U && s_desired_on && s_bt_state != BT_STOPPING &&
+                s_audio_transport != FT_TRANSPORT_CLASSIC_ONLY) bt_adv_set_data();
         }
         else if (opcode == 0x2008)
         {
             g_adv_cc_status[ADV_CC_DATA] = status;
-            if (status == 0U && s_desired_on && s_bt_state != BT_STOPPING) bt_adv_enable();
+            if (status == 0U && s_desired_on && s_bt_state != BT_STOPPING &&
+                s_audio_transport != FT_TRANSPORT_CLASSIC_ONLY) bt_adv_enable();
         }
         else if (opcode == 0x2039)
         {
@@ -704,7 +975,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         {
             s_classic_connected = 0;
             rt_kprintf("[BT] Classic disconnected, back to discoverable\n");
-            if (s_desired_on && s_bt_state == BT_READY && !FEATHERTALK_BT_LE_AUDIO_ONLY) {
+            if (s_desired_on && s_bt_state == BT_READY && !FEATHERTALK_BT_LE_AUDIO_ONLY && s_audio_transport != FT_TRANSPORT_LE_ONLY) {
                 gap_discoverable_control(1);
                 gap_connectable_control(1);
             }
@@ -712,6 +983,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         if (disc_handle == s_gatt_con_handle) {
             s_gatt_connected = 0;
             s_notify_enabled = 0;
+            ft_ir_fail_cancel();
         }
         feathertalk_ipc_send_event(61);
         if (s_desired_on && s_bt_state == BT_READY && !s_gatt_connected)
@@ -1000,10 +1272,17 @@ static int bt_bringup(void)
     sm_set_authentication_requirements(SM_AUTHREQ_BONDING | SM_AUTHREQ_SECURE_CONNECTION);
     s_sm_event_reg.callback = ft_sm_handler;
     sm_add_event_handler(&s_sm_event_reg);
+    /* M8.x: LE bond 持久化 —— 把共享块 LE 段灌回 le_device_db (有界等待) */
+    {
+        extern void ft_le_bond_load(void);
+        ft_le_bond_load();
+    }
     att_server_init(profile_data, att_read_callback, att_write_callback);
     att_server_register_packet_handler(packet_handler);
     /* M8.1: LE Audio Unicast Server (PACS/ASCS/CIS acceptor/ISO 收流) */
     ft_le_audio_init();
+    /* M8.2: Auracast 广播源 (msh bt_bcast_start 手动启动) */
+    ft_le_audio_broadcast_init();
     s_stack_initialized = RT_TRUE;
     g_bt_coex_diag.stack_inits++;
     }
@@ -1149,7 +1428,14 @@ INIT_COMPONENT_EXPORT(bt_control_init);
 rt_err_t bt_service_set_enabled(int on)
 {
     if (on != 0 && on != 1) return -RT_EINVAL;
-    rt_mutex_take(&s_control_lock, RT_WAITING_FOREVER);
+    /* Bounded: this runs inline in the M33 IPC thread's receive path. A
+     * FOREVER wait here can park the whole IPC loop (heartbeats included)
+     * if the owner thread is slow or stuck. Timeout surfaces as a normal
+     * service failure to the quick-status reply. */
+    if (rt_mutex_take(&s_control_lock, rt_tick_from_millisecond(200)) != RT_EOK)
+    {
+        return -RT_ETIMEOUT;
+    }
     if (on && (s_stack_setup_failed ||
         (s_stack_initialized && s_bt_state == BT_ERROR && hci_get_state() != HCI_STATE_OFF))) {
         rt_mutex_release(&s_control_lock);
@@ -1277,6 +1563,54 @@ static int bt_off(int argc, char **argv)
     return bt_service_set_enabled(0);
 }
 MSH_CMD_EXPORT_ALIAS(bt_off, bt_off, power off CYW55512 BT);
+
+/* M8.2: 上电自启动蓝牙主机 (产品默认; 开发期可 bt_off 关闭)。
+ * 此前每次断电重启都需手动 bt_on, 控制台不可达时蓝牙无从开启。
+ * 久置冷启动死机排查: 自启动延迟 3s —— 冷启动瞬间 BT HCD 下载的电流
+ * 浪涌与显示/IPC/flash 挂载叠加, 是 USB 供电边缘触发欠压复位/锁死的
+ * 头号嫌疑; 错峰启动消除浪涌叠加, 复位原因由 g_boot_reset_cause 捕获 */
+static int bt_autostart(void)
+{
+    bt_service_start();
+    return RT_EOK;
+}
+static rt_timer_t s_autostart_timer;
+static void bt_autostart_delayed(void *param)
+{
+    (void)param;
+    rt_kprintf("[BT] autostart (delayed 3s)\n");
+    bt_autostart();
+}
+static int bt_autostart_schedule(void)
+{
+    s_autostart_timer = rt_timer_create("btauto", bt_autostart_delayed,
+                                        RT_NULL, rt_tick_from_millisecond(3000),
+                                        RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER);
+    if (s_autostart_timer != RT_NULL)
+    {
+        rt_timer_start(s_autostart_timer);
+    }
+    else
+    {
+        bt_autostart();   /* 定时器耗尽: 退回立即启动 */
+    }
+    return RT_EOK;
+}
+INIT_APP_EXPORT(bt_autostart_schedule);
+
+/* ---- 久置冷启动死机排查: 复位原因捕获 (SWD 读) ----
+ * SRSS RES_CAUSE 位: bit0=WDT bit1=ACT_FAULT bit2=DPSLP_FAULT
+ * bit3=调试复位 bit4..6=SOFT bit8..11=MCWDT0..3; 全 0 = POR/XRES */
+volatile uint32_t g_boot_reset_cause;
+volatile uint32_t g_boot_reset_cause2;
+static int bt_reset_cause_capture(void)
+{
+    extern uint32_t Cy_SysLib_GetResetReason(void);
+    g_boot_reset_cause = Cy_SysLib_GetResetReason();
+    g_boot_reset_cause2 = *(volatile uint32_t *)(SRSS_BASE + 0x1BD4UL);
+    return RT_EOK;
+}
+INIT_BOARD_EXPORT(bt_reset_cause_capture);
 
 static int bt_info(int argc, char **argv)
 {

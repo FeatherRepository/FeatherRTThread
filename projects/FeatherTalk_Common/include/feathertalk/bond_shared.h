@@ -89,6 +89,63 @@ static inline int ft_bond_valid(const volatile ft_bond_shared_t *src)
     return ft_bond_crc32(src->entries, sizeof(src->entries)) == src->crc;
 }
 
+/* ---- LE bond 段 (M8.x): 经典段之后同块存放, 独立文件独立版本 ----
+ * 内容 = btstack le_device_db 的持久化镜像 (IRK 身份解析 + LTK 加密)。
+ * 所有权模型与经典段一致: M33 le_device_db 为运行时真值, 配对完成即
+ * 发布; M55 宿主 /flash/bt_le_bond.bin 启动铺回。 */
+#define FT_BOND_LE_MAGIC       0x4654424CUL   /* 'FTBL' */
+#define FT_BOND_LE_MAX_ENTRIES 4              /* = MAX_NR_LE_DEVICE_DB_ENTRIES */
+#define FT_BOND_LE_ENTRY_SIZE  64
+
+typedef struct
+{
+    uint8_t  in_use;
+    uint8_t  addr_type;    /* 0=public 1=random */
+    uint8_t  addr[6];
+    uint8_t  irk[16];      /* 身份解析密钥 (可为 0) */
+    uint8_t  ltk[16];      /* SC: 128bit LTK; legacy: 分发 LTK */
+    uint16_t ediv;         /* legacy 用, SC=0 */
+    uint8_t  rand[8];      /* legacy 用, SC=0 */
+    int8_t   key_size;     /* 0 = 加密信息未设置 (仅 IRK 条目) */
+    uint8_t  authenticated;
+    uint8_t  secure_connection;
+    uint8_t  reserved[FT_BOND_LE_ENTRY_SIZE - 53];
+} ft_bond_le_entry_t;
+
+typedef struct
+{
+    uint32_t magic;
+    uint32_t seq;                       /* 写方每改一次 +1 */
+    uint32_t count;                     /* 有效条目数 */
+    uint32_t crc;                       /* entries 的 CRC32 */
+    ft_bond_le_entry_t entries[FT_BOND_LE_MAX_ENTRIES];
+} ft_bond_le_shared_t;
+
+/* 经典段 272B 之后紧贴, 合计 544B < 1KB 块 */
+#define FT_BOND_LE ((volatile ft_bond_le_shared_t *)(FT_BOND_BASE + sizeof(ft_bond_shared_t)))
+
+/* 序列化 LE 内存表 -> LE 段 (写方调用; M55 侧需随后 clean cache) */
+static inline void ft_bond_le_serialize(volatile ft_bond_le_shared_t *dst,
+                                        const ft_bond_le_entry_t *entries, uint32_t count,
+                                        uint32_t seq)
+{
+    memset((void *)dst->entries, 0, sizeof(dst->entries));
+    if (count > FT_BOND_LE_MAX_ENTRIES) count = FT_BOND_LE_MAX_ENTRIES;
+    if (count) memcpy((void *)dst->entries, entries, count * sizeof(ft_bond_le_entry_t));
+    dst->count = count;
+    dst->crc = ft_bond_crc32(dst->entries, sizeof(dst->entries));
+    dst->seq = seq;
+    dst->magic = FT_BOND_LE_MAGIC;
+}
+
+/* 校验 LE 段有效性 (读方调用) */
+static inline int ft_bond_le_valid(const volatile ft_bond_le_shared_t *src)
+{
+    if (src->magic != FT_BOND_LE_MAGIC) return 0;
+    if (src->count > FT_BOND_LE_MAX_ENTRIES) return 0;
+    return ft_bond_crc32(src->entries, sizeof(src->entries)) == src->crc;
+}
+
 #ifdef __cplusplus
 }
 #endif

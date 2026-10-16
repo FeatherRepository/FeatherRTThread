@@ -104,6 +104,17 @@ static hci_con_handle_t s_acl_handle = HCI_CON_HANDLE_INVALID;
 static rt_uint8_t      s_streaming;        /* ring 数据面已开 (任一 ASE Streaming) */
 static btstack_packet_callback_registration_t s_hci_event_reg;
 
+/* M8.x: CIS 请求诊断 (SWD 读) —— 右声道 CIS 未建立时定位:
+ * [0]=CIS 请求接受数 [1]=请求总数 [2]=无匹配拒绝数
+ * [3]=CIS 建立完成数 [4]=最近 cig [5]=最近 cis_id */
+volatile uint32_t g_cis_diag[8];
+
+/* M8.x 三态互斥: 单播流状态查询 (广播守卫/UI 互斥用) */
+int ft_le_audio_unicast_streaming(void)
+{
+    return s_streaming;
+}
+
 /* 统计 (msh bt_le_stats) */
 static rt_uint32_t s_stat_iso_sdus;
 static rt_uint32_t s_stat_iso_dropped;   /* ring 满丢弃 */
@@ -128,6 +139,19 @@ static void ft_le_ring_start(void)
 
 static void ft_le_ring_stop(void)
 {
+    /* M8.x 三态互斥防竞态: 若 A2DP 流正在播放 (迁移时序: 手机先建
+     * A2DP 流、后释放 CIS), 此处发布 fmt=0 会让 M55 关掉 A2DP 刚打开
+     * 的 sound0 = 静音陷阱。此时跳过 fmt=0 发布, 让 A2DP 会话继续;
+     * 本模块的 ASE 状态复位照常进行。 */
+    {
+        extern int bt_a2dp_sink_streaming(void);
+        if (bt_a2dp_sink_streaming())
+        {
+            s_streaming = 0U;
+            rt_kprintf("[LEA] ring stop suppressed (A2DP owns output)\n");
+            return;
+        }
+    }
     FT_ALINK->fmt_rate = 0U;
     FT_ALINK->flags    = 0U;
     __DMB();
@@ -148,11 +172,32 @@ static void ft_le_streaming_refresh(void)
     }
     if (any && !s_streaming)
     {
+        /* M8.x 三态互斥: CIS 流建立即挂起 A2DP 流 (若手机误同时推流),
+         * 保证同一时刻只有一条到喇叭的音频路径 */
+        {
+            extern void bt_a2dp_sink_suspend_if_active(const char *why);
+            bt_a2dp_sink_suspend_if_active("CIS unicast start");
+        }
         ft_le_ring_start();
     }
     else if (!any && s_streaming)
     {
         ft_le_ring_stop();
+    }
+    /* M8.x 双模共存: CIS 流期间暂停经典 page scan (空口 TDM 冲突实测
+     * 造成 ~30% CIS 丢包/卡顿)。流结束恢复, 让 A2DP 可再次连入 */
+    if (any)
+    {
+        gap_connectable_control(0);
+        rt_kprintf("[LEA] CIS streaming: classic page scan paused\n");
+    }
+    else
+    {
+        extern int bt_service_le_pairing_mode(void);
+        if (!bt_service_le_pairing_mode())
+        {
+            gap_connectable_control(1);
+        }
     }
 }
 
@@ -415,6 +460,14 @@ static void ft_le_handle_qos_config(const rt_uint8_t *p, rt_uint32_t len)
 static void ft_le_handle_enable(const rt_uint8_t *p, rt_uint32_t len)
 {
     if (len < 2U) { s_stat_op_err++; return; }
+    /* M8.x 三态互斥 (LE 优先让位式): A2DP 播放中收到 ASE Enable →
+     * 先挂起 A2DP 流 (手机可感知, 重按播放即恢复), 再接受使能。
+     * 不做拒绝式防御 —— 拒绝会让 ASE 卡在 QOS_CONFIGURED, 手机不再
+     * 重试, 声道永久缺失 (实测 FR 卡死 + 回声根因) */
+    {
+        extern void bt_a2dp_sink_suspend_if_active(const char *why);
+        bt_a2dp_sink_suspend_if_active("ASE enable (LE wins)");
+    }
     rt_uint8_t n = p[0];
     const rt_uint8_t *q = &p[1];
     for (rt_uint8_t i = 0U; i < n; i++)
@@ -811,13 +864,30 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
             }
             if (match != RT_NULL)
             {
+                /* M8.x 三态互斥: 广播源活跃时 ISO 数据面归广播 (handler 单值),
+                 * 此时拒绝 CIS 请求 —— 单播/广播不可同时收发 */
+                {
+                    extern int ft_le_audio_broadcast_active(void);
+                    if (ft_le_audio_broadcast_active())
+                    {
+                        (void)gap_cis_reject(cis_handle);
+                        g_cis_diag[1]++;
+                        g_cis_diag[4] = cig_id; g_cis_diag[5] = cis_id;
+                        rt_kprintf("[LEA] CIS reject: broadcast active (ISO owned)\n");
+                        break;
+                    }
+                }
                 match->cis_handle = cis_handle;
+                g_cis_diag[0]++;
+                g_cis_diag[4] = cig_id; g_cis_diag[5] = cis_id;
                 (void)gap_cis_accept(cis_handle);
                 rt_kprintf("[LEA] CIS accept: ase=%u cis=0x%04x (cig=%u cis_id=%u)\n",
                            match->ase_id, cis_handle, cig_id, cis_id);
             }
             else
             {
+                g_cis_diag[2]++;
+                g_cis_diag[4] = cig_id; g_cis_diag[5] = cis_id;
                 (void)gap_cis_reject(cis_handle);
                 rt_kprintf("[LEA] CIS reject: cig=%u cis_id=%u (no QoS match)\n",
                            cig_id, cis_id);
@@ -838,7 +908,28 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
     case HCI_EVENT_META_GAP:
         if (packet[2] == GAP_SUBEVENT_LE_CONNECTION_COMPLETE) {
             if (gap_subevent_le_connection_complete_get_status(packet) == 0)
+            {
                 s_acl_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
+                /* 手机连入即退出广播模式: 单播/广播互斥 (ISO handler 单值)。
+                 * 延迟停: 拆 BIG 的命令/事件与连接建立错峰, 防连接反复断
+                 * (实测直停时连接 0x13/0x3E 反复建立断开); stop 内部会把
+                 * ISO handler 归还给单播 */
+                {
+                    extern void ft_le_audio_broadcast_stop_deferred(void);
+                    ft_le_audio_broadcast_stop_deferred();
+                }
+                /* M8.x 防御: 新 ACL 建立时强制全量 ASE 复位 —— 防此前
+                 * 会话残留态导致手机只能配出部分声道 (实测故障形态:
+                 * ch_mask 3→1, 单声道缺半帧 ~45% PLC = 歌曲重现/回声) */
+                for (rt_uint32_t i = 0U; i < FT_LE_ASE_NUM; i++)
+                {
+                    if (s_ase[i].state != FT_ASE_IDLE)
+                    {
+                        ft_le_ase_reset(&s_ase[i]);
+                    }
+                    s_ase[i].cis_handle = HCI_CON_HANDLE_INVALID;
+                }
+            }
             break;
         }
         if (packet[2] == GAP_SUBEVENT_CIS_CREATED)
@@ -846,6 +937,7 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
             rt_uint8_t status = gap_subevent_cis_created_get_status(packet);
             hci_con_handle_t cis_handle =
                 gap_subevent_cis_created_get_cis_con_handle(packet);
+            if (status == 0U) g_cis_diag[3]++; else g_cis_diag[6]++;
             for (rt_uint32_t i = 0U; i < FT_LE_ASE_NUM; i++)
             {
                 if (s_ase[i].cis_handle == cis_handle)
@@ -905,6 +997,13 @@ static void ft_le_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
 }
 
 /* ---- 初始化 / 诊断 ---- */
+/* ISO handler 是单值注册: 广播源启动时会抢占, 停止/被顶掉时由广播侧
+ * 调本函数归还。CIS 音频数据经此派发, 归还前单播收不到任何音频 */
+void ft_le_audio_unicast_attach_iso_handler(void)
+{
+    hci_register_iso_packet_handler(&ft_le_iso_handler);
+}
+
 void ft_le_audio_init(void)
 {
     s_send_cb.callback = ft_le_send_next; s_send_cb.context = RT_NULL;

@@ -21,9 +21,12 @@
 
 #define BOND_FILE      "/flash/bt_bond.bin"
 #define BOND_FILE_TMP  "/flash/bt_bond.tmp"
+#define BOND_LE_FILE   "/flash/bt_le_bond.bin"   /* M8.x: LE bond (IRK/LTK) */
+#define BOND_LE_TMP    "/flash/bt_le_bond.tmp"
 #define BOND_POLL_MS   2000
 
 static rt_uint32_t s_last_seq;      /* 本侧已消费的 seq */
+static rt_uint32_t s_le_last_seq;
 
 static int bond_read_file(ft_bond_shared_t *out)
 {
@@ -45,6 +48,30 @@ static int bond_write_file(const ft_bond_shared_t *in)
     if (wr != (int)sizeof(*in)) return -1;
     unlink(BOND_FILE);                    /* FatFS rename 不覆盖已存在目标 */
     if (rename(BOND_FILE_TMP, BOND_FILE) != 0) return -1;
+    return 0;
+}
+
+/* ---- M8.x: LE 段文件 IO (独立文件, 版本独立演进) ---- */
+static int bond_le_read_file(ft_bond_le_shared_t *out)
+{
+    int fd = open(BOND_LE_FILE, O_RDONLY | O_BINARY, 0);
+    if (fd < 0) return -1;
+    int rd = read(fd, out, sizeof(*out));
+    close(fd);
+    if (rd != (int)sizeof(*out)) return -1;
+    if (!ft_bond_le_valid(out)) return -1;
+    return 0;
+}
+
+static int bond_le_write_file(const ft_bond_le_shared_t *in)
+{
+    int fd = open(BOND_LE_TMP, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0666);
+    if (fd < 0) return -1;
+    int wr = write(fd, in, sizeof(*in));
+    close(fd);
+    if (wr != (int)sizeof(*in)) return -1;
+    unlink(BOND_LE_FILE);
+    if (rename(BOND_LE_TMP, BOND_LE_FILE) != 0) return -1;
     return 0;
 }
 
@@ -102,31 +129,70 @@ static void bond_persist_thread(void *param)
         rt_kprintf("[BOND] no persisted file, published empty bond block (seq 0)\n");
     }
 
+    /* 2b. M8.x: LE 段 (IRK/LTK) 同款处理 —— 文件 -> 铺 LE 共享段;
+     *     无文件也铺空有效段, M33 的 LE 载入等待立即通过 */
+    {
+        ft_bond_le_shared_t le;
+        if (bond_le_read_file(&le) == 0)
+        {
+            memcpy((void *)FT_BOND_LE, &le, sizeof(le));
+            FT_BOND_DCACHE_CLEAN(FT_BOND_LE, sizeof(ft_bond_le_shared_t));
+            s_le_last_seq = le.seq;
+            rt_kprintf("[BOND] restored %lu LE bond(s) from flash\n",
+                       (unsigned long)le.count);
+        }
+        else
+        {
+            memset(&le, 0, sizeof(le));
+            ft_bond_le_serialize(FT_BOND_LE, RT_NULL, 0, 0);
+            FT_BOND_DCACHE_CLEAN(FT_BOND_LE, sizeof(ft_bond_le_shared_t));
+            s_le_last_seq = 0;
+            rt_kprintf("[BOND] no LE file, published empty LE section (seq 0)\n");
+        }
+    }
+
     /* 3. 轮询: M33 更新共享块 (seq 变化且 CRC 有效) -> 原子落盘 */
     rt_uint32_t poll = 0;
     while (1)
     {
         rt_thread_mdelay(BOND_POLL_MS);
         FT_BOND_DCACHE_INVALID(FT_BOND_BASE, sizeof(ft_bond_shared_t));
+        FT_BOND_DCACHE_INVALID(FT_BOND_LE, sizeof(ft_bond_le_shared_t));
         poll++;
         if (poll % 5 == 0)
             rt_kprintf("[BOND] poll#%lu: seq=%u last=%u count=%u valid=%d\n",
                        (unsigned long)poll, (unsigned)FT_BOND->seq,
                        (unsigned)s_last_seq, (unsigned)FT_BOND->count,
                        ft_bond_valid(FT_BOND));
-        if (!ft_bond_valid(FT_BOND)) continue;
-        if (FT_BOND->seq == s_last_seq) continue;
-
-        memcpy(&local, (const void *)FT_BOND, sizeof(local));
-        if (bond_write_file(&local) == 0)
+        if (ft_bond_valid(FT_BOND) && FT_BOND->seq != s_last_seq)
         {
-            s_last_seq = local.seq;
-            rt_kprintf("[BOND] persisted %lu link key(s) (seq %lu)\n",
-                       (unsigned long)local.count, (unsigned long)local.seq);
+            memcpy(&local, (const void *)FT_BOND, sizeof(local));
+            if (bond_write_file(&local) == 0)
+            {
+                s_last_seq = local.seq;
+                rt_kprintf("[BOND] persisted %lu link key(s) (seq %lu)\n",
+                           (unsigned long)local.count, (unsigned long)local.seq);
+            }
+            else
+            {
+                rt_kprintf("[BOND] flash write failed\n");
+            }
         }
-        else
+        /* M8.x: LE 段轮询落盘 */
+        if (ft_bond_le_valid(FT_BOND_LE) && FT_BOND_LE->seq != s_le_last_seq)
         {
-            rt_kprintf("[BOND] flash write failed\n");
+            ft_bond_le_shared_t le;
+            memcpy(&le, (const void *)FT_BOND_LE, sizeof(le));
+            if (bond_le_write_file(&le) == 0)
+            {
+                s_le_last_seq = le.seq;
+                rt_kprintf("[BOND] persisted %lu LE bond(s) (le_seq %lu)\n",
+                           (unsigned long)le.count, (unsigned long)le.seq);
+            }
+            else
+            {
+                rt_kprintf("[BOND] LE flash write failed\n");
+            }
         }
     }
 }

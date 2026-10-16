@@ -334,7 +334,10 @@ static lv_obj_t *s_usb_role_buttons[2];
 /* M6-BT: 蓝牙页 A2DP 角色按钮 (与 USB 页 s_usb_role_buttons 分开) */
 static lv_obj_t *s_bt_a2dp_buttons[2];
 static lv_obj_t *s_bt_le_buttons[2];
+static lv_obj_t *s_bt_le_status;
+static lv_obj_t *s_bt_transport_buttons[2];   /* [0]=经典 A2DP [1]=LE 音频 (与页面创建顺序一致) */
 static uint8_t s_bt_a2dp_role;   /* 0=SINK 1=SOURCE */
+static uint8_t s_bt_le_role;     /* 0=SERVER 单播 1=BROADCAST 广播 */
 static lv_obj_t *s_usb_function_buttons[2];
 static lv_obj_t *s_usb_function_radios[2];
 static lv_obj_t *s_usb_function_status[2];
@@ -632,6 +635,59 @@ static lv_obj_t *create_text_page(lv_obj_t *parent, const char *title,
     lv_obj_set_style_text_font(description, ft_layout_font(16), LV_PART_MAIN);
     lv_obj_set_style_text_line_space(description, ft_layout_px(8), LV_PART_MAIN);
     return page;
+}
+
+/* M8.x: 音频通道/角色按钮专用创建 —— 不注册 accent (主题强调色系统
+ * 会覆盖自管理的选中色, 实测橙底白字被主题刷回), 颜色完全由
+ * settings_radio_refresh 按通道/角色状态自绘 */
+static lv_obj_t *create_state_button(lv_obj_t *parent, const char *text,
+                                     lv_event_cb_t callback, void *user_data)
+{
+    lv_obj_t *button = lv_button_create(parent);
+    lv_obj_t *label = lv_label_create(button);
+    lv_obj_set_height(button, ft_layout_get()->control_height);
+    lv_obj_set_style_radius(button, 0, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(button, 0, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x1565C0), LV_PART_MAIN);
+    lv_obj_set_style_text_color(button, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, ft_layout_font(14), LV_PART_MAIN);
+    lv_obj_center(label);
+    if (callback != RT_NULL) lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
+    return button;
+}
+
+/* M8.x: 三组按钮统一的选中态视觉 —— 激活=橙底白字, 未激活=蓝底白字,
+ * 锁定(禁用)=暗底暗字。所有音频按钮共用, 保证观感一致 */
+#define FT_BTN_BG_ACTIVE   0xFF8C00U
+#define FT_BTN_BG_NORMAL   0x1565C0U
+#define FT_BTN_BG_LOCKED   0x3A2A2AU
+#define FT_BTN_FG          0xFFFFFFU
+#define FT_BTN_FG_DIM      0x808080U
+
+static void ft_state_button_apply(lv_obj_t *btn, int state)
+{
+    uint32_t bg;
+    uint32_t fg;
+    if (btn == RT_NULL || !lv_obj_is_valid(btn)) return;
+    if (state < 0)   /* locked */
+    {
+        bg = FT_BTN_BG_LOCKED; fg = FT_BTN_FG_DIM;
+        lv_obj_add_state(btn, LV_STATE_DISABLED);
+    }
+    else
+    {
+        lv_obj_remove_state(btn, LV_STATE_DISABLED);
+        bg = state ? FT_BTN_BG_ACTIVE : FT_BTN_BG_NORMAL;
+        fg = FT_BTN_FG;
+    }
+    lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(bg), LV_PART_MAIN | LV_STATE_DISABLED);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_text_color(btn, lv_color_hex(fg), LV_PART_MAIN);
 }
 
 static lv_obj_t *create_flat_button(lv_obj_t *parent, const char *text,
@@ -2545,6 +2601,102 @@ static void settings_radio_refresh(lv_timer_t *timer)
     if (strcmp(lv_label_get_text(label), action)) lv_label_set_text(label, action);
     if (!available || busy) lv_obj_add_state(s_settings_radio_button, LV_STATE_DISABLED);
     else lv_obj_remove_state(s_settings_radio_button, LV_STATE_DISABLED);
+
+    /* M8: LE 角色命令结果回显 (拒绝原因: 手机已连接/未断开) */
+    if (s_bt_le_status != RT_NULL && lv_obj_is_valid(s_bt_le_status) &&
+        valid && status.last_control == FEATHERTALK_QUICK_BT_LE_ROLE)
+    {
+        const char *le_result =
+            status.result == FEATHERTALK_QUICK_RESULT_PENDING ? ft_preferences_text("请求处理中…", "Working...") :
+            status.result == FEATHERTALK_QUICK_RESULT_FAILED ? ft_preferences_text("M33 拒绝/失败（手机可能已连接）", "Refused/failed on M33 (phone may be connected)") :
+            status.result == FEATHERTALK_QUICK_RESULT_INVALID ? ft_preferences_text("参数无效", "Invalid request") :
+            status.result == FEATHERTALK_QUICK_RESULT_OK ? ft_preferences_text("已生效", "Applied") :
+            RT_NULL;
+        if (le_result != RT_NULL)
+        {
+            static char le_text[96];
+            lv_snprintf(le_text, sizeof(le_text), "%s", le_result);
+            if (strcmp(lv_label_get_text(s_bt_le_status), le_text))
+                lv_label_set_text(s_bt_le_status, le_text);
+        }
+    }
+
+    /* M8.x 三态互斥 + 音频通道: 按钮可用性随音频状态实时置灰/恢复
+     * (LE 单播流 ↔ A2DP 流互斥; 广播与 A2DP 可共存 —— 转发场景;
+     *  广播与单播互斥: 广播活跃时 SERVER 也置灰;
+     *  音频通道: 仅LE → A2DP 角色区整体禁用, 仅经典 → SERVER 禁用) */
+    uint8_t audio = valid ? (uint8_t)(status.connected & FEATHERTALK_AUDIO_FLAG_MASK) : 0U;
+    uint8_t transport = valid ? (uint8_t)(status.enabled & (FEATHERTALK_TRANSPORT_FLAG_LE_ONLY |
+                                                            FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY)) : 0U;
+    bool t_le = (transport & FEATHERTALK_TRANSPORT_FLAG_LE_ONLY) != 0U;
+    bool t_classic = (transport & FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY) != 0U;
+    bool uc_streaming = (audio & FEATHERTALK_AUDIO_FLAG_LE_UNICAST) != 0U;
+    bool a2_streaming = (audio & FEATHERTALK_AUDIO_FLAG_A2DP_SINK) != 0U;
+    bool bc_active = (audio & FEATHERTALK_AUDIO_FLAG_BROADCAST) != 0U;
+    {
+        /* 三组按钮统一视觉: 激活橙/未激活蓝/锁定暗 (ft_state_button_apply) */
+        for (int i = 0; i < 2; i++)
+        {
+            ft_state_button_apply(s_bt_transport_buttons[i],
+                                  (i == 0) ? (t_classic ? 1 : 0) : (t_le ? 1 : 0));
+        }
+        for (int i = 0; i < 2; i++)
+        {
+            ft_state_button_apply(s_bt_a2dp_buttons[i],
+                                  (t_le || uc_streaming) ? -1 : ((int)s_bt_a2dp_role == i));
+        }
+        for (int i = 0; i < 2; i++)
+        {
+            bool locked = (i == 0) ? (a2_streaming || bc_active || t_classic)
+                                   : uc_streaming;
+            ft_state_button_apply(s_bt_le_buttons[i], locked ? -1 : 0);
+        }
+        /* 常显音频路径指示 (含空闲/广播/通道态, 让三态模型随时可见) */
+        if (s_bt_le_status != RT_NULL && lv_obj_is_valid(s_bt_le_status) &&
+            !(valid && status.last_control == FEATHERTALK_QUICK_BT_LE_ROLE &&
+              status.result == FEATHERTALK_QUICK_RESULT_PENDING))
+        {
+            static char path_text[128];
+            if (uc_streaming)
+                lv_snprintf(path_text, sizeof(path_text), "%s",
+                    ft_preferences_text("当前路径：LE Audio 单播（A2DP/广播已互斥）",
+                                        "Path: LE Audio unicast (A2DP/broadcast locked)"));
+            else if (a2_streaming && bc_active)
+                lv_snprintf(path_text, sizeof(path_text), "%s",
+                    ft_preferences_text("当前路径：A2DP 播放 + Auracast 转发广播中",
+                                        "Path: A2DP playing + Auracast relay"));
+            else if (a2_streaming)
+                lv_snprintf(path_text, sizeof(path_text), "%s",
+                    ft_preferences_text("当前路径：A2DP 播放（SERVER 已互斥，BROADCAST 可转发）",
+                                        "Path: A2DP playing (SERVER locked, BROADCAST allowed)"));
+            else if (bc_active)
+                lv_snprintf(path_text, sizeof(path_text), "%s",
+                    ft_preferences_text("当前路径：Auracast 广播中（SERVER 已互斥）",
+                                        "Path: Auracast broadcasting (SERVER locked)"));
+            else if (t_le)
+                lv_snprintf(path_text, sizeof(path_text), "%s",
+                    ft_preferences_text("通道：仅 LE 音频（经典扫描已关，LE 广播发播中）",
+                                        "Transport: LE only (classic scan off)"));
+            else if (t_classic)
+            {
+                /* 经典通道 + 未连接: 提示手机侧需忽略旧配对重新扫描
+                 * (Android 对已配对地址隐藏扫描结果, 旧 LE bond 不删
+                 *  则永远搜不到/连不上 —— 实测用户卡点) */
+                bool any_conn = valid && (status.connected & FEATHERTALK_QUICK_CAP_BLUETOOTH);
+                lv_snprintf(path_text, sizeof(path_text), "%s",
+                    any_conn ? ft_preferences_text("经典通道：已连接",
+                                                   "Classic: connected") :
+                               ft_preferences_text("经典通道：请在手机上忽略本设备后重新搜索配对",
+                                                   "Classic: forget device on phone and re-scan"));
+            }
+            else
+                lv_snprintf(path_text, sizeof(path_text), "%s",
+                    ft_preferences_text("当前路径：空闲（A2DP 与 LE 单播互斥，广播可与 A2DP 共存）",
+                                        "Path: idle (A2DP xor LE unicast; broadcast may coexist)"));
+            if (strcmp(lv_label_get_text(s_bt_le_status), path_text))
+                lv_label_set_text(s_bt_le_status, path_text);
+        }
+    }
 }
 static void settings_radio_deleted(lv_event_t *event)
 {
@@ -2683,6 +2835,54 @@ static void settings_bt_a2dp_role_clicked_cb(lv_event_t *event)
     settings_bt_role_refresh();
 }
 
+/* M8.x 音频通道切换回调 (0=双模 1=仅LE 2=仅经典)。
+ * 仅LE = 只发 BLE 广播 (经典扫描关); 仅经典 = LE 可连接广播停。
+ * 切换请求发 M33 后由刷新器按 enabled 高半字节标志回显选中态 */
+static void settings_bt_transport_clicked_cb(lv_event_t *event)
+{
+    uint8_t mode = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
+    (void)feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_TRANSPORT, mode);
+    if (s_bt_le_status != RT_NULL && lv_obj_is_valid(s_bt_le_status))
+        lv_label_set_text(s_bt_le_status,
+                          ft_preferences_text("通道切换请求已发送…", "Transport switch sent..."));
+}
+
+static void settings_bt_le_role_refresh(void)
+{
+    for (int i = 0; i < 2; i++)
+    {
+        lv_obj_t *btn = s_bt_le_buttons[i];
+        if (btn == RT_NULL || !lv_obj_is_valid(btn)) continue;
+        if ((int)s_bt_le_role == i)
+        {
+            lv_obj_add_state(btn, LV_STATE_CHECKED);
+            lv_obj_set_style_border_color(btn, lv_color_hex(0x2196F3), LV_PART_MAIN | LV_STATE_CHECKED);
+            lv_obj_set_style_border_width(btn, 2, LV_PART_MAIN | LV_STATE_CHECKED);
+        }
+        else
+        {
+            lv_obj_remove_state(btn, LV_STATE_CHECKED);
+            lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
+        }
+    }
+}
+
+/* M8: LE Audio 角色切换回调 (0=SERVER 单播 1=BROADCAST 广播)。
+ * 协议值: QUICK_BT_LE_ROLE value 1=SERVER 2=BROADCAST; M33 单播/广播
+ * 互斥 (ISO handler 单值), 切 SERVER 会停掉广播, 手机连入也自动回单播 */
+static void settings_bt_le_role_clicked_cb(lv_event_t *event)
+{
+    uint8_t role = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
+    if (role == s_bt_le_role) return;
+    (void)feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_LE_ROLE,
+                                            role == 1U ? 2U : 1U);
+    s_bt_le_role = role;
+    settings_bt_le_role_refresh();
+    if (s_bt_le_status != RT_NULL && lv_obj_is_valid(s_bt_le_status))
+        lv_label_set_text(s_bt_le_status,
+                          ft_preferences_text("请求已发送到 M33…", "Request sent to M33..."));
+}
+
 static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
 {
     const ft_ui_layout_t *layout = ft_layout_get();
@@ -2723,6 +2923,38 @@ static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
                     (void *)(uintptr_t)FEATHERTALK_QUICK_BLUETOOTH));
     lv_obj_set_width(s_settings_radio_button, lv_pct(100));
 
+    /* -- 音频通道（M8.x: 直接选择板子发 BLE 还是经典; 开机默认经典） -- */
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("音频通道", "Audio transport"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), layout->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    track_object(&s_bt_transport_buttons[0],
+                 create_state_button(row,
+                    ft_preferences_text("经典 A2DP", "Classic A2DP"),
+                    settings_bt_transport_clicked_cb, (void *)(uintptr_t)2U));
+    track_object(&s_bt_transport_buttons[1],
+                 create_state_button(row,
+                    ft_preferences_text("LE 音频", "LE audio"),
+                    settings_bt_transport_clicked_cb, (void *)(uintptr_t)1U));
+    lv_obj_set_width(s_bt_transport_buttons[0], 0);
+    lv_obj_set_width(s_bt_transport_buttons[1], 0);
+    lv_obj_set_flex_grow(s_bt_transport_buttons[0], 1);
+    lv_obj_set_flex_grow(s_bt_transport_buttons[1], 1);
+    /* 选中态由 settings_radio_refresh (200ms) 按通道标志维护 */
+
+    label = lv_label_create(page);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(label, ft_preferences_text(
+        "经典 A2DP = 只开经典扫描（LE 可连接广播停）；LE 音频 = 只发 BLE 广播（经典扫描关）。开机默认经典。",
+        "Classic A2DP = classic scan only (LE adv off); LE audio = BLE advertising only (classic scan off). Classic by default."));
+    lv_obj_set_style_text_color(label, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
+
     /* -- A2DP 角色 -- */
     caption = lv_label_create(page);
     lv_label_set_text(caption, ft_preferences_text("A2DP 角色", "A2DP role"));
@@ -2733,11 +2965,11 @@ static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
     lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     track_object(&s_bt_a2dp_buttons[0],
-                 create_flat_button(row,
+                 create_state_button(row,
                     ft_preferences_text("SINK 音箱（接收推流）", "SINK speaker (receive)"),
                     settings_bt_a2dp_role_clicked_cb, (void *)(uintptr_t)0U));
     track_object(&s_bt_a2dp_buttons[1],
-                 create_flat_button(row,
+                 create_state_button(row,
                     ft_preferences_text("SOURCE 转发（发送到耳机）", "SOURCE forward (send)"),
                     settings_bt_a2dp_role_clicked_cb, (void *)(uintptr_t)1U));
     lv_obj_set_width(s_bt_a2dp_buttons[0], 0);
@@ -2756,35 +2988,44 @@ static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
     lv_obj_set_style_text_color(label, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
     lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
 
-    /* -- LE AUDIO（M8 占位） -- */
+    /* -- LE AUDIO（M8: 单播/广播互斥, ISO handler 单值仲裁） -- */
     caption = lv_label_create(page);
-    lv_label_set_text(caption, ft_preferences_text("LE AUDIO 角色（M8 预留）", "LE AUDIO role (M8 reserved)"));
+    lv_label_set_text(caption, ft_preferences_text("LE AUDIO 角色", "LE AUDIO role"));
     lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
     row = lv_obj_create(page);
     style_layout_container(row);
     lv_obj_set_size(row, lv_pct(100), layout->control_height);
     lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_add_state(row, LV_STATE_DISABLED);
     track_object(&s_bt_le_buttons[0],
-                 create_flat_button(row,
+                 create_state_button(row,
                     ft_preferences_text("SERVER 被连（出声）", "SERVER (render)"),
-                    RT_NULL, RT_NULL));
+                    settings_bt_le_role_clicked_cb, (void *)(uintptr_t)0U));
     track_object(&s_bt_le_buttons[1],
-                 create_flat_button(row,
+                 create_state_button(row,
                     ft_preferences_text("BROADCAST 广播", "BROADCAST (cast)"),
-                    RT_NULL, RT_NULL));
+                    settings_bt_le_role_clicked_cb, (void *)(uintptr_t)1U));
     lv_obj_set_width(s_bt_le_buttons[0], 0);
     lv_obj_set_width(s_bt_le_buttons[1], 0);
     lv_obj_set_flex_grow(s_bt_le_buttons[0], 1);
     lv_obj_set_flex_grow(s_bt_le_buttons[1], 1);
+    settings_bt_le_role_refresh();
+
+    track_object(&s_bt_le_status, lv_label_create(page));
+    lv_obj_set_width(s_bt_le_status, lv_pct(100));
+    lv_label_set_long_mode(s_bt_le_status, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_bt_le_status, ft_preferences_text(
+        "SERVER = 手机连入放歌（默认）；BROADCAST = Auracast 广播正弦测试音。手机连入时广播自动退出。",
+        "SERVER = phone connects and plays (default); BROADCAST = Auracast test tone. Broadcast exits automatically when a phone connects."));
+    lv_obj_set_style_text_color(s_bt_le_status, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_bt_le_status, ft_layout_font(12), LV_PART_MAIN);
 
     label = lv_label_create(page);
     lv_obj_set_width(label, lv_pct(100));
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(label, ft_preferences_text(
-        "LE Audio（CIS 单播 / Auracast 广播）：功能开发中，待测试手机到位后开放。",
-        "LE Audio (CIS unicast / Auracast broadcast): under development."));
+        "LE Audio（CIS 单播 / Auracast 广播）：单播与广播互斥，同一时间只有一个活跃。",
+        "LE Audio (CIS unicast / Auracast broadcast): unicast and broadcast are mutually exclusive."));
     lv_obj_set_style_text_color(label, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
     lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
 

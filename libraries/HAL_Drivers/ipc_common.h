@@ -78,8 +78,12 @@
 #define EDGE_IPC_STRESS_HZ           (1000U)
 #define EDGE_IPC_STRESS_BURST        (4U)
 #define EDGE_IPC_SEMA_RETRY_MAX      (2U)
-#define EDGE_IPC_SEND_BUSY_RETRY_MAX (100U)
-#define EDGE_IPC_SEND_BUSY_DELAY_MS  (1U)
+/* Full-ring wait budget per frame: a pipe credit is an ISR-to-ISR round trip
+ * (us scale normally). A peer that stops releasing must never park the
+ * sender's IPC thread: give up after ~20 ms and let the caller drop the
+ * frame + count an error instead of stalling the whole loop. */
+#define EDGE_IPC_SEND_BUSY_RETRY_MAX (2U)
+#define EDGE_IPC_SEND_BUSY_DELAY_MS  (10U)
 #define EDGE_IPC_PRINT_INTERVAL_MS   (1000U)
 
 typedef struct

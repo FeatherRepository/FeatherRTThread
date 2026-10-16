@@ -34,7 +34,10 @@
 /* A0-4: A2DP/AVDTP/AVRCP 静态池 (源已编入; 运行时在 M4b 才初始化) */
 #define MAX_NR_AVDTP_STREAM_ENDPOINTS 2
 #define MAX_NR_AVDTP_CONNECTIONS 1
-#define MAX_NR_AVRCP_CONNECTIONS 1
+/* M8.x: 每条 AVRCP 连接同时占 2 个对象 (TARGET+CONTROLLER 双角色, 入站时
+ * 一起创建) —— 配 1 时第二条分配必失败 -> 入站永远被拒且无任何事件
+ * (实测根因: AVRCP 永不建立 -> 无绝对音量)。4 = 单连接 2 + Source 余量 2 */
+#define MAX_NR_AVRCP_CONNECTIONS 4
 /* M4b: SDP 动态服务记录池 (sdp_register_service 走该池; 为 0 时注册全部
  * 静默失败 -> Windows 枚举不到 A2DP Sink, 实测根因) */
 #define MAX_NR_SERVICE_RECORD_ITEMS 8
@@ -53,6 +56,8 @@
  * 只回 legacy 响应时 Windows 收到 Pairing Response 即放弃 (实测:
  * SM 等不到 Mconfirm, 30s 超时)。SC 需 ECC, 依赖上面的 micro-ecc */
 #define ENABLE_LE_SECURE_CONNECTIONS
+/* M8.2: 周期广播 (Auracast BASE 经 periodic advertising 下发) */
+#define ENABLE_LE_PERIODIC_ADVERTISING
 
 /* logging off for P0 skeleton (avoids hci_dump dependency) */
 #define ENABLE_PRINTF_HEXDUMP
