@@ -1,0 +1,30 @@
+
+msh />
+msh />kws start
+[32m[I/kws] EI 句柄已手动构造: impulse=0x20001120[0m
+[32m[I/kws] KWS 环形缓冲 32000 字节（堆）[0m
+[32m[I/kws] KWS 初始化完成[0m
+[32m[I/kws] EI impulse[32m[I/kws] KWS 启动: model=rbb666-project-1 sr=16000 w= model=rbb666-project-1 sr=16000 win=1000ms hop=500ms 阈值=50%[0m
+msh />
+msh />in=1000ms hop=500ms 阈值=50% 标签="xiaomai"[0m
+[32m[I/kws]   label[0] = noice[0m
+[32m[I/kws]   label[1] = xiaomai[0m
+[32m[I/kws] 麦克风已打开（mic0）[0m
+[32m[I/kws] 开始监听唤醒词...[0m
+[33m[W/kws] *** 唤醒词命中: xiaomai (99%, 2/3窗) ***[0m
+[33m[W/kws] 唤醒命中（默认回调）: xiaomai (99%)[0m
+[FeatherTalk M55] tx=49 rx=161 err=0 local=0x0000000e peer=0x00000015
+kws info
+[32m[I/kws] ==== KWS 状态 ====[0m
+[32m[I/kws] 监听: 运行中[0m
+[32m[I/kws] 唤醒词: "xiaomai"（阈值 50%）[0m
+[32m[I/kws] 窗口: 1000ms / hop 500ms[0m
+[32m[I/kws] 模型: rbb666-project-1 (sr=16000Hz, 1000ms/窗)[0m
+[32m[I/kws] 推理: 6 次，命中: 1 次，唤醒词最近分数: 99%[0m
+[32m[I/kws] 平均耗时: DSP 52 ms / NN 30 ms[0m
+[32m[I/kws] 标签:[0m
+[32m[I/kws]   [0] noice[0m
+[32m[I/kws]   [1] xiaomai[0m
+[32m[I/kws] ==================[0m
+msh />
+msh />[BOND] poll#25: seq=1 last=1 count=1 valid=1

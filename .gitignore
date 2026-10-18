@@ -42,3 +42,14 @@ cconfig.h
 /tmp/
 /tools/freather/logs/
 /tools/freather/ble-validation-vendor/
+
+# ---- 本地唤醒词「小麦」训练链（applications/kws/toolchain）----
+# 可再生 TTS 语料不入库；板采真实样本 data/real 是不可再生资产，必须入库
+/projects/FeatherTalk_M55/applications/kws/toolchain/data/**/*.wav
+/projects/FeatherTalk_M55/applications/kws/toolchain/data/**/*.mp3
+!/projects/FeatherTalk_M55/applications/kws/toolchain/data/real/*.wav
+# 构建日志与串口排障产物（可再生，不入库）
+/projects/FeatherTalk_M55/*.log
+/projects/FeatherTalk_M55/*.stderr
+# 训练中间产物（每次 train_kws.py 都会重写，只保留定稿模型与固件头）
+/projects/FeatherTalk_M55/applications/kws/toolchain/training/out/*_tmp.tflite

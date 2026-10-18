@@ -1,0 +1,21 @@
+file,label,text,voice,rate
+pos_0000.wav,1,Hey Jarvis,en-US-JennyNeural,+0%
+pos_0001.wav,1,Hey Jarvis,en-US-GuyNeural,-10%
+pos_0002.wav,1,Hey Jarvis,en-US-JennyNeural,+10%
+pos_0003.wav,1,Hey Jarvis,en-US-GuyNeural,+0%
+pos_0004.wav,1,Hey Jarvis,en-US-JennyNeural,-10%
+pos_0005.wav,1,Hey Jarvis,en-US-GuyNeural,+10%
+pos_0006.wav,1,Hey Jarvis,en-US-JennyNeural,+0%
+pos_0007.wav,1,Hey Jarvis,en-US-GuyNeural,-10%
+pos_0008.wav,1,Hey Jarvis,en-US-JennyNeural,+10%
+pos_0009.wav,1,Hey Jarvis,en-US-GuyNeural,+0%
+neg_0000.wav,0,what is the weather today,en-US-JennyNeural,+0%
+neg_0001.wav,0,turn the volume down please,en-US-GuyNeural,+0%
+neg_0002.wav,0,hey there how are you,en-US-JennyNeural,+0%
+neg_0003.wav,0,that sounds like a great idea,en-US-GuyNeural,+0%
+neg_0004.wav,0,remind me to buy some milk,en-US-JennyNeural,+0%
+neg_0005.wav,0,the project is almost finished,en-US-GuyNeural,+0%
+neg_0006.wav,0,can you check my calendar,en-US-JennyNeural,+0%
+neg_0007.wav,0,let me think about it again,en-US-GuyNeural,+0%
+neg_0008.wav,0,this is a very long sentence for testing purposes,en-US-JennyNeural,+0%
+neg_0009.wav,0,open the door and close the window,en-US-GuyNeural,+0%
