@@ -155,15 +155,20 @@ def _cmvnw(features, win_size, variance_normalization=True):
     return out
 
 
-def ei_mfcc(x_int16, flatten=True):
+def ei_mfcc(x_int16, flatten=True, sample_limit=SR):
     """
-    输入：x_int16  长度>=16000 的 np.int16 音频（16kHz mono）
-    输出：flatten=True -> (650,) float32；否则 (50,13) float32
+    输入：x_int16  np.int16 音频（16kHz mono）
+    输出：flatten=True -> (帧数*13,) float32；否则 (帧数,13) float32
+          缺省 sample_limit=SR 时 1.0s 窗 = 50 帧 = 650 维（板上口径）；
+          传 32000 得 2.0s = 100 帧 = 1300 维（只有 PC 探针这么用）
     """
     x = np.asarray(x_int16, dtype=np.float32)
-    if x.shape[0] < SR:
-        x = np.pad(x, (0, SR - x.shape[0]))
-    x = x[:SR]
+    # sample_limit 缺省 = SR：与板上一致（EI raw_sample_count=16000，更长音频的多余
+    # 部分不会喂给 DSP）。加长上下文的 PC 探针（probe_ctx.py）传更大值或 None。
+    if sample_limit is not None:
+        if x.shape[0] < sample_limit:
+            x = np.pad(x, (0, sample_limit - x.shape[0]))
+        x = x[:sample_limit]
 
     # 1. 预加重
     xp = _preemphasis(x)
