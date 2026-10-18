@@ -53,3 +53,6 @@ cconfig.h
 /projects/FeatherTalk_M55/*.stderr
 # 训练中间产物（每次 train_kws.py 都会重写，只保留定稿模型与固件头）
 /projects/FeatherTalk_M55/applications/kws/toolchain/training/out/*_tmp.tflite
+
+# 板采串口监听日志（可再生，不入库）
+/projects/FeatherTalk_M55/applications/kws/toolchain/logs/
