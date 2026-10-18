@@ -56,3 +56,5 @@ cconfig.h
 
 # 板采串口监听日志（可再生，不入库）
 /projects/FeatherTalk_M55/applications/kws/toolchain/logs/
+# 验收报表工作区（归档副本进 local_ai/reports，本目录可再生）
+/projects/FeatherTalk_M55/applications/kws/toolchain/reports/

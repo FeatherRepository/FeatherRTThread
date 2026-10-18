@@ -46,7 +46,7 @@ def sim(x, g=0.45, fc=2800, rev=0.2, nse=18):
     return np.clip(y, -32768, 32767).astype(np.int16)
 
 
-MODELS = [('v9','out/kws_v9_tmp.tflite'),('v8','out/kws_v8_tmp.tflite'),('v1','out/kws_xiaomai_v1.tflite')]
+MODELS = [('v9','out/kws_xiaomai.tflite'),('v8','out/kws_xiaomai_v8.tflite'),('v1','out/kws_xiaomai_v1.tflite')]
 
 amb = sorted(glob.glob('../data/real/ambient_*.wav'))
 wak = sorted(glob.glob('../data/real/wake_*.wav'))
