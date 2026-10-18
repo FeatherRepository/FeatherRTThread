@@ -46,7 +46,7 @@ if PLATFORM == 'gcc':
     DEVICE = ' -mcpu=cortex-m55 -mthumb -mfpu=auto --specs=nano.specs -mfloat-abi=hard -ffunction-sections -fdata-sections -nostartfiles'
     CFLAGS = DEVICE + ' -g -Wall -pipe'
     AFLAGS = ' -c' + DEVICE + ' -x assembler-with-cpp -Wa,-mimplicit-it=thumb '
-    LFLAGS = DEVICE + ' -flto -Wl,--gc-sections,-Map=rtthread.map,-cref,-u,Reset_Handler -T board/linker_scripts/link.ld -flto'
+    LFLAGS = DEVICE + ' -flto -Wl,--gc-sections,-Map=rtthread.map,-cref,-u,Reset_Handler -Wl,--defsym=__dso_handle=0 -T board/linker_scripts/link.ld -flto'
 
     CPATH = ''
     LPATH = ''

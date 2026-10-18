@@ -24,11 +24,16 @@
 
 #include "edge-impulse-sdk/tensorflow/lite/micro/kernels/micro_ops.h"
 
-#define EI_TFLITE_RESOLVER static tflite::MicroMutableOpResolver<5> resolver; \
+#define EI_TFLITE_RESOLVER static tflite::MicroMutableOpResolver<10> resolver; \
     resolver.AddConv2D(); \
     resolver.AddFullyConnected(); \
     resolver.AddMaxPool2D(); \
     resolver.AddReshape(); \
-    resolver.AddSoftmax();
+    resolver.AddSoftmax(); \
+    resolver.AddDepthwiseConv2D(); \
+    resolver.AddMean(); \
+    resolver.AddShape(); \
+    resolver.AddPack(); \
+    resolver.AddStridedSlice();
 
 #endif // _EI_CLASSIFIER_TFLITE_RESOLVER_H_
