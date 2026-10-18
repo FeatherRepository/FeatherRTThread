@@ -4,7 +4,9 @@ train_kws.py — 训练「小麦小麦」唤醒词 DS-CNN 并导出 int8 TFLite
 网络：DS-CNN（深度可分离卷积），输入 (50,13,1)，输出 2 类。
 量化：全 int8（输入/输出 int8），以匹配固件 EI 运行时的推理路径。
 
-产出：training/out/kws_xiaomai.tflite  (+ 量化参数 json，供 export_model.py 用)
+产出：training/out/kws_xiaomai_<ver>.tflite（+ 量化参数 json，供 export_model.py 用）
+      版本号由环境变量 KWS_VERSION 决定，默认 v10；只有显式 KWS_VERSION=v9 才写板上产物
+      kws_xiaomai.tflite —— 10-18 曾差点用 v10 覆盖掉固件引用的 v9。
 """
 import os, json
 import numpy as np
@@ -12,10 +14,15 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models, callbacks
 
-from dataset_v9 import build   # v9：滑窗+真实唤醒词正样本
+from dataset_v10 import build   # v10：50ms 密相位滑窗 + 留出集（见 dataset_v10.py 头部说明）
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
 os.makedirs(OUT, exist_ok=True)
+
+VERSION = os.environ.get("KWS_VERSION", "v10")
+MODEL_NAME = ("kws_xiaomai.tflite" if VERSION == "v9"
+              else f"kws_xiaomai_{VERSION}.tflite")
+META_NAME = MODEL_NAME[: -len(".tflite")] + "_meta.json"
 
 FRAMES, BINS, NCLASS = 50, 13, 2
 
@@ -40,15 +47,17 @@ def make_model():
 
 
 def main():
-    X, y = build(n_aug=10, seed=42)                # (N,650) 直接作为输入
+    X, y, grp = build(n_aug=2, seed=42)             # (N,650) 直接作为输入
 
-    # 打乱 + 划分
+    # 验证集按**源文件**整份留出：密相位窗互为近重复，按窗随机切会让 EarlyStopping
+    # 挑到"背过的文件"，选出来的权重在没听过的音频上没有代表性。
     rng = np.random.default_rng(0)
-    idx = rng.permutation(len(X)); X, y = X[idx], y[idx]
-    n_val = max(1, int(len(X) * 0.2))
-    Xtr, ytr = X[n_val:], y[n_val:]
-    Xva, yva = X[:n_val], y[:n_val]
-    print(f"训练 {len(Xtr)} / 验证 {len(Xva)}")
+    files = np.unique(grp); rng.shuffle(files)
+    va_files = set(files[:max(2, int(len(files) * 0.2))].tolist())
+    m = np.isin(grp, list(va_files))
+    Xtr, ytr = X[~m], y[~m]
+    Xva, yva = X[m], y[m]
+    print(f"训练 {len(Xtr)} / 验证 {len(Xva)}（验证留出 {len(va_files)}/{len(files)} 个源文件）")
 
     model = make_model()
     model.compile(optimizer=tf.keras.optimizers.Adam(1e-3),
@@ -74,7 +83,7 @@ def main():
     conv.inference_output_type = tf.int8
     tfl = conv.convert()
 
-    path = os.path.join(OUT, "kws_xiaomai.tflite")
+    path = os.path.join(OUT, MODEL_NAME)
     with open(path, "wb") as f:
         f.write(tfl)
     print("模型已保存:", path, len(tfl), "字节")
@@ -89,7 +98,7 @@ def main():
         "output_zero_point": int(ode["quantization"][1]),
         "labels": ["noice", "xiaomai"],
     }
-    with open(os.path.join(OUT, "kws_xiaomai_meta.json"), "w") as f:
+    with open(os.path.join(OUT, META_NAME), "w") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print("量化参数:", meta)
 
