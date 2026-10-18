@@ -111,7 +111,13 @@ def parse(map_path):
 
 
 def main():
-    ap = sys.argv[1] if len(sys.argv) > 1 else os.path.join(PROJ, "rtthread.map")
+    argv, pat = [], None
+    for a in sys.argv[1:]:
+        if a.startswith("--match="):
+            pat = a.split("=", 1)[1]
+        else:
+            argv.append(a)
+    ap = argv[0] if argv else os.path.join(PROJ, "rtthread.map")
     if not os.path.exists(ap):
         print(f"找不到链接图: {ap}\n（先在 C:\\ft 下用 SCons 编一次）")
         return 1
@@ -165,6 +171,18 @@ def main():
         o = o.split("edge-impulse-sdk/")[-1] if "edge-impulse-sdk/" in o else \
             o.split("/build/")[-1] if "/build/" in o else os.path.basename(o)
         print(f"  {kb(size):8.1f}KB  {name:28s} {o[:70]}")
+    if pat:
+        rx = re.compile(pat)
+        agg = defaultdict(int)
+        for name, size, obj in sections:
+            if name.startswith(FLASH) and rx.search(obj.replace("\\", "/")):
+                base = os.path.basename(obj.replace("\\", "/"))
+                agg[base] += size
+        tot = sum(agg.values())
+        print(f"\n--match={pat!r} 命中对象（只看真正链接进的 .text/.rodata 等 XIP 段）：")
+        for o in sorted(agg, key=lambda x: -agg[x]):
+            print(f"  {kb(agg[o]):8.1f}KB  {o}")
+        print(f"  {'合计':8s} {kb(tot):8.1f}KB  ← 这些段若全部消失可省的 flash")
     return 0
 
 
