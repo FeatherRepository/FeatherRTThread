@@ -28,7 +28,10 @@ elif CROSS_TOOL == 'iar':
 if os.getenv('RTT_EXEC_PATH'):
     EXEC_PATH = os.getenv('RTT_EXEC_PATH')
 
-BUILD = 'debug'
+# 'debug' 分支的 -O 行是注释掉的、-O2 只在 else 里，留 'debug' 等于整颗固件跑 -O0：
+# 推理吞吐被压低（PDM 滑窗跟不上），且 -O0 下 fmaf 真去调 libm 里那个坏实现。
+# 与参考工程 Edgi_Talk_M55_XiaoZhi 保持一致，用 release。
+BUILD = 'release'
 
 if PLATFORM == 'gcc':
     # toolchains

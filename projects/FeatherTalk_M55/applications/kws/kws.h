@@ -29,7 +29,11 @@ extern "C" {
 
 /* 置信度阈值与触发策略 */
 #ifndef KWS_CONFIDENCE
-#define KWS_CONFIDENCE        0.50f        /* v1 实测：真人清晰喊话 85~90%，环境音 0~8%，取 50% */
+/* v11 定档（2026-10-20 深夜，kws_validate --concat --jitter 10，holdout_v11 9正/47负）：
+ * 相位完备扫描 t=0.65 处 期望检出 96.7% + 负样本全相位零误触（47 条 × 10 相位）；
+ * t=0.60 就有 12.8% 负样本会误触、t=0.50 为 2.6% 相位误触——0.65 是最高检出的零误触点。
+ * v9 时代 0.50 的注释依据（真人 85~90%/环境 0~8%）来自 v1 实测，v11 模型分数分布已不同。 */
+#define KWS_CONFIDENCE        0.65f
 #endif
 /* 触发冷却（同一唤醒词两次命中的最小间隔；5s = 常见 KWS 做法） */
 #ifndef KWS_COOLDOWN_MS
@@ -48,6 +52,12 @@ extern "C" {
  * 若与 UI 抢占有影响，可调到 25） */
 #ifndef KWS_THREAD_PRIORITY
 #define KWS_THREAD_PRIORITY   20
+#endif
+
+/* 开机自启：1 = main() 里 IPC/UI 就绪后自动 kws_start()（无需手动敲命令）。
+ * 关掉（-DKWS_AUTOSTART=0）则恢复手动 `kws start`，适合调试/占用麦克风冲突场景。 */
+#ifndef KWS_AUTOSTART
+#define KWS_AUTOSTART         1
 #endif
 
 /* 检测回调（可在外部覆盖） */

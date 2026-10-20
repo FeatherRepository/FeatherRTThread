@@ -27,6 +27,9 @@ if not os.path.isdir(EI_SDK):
 
 # ---------------- 包含路径 ----------------
 path = [cwd]                                    # kws.h
+# applications/：ipc/feathertalk_ipc.h、led_indicator.h、feathertalk_audio.h
+# （父 group 的 CPPPATH 继承可达，这里显式声明依赖，防结构调整后静默失败）
+path += [os.path.normpath(os.path.join(cwd, '..'))]
 path += [EI_ROOT, EI_ROOT + '/model-parameters', EI_ROOT + '/tflite-model']
 
 path += [EI_SDK]
@@ -128,6 +131,10 @@ LOCAL_CFLAGS += ' -DARM_MATH_CM55 -DARM_MATH_DSP -DARM_MATH_LOOPUNROLL -DARM_MAT
 LOCAL_CXXFLAGS = LOCAL_CFLAGS
 LOCAL_CXXFLAGS += ' -std=c++17 -fno-rtti -fno-exceptions -fno-threadsafe-statics'
 LOCAL_CXXFLAGS += ' -Wno-sign-compare -Wno-strict-aliasing'
+# -Wno-strict-aliasing 只消警告，不改代码生成。ei::numpy::log 用 *(int32_t*)&a
+# 型双关取指数（NVIDIA 快速 log），在 -O2 下按严格别名规则被优化掉尾数多项式，
+# 板上实测返回 i*(1+ln2)。必须真给 -fno-strict-aliasing 才改代码生成。
+LOCAL_CXXFLAGS += ' -fno-strict-aliasing'
 
 group = DefineGroup('kws', src, depend=[''], CPPPATH=path,
                     LOCAL_CFLAGS=LOCAL_CFLAGS,

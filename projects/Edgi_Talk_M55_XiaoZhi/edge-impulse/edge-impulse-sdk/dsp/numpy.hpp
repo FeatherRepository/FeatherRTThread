@@ -1551,10 +1551,15 @@ public:
      */
     __attribute__((always_inline)) static inline float log(float a)
     {
-        int32_t g = (int32_t) * ((int32_t *)&a);
+        // 指针型双关 *(int32_t*)&a / *(float*)&g 是严格别名 UB：-O0 下侥幸算对，
+        // 一旦上 -O2（本工程 BUILD='debug' 没有 -O 档）尾数多项式会被优化掉。
+        // 改 memcpy 取位：语义等价、良定义，memcpy 折叠成一次寄存器搬运，无额外开销。
+        int32_t g;
+        memcpy(&g, &a, sizeof(g));
         int32_t e = (g - 0x3f2aaaab) & 0xff800000;
         g = g - e;
-        float m = (float) * ((float *)&g);
+        float m;
+        memcpy(&m, &g, sizeof(m));
         float i = (float)e * 1.19209290e-7f; // 0x1.0p-23
         /* m in [2/3, 4/3] */
         float f = m - 1.0f;

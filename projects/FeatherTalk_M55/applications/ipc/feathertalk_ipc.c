@@ -37,6 +37,28 @@ static volatile rt_uint32_t g_quick_command_sequence;
 static volatile rt_bool_t g_periodic_report_enabled = RT_TRUE;
 static volatile rt_bool_t g_transport_user_override = RT_FALSE;   /* M8.x: 用户手动切过通道, 恢复线程让位 */
 
+/* KWS 唤醒事件待发槽（与 quick_command 同一模式：调用方只投递，
+ * IPC 线程是唯一的 rt_device_write 发出者——并发写会竞争失败）。
+ * 命中受 5s 冷却限速，单槽合并（丢中间帧）可接受。 */
+static volatile rt_bool_t g_kws_event_pending = RT_FALSE;
+static volatile rt_uint8_t g_kws_event_label = 1;
+static volatile rt_uint8_t g_kws_event_conf = 0;
+static volatile rt_uint32_t g_kws_event_count = 0;
+
+void feathertalk_ipc_post_kws_event(uint8_t label_id, uint8_t confidence_pct)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    g_kws_event_label = label_id;
+    g_kws_event_conf = confidence_pct;
+    g_kws_event_pending = RT_TRUE;
+    rt_hw_interrupt_enable(level);
+}
+
+uint32_t feathertalk_ipc_get_kws_event_count(void)
+{
+    return g_kws_event_count;
+}
+
 void feathertalk_ipc_set_periodic_report_enabled(bool enabled)
 {
     g_periodic_report_enabled = enabled ? RT_TRUE : RT_FALSE;
@@ -109,6 +131,28 @@ static rt_bool_t feathertalk_ipc_send_quick_command(rt_uint32_t sequence,
     message.value = value;
     rt_memcpy(frame.channel, &message, sizeof(message));
     frame.seq = sequence;
+    if (rt_device_write(g_ipc_tx, 0, &frame, 1) != 1)
+    {
+        g_error_count++;
+        return RT_FALSE;
+    }
+    g_tx_count++;
+    return RT_TRUE;
+}
+
+static rt_bool_t feathertalk_ipc_send_kws_event(uint8_t label_id, uint8_t confidence_pct)
+{
+    edge_rc_frame_t frame;
+    feathertalk_ipc_kws_event_t message;
+
+    rt_memset(&frame, 0, sizeof(frame));
+    rt_memset(&message, 0, sizeof(message));
+    message.abi_version = FEATHERTALK_IPC_ABI_VERSION;
+    message.message_id = FEATHERTALK_IPC_MSG_KWS_EVENT;
+    message.uptime_ms = rt_tick_get_millisecond();
+    message.label_id = label_id;
+    message.confidence_pct = confidence_pct;
+    rt_memcpy(frame.channel, &message, sizeof(message));
     if (rt_device_write(g_ipc_tx, 0, &frame, 1) != 1)
     {
         g_error_count++;
@@ -238,6 +282,25 @@ static void feathertalk_ipc_thread_entry(void *parameter)
             g_quick_command_pending = RT_FALSE;
             rt_hw_interrupt_enable(level);
             (void)feathertalk_ipc_send_quick_command(sequence, control, value);
+        }
+
+        if (g_kws_event_pending)
+        {
+            rt_base_t level;
+            rt_uint8_t label;
+            rt_uint8_t conf;
+            level = rt_hw_interrupt_disable();
+            label = g_kws_event_label;
+            conf = g_kws_event_conf;
+            g_kws_event_pending = RT_FALSE;
+            rt_hw_interrupt_enable(level);
+            if (feathertalk_ipc_send_kws_event(label, conf) == RT_TRUE)
+            {
+                g_kws_event_count++;
+                rt_kprintf("[FeatherTalk M55] KWS 唤醒已通知 M33: label=%u conf=%u%% (第 %lu 次)\n",
+                           (unsigned)label, (unsigned)conf,
+                           (unsigned long)g_kws_event_count);
+            }
         }
 
         if (g_periodic_report_enabled &&

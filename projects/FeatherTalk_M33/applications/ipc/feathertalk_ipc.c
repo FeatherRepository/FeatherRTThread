@@ -31,6 +31,10 @@ static volatile rt_uint32_t g_error_count = 0;
 static rt_uint8_t g_quick_last_control = FEATHERTALK_SYSTEM_VALUE_UNKNOWN;
 static rt_uint8_t g_quick_last_result = FEATHERTALK_QUICK_RESULT_NONE;
 
+/* KWS 唤醒事件（M55 -> M33）：累计次数，供 feather_status 观测 */
+static volatile rt_uint32_t g_kws_wake_count = 0;
+static volatile rt_uint32_t g_kws_last_rx_ms = 0;
+
 /* A0 音频门铃邮箱: 生产者登记最新快照, IPC 线程合并发出 (纯通知, 可合并) */
 static volatile rt_bool_t   g_audio_db_pending = RT_FALSE;
 static volatile rt_uint32_t g_audio_db_wr = 0;
@@ -411,6 +415,26 @@ static void feathertalk_ipc_receive(void)
             continue;
         }
 
+        if (message.message_id == FEATHERTALK_IPC_MSG_KWS_EVENT)
+        {
+            /* M55 本地唤醒词命中（Edge Impulse on CM55）。
+             * 产品级反应的挂点：当前只打印+计数，
+             * 后续可在此触发 UI 场景/音频提示。 */
+            feathertalk_ipc_kws_event_t evt;
+            rt_memcpy(&evt, frame.channel, sizeof(evt));
+            g_rx_count++;
+            g_kws_wake_count++;
+            g_kws_last_rx_ms = rt_tick_get_millisecond();
+            rt_kprintf("[FeatherTalk M33] *** KWS 唤醒: label=%u conf=%u%% (累计 %lu 次) ***\r\n",
+                       (unsigned)evt.label_id, (unsigned)evt.confidence_pct,
+                       (unsigned long)g_kws_wake_count);
+            /* 回执：经 M33->M55 EVENT 通道把唤醒事件 codes 回来（'K''W'），
+             * M55 控制台打印 [M33 evt 21303]，uart5 不在手边也能看到
+             * "M33 确实收到了"的端到端证据。 */
+            feathertalk_ipc_send_event(0x4B57U);
+            continue;
+        }
+
         if (message.message_id != FEATHERTALK_IPC_MSG_HELLO_ACK &&
             message.message_id != FEATHERTALK_IPC_MSG_HEARTBEAT_ACK)
         {
@@ -515,6 +539,8 @@ static int feather_status(int argc, char **argv)
                (unsigned long)tx_stats.tx_busy,
                (unsigned long)tx_stats.tx_retry,
                (unsigned long)tx_stats.tx_timeout);
+    rt_kprintf("  KWS wake事件   : 累计 %lu 次（M55 本地唤醒词上报）\r\n",
+               (unsigned long)g_kws_wake_count);
     return 0;
 }
 MSH_CMD_EXPORT(feather_status, Show FeatherTalk dual-core status);
