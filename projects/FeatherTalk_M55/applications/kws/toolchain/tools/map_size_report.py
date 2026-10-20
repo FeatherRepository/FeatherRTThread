@@ -24,6 +24,10 @@ import sys
 from collections import defaultdict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from kws_console import force_utf8                         # noqa: E402
+
+force_utf8()
 APP = os.path.abspath(os.path.join(HERE, "..", "..", ".."))      # applications/
 PROJ = os.path.abspath(os.path.join(APP, ".."))                  # projects/FeatherTalk_M55/
 
@@ -139,8 +143,10 @@ def main():
     print(f"{'合计（KWS 集成增量）':24s} {kb(total_f):9.1f}KB {kb(total_r):9.1f}KB")
 
     gate = 300.0
-    print(f"\nR0.5-3 判据 ≤{gate:.0f}KB：{'✓ 达标' if total_f <= gate else '✗ 超'}"
-          f"（实测 {total_f/1024.0:.1f}KB）")
+    # 不用 ✓/✗：Windows 控制台默认 GBK，这两个字符直接把脚本崩在最后一步（实测踩过）
+    total_f_kb = total_f / 1024.0
+    print(f"\nR0.5-3 判据 ≤{gate:.0f}KB：{'达标' if total_f_kb <= gate else '超标'}"
+          f"（实测 {total_f_kb:.1f}KB）")
     print("口径：这些桶全部来自 kws/SConscript 拉入的 edge-impulse 副本（含 EI 自带的 CMSIS 副本），")
     print("      工程内没有其它模块引用它们，所以按路径归因≈真实增量；唯一需要复核的是")
     print("      「C/C++ 运行时」——kws 是本工程少数 C++ 模块，关掉 KWS 后 libstdc++ 这些成员会整体消失。")

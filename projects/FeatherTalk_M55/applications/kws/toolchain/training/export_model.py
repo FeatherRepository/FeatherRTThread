@@ -5,16 +5,21 @@ export_model.py — 把训练好的 int8 TFLite 转成固件可用的头文件
 并输出集成说明（标签、arena size 等需同步的项）。
 
 用法：
-    python export_model.py
-输入：out/kws_xiaomai.tflite
-输出：out/tflite_learn_333519_3.h  +  out/INTEGRATION.md
+    python export_model.py            # 板上v9产物：out/kws_xiaomai.tflite → tflite_learn_333519_3.h
+    python export_model.py v11        # 版本化：out/kws_xiaomai_v11.tflite → tflite_learn_333519_3_v11.h
+输出：out/tflite_learn_333519_3.h（或版本化名字）  +  out/INTEGRATION.md
 """
-import os, json
+import os, json, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "out")
-TFLITE = os.path.join(OUT, "kws_xiaomai.tflite")
-HEADER = os.path.join(OUT, "tflite_learn_333519_3.h")
+# 可选版本参数：python export_model.py v11 → 读 out/kws_xiaomai_v11.tflite，写版本化头文件。
+# 不给参数时保持老行为（out/kws_xiaomai.tflite → tflite_learn_333519_3.h），那是板上引用的文件。
+VERSION = (sys.argv[1].lstrip("v") if len(sys.argv) > 1 else "")
+SUF = ("_v" + VERSION) if VERSION else ""
+TFLITE = os.path.join(OUT, "kws_xiaomai%s.tflite" % SUF)
+META = os.path.join(OUT, "kws_xiaomai%s_meta.json" % SUF)
+HEADER = os.path.join(OUT, "tflite_learn_333519_3%s.h" % SUF)
 ARENA_SIZE = 32768   # 张量总和上界 21528B + TFLM scratch/结构开销；16384 装不下
 
 HEAD = """/*
@@ -70,18 +75,18 @@ def main():
 
     # 集成说明
     meta = {}
-    mp = os.path.join(OUT, "kws_xiaomai_meta.json")
+    mp = META
     if os.path.exists(mp):
         meta = json.load(open(mp))
     doc = f"""# 固件集成说明（自动生成）
 
-模型：`out/kws_xiaomai.tflite`（{n} 字节）→ 头文件 `out/tflite_learn_333519_3.h`
+模型：`out/kws_xiaomai{SUF}.tflite`（{n} 字节）→ 头文件 `out/tflite_learn_333519_3{SUF}.h`
 
 ## 需要替换/修改的文件
 
 1. **替换模型头文件**
    `projects/Edgi_Talk_M55_XiaoZhi/edge-impulse/tflite-model/tflite_learn_333519_3.h`
-   → 用 `out/tflite_learn_333519_3.h` 覆盖
+   → 用 `out/tflite_learn_333519_3{SUF}.h` 覆盖
    （建议先把 edge-impulse 目录拷进 FeatherTalk_M55 解耦，见 WORKFLOW.md）
 
 2. **改标签** `model-parameters/model_variables.h`

@@ -150,8 +150,10 @@ def _cmvnw(features, win_size, variance_normalization=True):
         padded2 = sym_pad(out)
         for ix in range(rows):
             win = padded2[ix:ix + win_size]
-            var = win.var(axis=0)
-            out[ix] = out[ix] / np.sqrt(var + 1e-10)
+            std = np.sqrt(win.var(axis=0))
+            # 板上是 std + 1e-10（processing.hpp:472），不是 sqrt(var + 1e-10)：
+            # 常数列（std=0）时两者差 1e5 倍，会把除数从 1e-10 变成 1e-5
+            out[ix] = out[ix] / (std + 1e-10)
     return out
 
 

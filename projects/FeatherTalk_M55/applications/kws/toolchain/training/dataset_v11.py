@@ -1,0 +1,296 @@
+"""dataset_v11.py — 逐窗标签：把 v9/v10 的"文件级标签泄漏"从配方里根除
+
+**为什么必须改**（实证见 tools/kws_silence_audit.py 报表 logs/diag/silence_audit2.txt）：
+  v9/v10 的 windows() 把整份文件的每个滑窗都打上该文件的标签，还要给不足 1s 的部分补零。
+  于是一条 1.68s 的 TTS 正样本里，开头静音、结尾补零的窗也被当成「小麦小麦」正例喂进训练。
+  审计实测这类低能量正样本窗（RMS 20~300）在 v9 模型上拿 0.879~0.996 分——板上安静房间
+  持续高分（空场 10s 无洞采集 18.8% 窗 ≥0.5）与这个方向完全一致。
+
+**v11 的标签口径**：
+  · 机内声学语料（rig 的 traindata 阶段产物，data/boardmic/<stamp>/manifest.csv）：
+    词的位置由「激励包络 ↔ 采集包络互相关」定出（lag/reps/loop_gap 在 manifest 里），
+    只有与某次放音重叠 ≥0.5s 的窗记正例；重叠 0~0.5s 的**骑窗**整块丢弃（半截词既不是
+    唤醒词也不是噪声，硬归任一类都是造假）；同一次采集里词与词之间的静音、房间底噪一律
+    记负例——静音第一次被显式教成 noice，而不是顺着文件标签变成 xiaomai。
+  · 串口丢帧的位置（hole_spans，帧号）标出来，压到洞的窗直接丢：补零不是音频。
+  · 旧语料（TTS/板采）只走 VAD 逐窗：正样本文件里的**有声窗**才当正例，静音窗归负例。
+  · 留出集按**整份源采集**切（绝不参与训练），并把词区/非词区剪成独立短文件写成
+    data/holdout_v11/manifest.csv，让 kws_validate.py 用文件级口径也能吃。
+
+用法：
+  <kws>/python.exe dataset_v11.py                  # 打印构成并写留出集
+  KWS_VERSION=v11 <kws>/python.exe train_kws.py    # 训练（train_kws 按版本挑本模块）
+"""
+import csv
+import glob
+import os
+
+import numpy as np
+
+from ei_mfcc import ei_mfcc
+from dataset_v9 import read_wav16k, _aug
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DATA = os.path.join(ROOT, "data")
+LEGACY = os.path.join(DATA, "wakeword")
+REAL = os.path.join(DATA, "real")
+HOLD = os.path.join(DATA, "holdout_v11")
+
+SR = 16000
+WIN = 16000
+STRIDE = 800                 # 50ms = 验收 --jitter 10 的同一套窗相位
+FRAME = 160                  # 回吐帧 = 10ms
+POS_OVERLAP = 0.5 * WIN      # 与词重叠半个窗以上才算正例
+VAD_FRAC = 0.15              # 有声判据：帧 RMS > 该文件 p95 的 15%
+
+
+def newest_corpus():
+    """缺省取 data/boardmic 下最新一次的语料；KWS_CORPUS 可指到具体 manifest.csv 或其目录。"""
+    p = os.environ.get("KWS_CORPUS", "")
+    if p:
+        return p if p.endswith(".csv") else os.path.join(p, "manifest.csv")
+    cands = sorted(glob.glob(os.path.join(DATA, "boardmic", "*", "manifest.csv")))
+    return cands[-1] if cands else ""
+
+
+def parse_holes(spec, n_frames):
+    """manifest 的 hole_spans（'83-84,910-911' 帧号闭区间）→ 样本级无效位掩码。"""
+    bad = np.zeros(n_frames, dtype=bool)
+    for part in (spec or "").split(","):
+        if "-" not in part:
+            continue
+        a, b = part.split("-")
+        bad[int(a):int(b) + 1] = True
+    return bad
+
+
+def word_spans(row, limit):
+    """一次采集里每次放音在缓冲中的样本区间。lag 由互相关从音频本身推出（不是时钟）。"""
+    try:
+        lag = float(row["lag_sec"])
+        clip = float(row["clip_sec"])
+        gap = float(row["loop_gap"])
+        reps = int(row["reps"] or 0)
+    except (KeyError, TypeError, ValueError):
+        return []
+    out = []
+    for i in range(max(0, reps)):
+        a = int(round((lag + i * (clip + gap)) * SR))
+        b = int(round((lag + i * (clip + gap) + clip) * SR))
+        if a < limit and b > a:
+            out.append((a, min(b, limit)))
+    return out
+
+
+def vad_spans(x):
+    """旧语料的逐窗有声判定：帧 RMS 双阈值 + 合并短间隔 + 丢短段。"""
+    a = np.abs(np.asarray(x, dtype=np.float64))
+    n = (a.size // FRAME) * FRAME
+    f = a[:n].reshape(-1, FRAME).std(axis=1)
+    if f.size == 0:
+        return []
+    hi = float(np.percentile(f, 95))
+    thr = max(VAD_FRAC * hi, 1.0)
+    on = f > thr
+    spans, i = [], 0
+    while i < len(on):
+        if not on[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(on) and on[j]:
+            j += 1
+        if j - i >= int(0.3 * SR / FRAME):
+            if spans and (i - spans[-1][1]) * FRAME < int(0.12 * SR):
+                spans[-1] = (spans[-1][0], j * FRAME)
+            else:
+                spans.append((i * FRAME, j * FRAME))
+        i = j
+    return spans
+
+
+def _overlap(a0, a1, spans):
+    """窗 [a0,a1) 与词区间列表的最大重叠样本数（不叠 = 0）。"""
+    if not spans:
+        return 0.0
+    return max(0.0, max(min(a1, b1) - max(a0, b0) for b0, b1 in spans))
+
+
+def label_windows(x, spans, bad_frames=None, tight=True):
+    """一段音频 → [(窗起点, 标签)]；tight=True 时丢弃"骑窗"与压到丢帧洞的窗。"""
+    n = len(x)
+    if n < WIN:
+        return ([] if tight else ([(0, 1 if spans else 0)])), None
+    out = []
+    for s in range(0, n - WIN + 1, STRIDE):
+        e = s + WIN
+        if bad_frames is not None and bad_frames[s // FRAME:e // FRAME + 1].any():
+            continue                        # 压到串口丢帧：补零不是音频，整窗丢
+        ovl = _overlap(s, e, spans)
+        if not tight:
+            out.append((s, 1 if spans else 0))
+            continue
+        if ovl >= POS_OVERLAP:
+            out.append((s, 1))
+        elif ovl == 0:
+            out.append((s, 0))              # 词之间/词外的静音与底噪 = 负例（泄漏修复点）
+        # 0 < ovl < 半个窗：骑窗，半截词，两类都不算 → 丢
+    return out, None
+
+
+def load_corpus(manifest=None):
+    """→ [(wav路径, 标签, 词区间列表, 无效帧掩码, 源文件号, 说明)]，按整份采集给 grp。"""
+    manifest = manifest or newest_corpus()
+    items = []
+    if not manifest or not os.path.exists(manifest):
+        return items
+    base = os.path.dirname(manifest)
+    with open(manifest, encoding="utf-8-sig", newline="") as f:
+        for gi, row in enumerate(csv.DictReader(f), start=1):
+            p = os.path.join(base, row["file"])
+            if not os.path.exists(p):
+                continue
+            x = read_wav16k(p)
+            lab = int(row["label"])
+            spans = word_spans(row, x.size) if lab == 1 else []
+            bad = parse_holes(row.get("hole_spans", ""), x.size // FRAME + 1)
+            items.append({"path": p, "x": x, "spans": spans, "bad": bad, "grp": gi,
+                          "kind": "corpus", "name": os.path.basename(row["file"])})
+    return items
+
+
+def load_legacy(pos_vad=True):
+    """旧语料：正样本走 VAD 只留有声窗，负样本整份负例（与 v10 同一批文件，口径不同）。"""
+    items = []
+    g = 0
+    for pat in (("xiaomai", "pos_*.wav"), ("xiaomai_v4", "pos_*.wav")):
+        for p in sorted(glob.glob(os.path.join(LEGACY, *pat))):
+            g += 1
+            x = read_wav16k(p)
+            items.append({"path": p, "x": x, "spans": vad_spans(x) if pos_vad else [(0, x.size)],
+                          "bad": None, "grp": 50000 + g, "kind": "legacy_pos",
+                          "name": os.path.basename(p)})
+    for p in sorted(glob.glob(os.path.join(REAL, "wake_*.wav"))):
+        g += 1
+        x = read_wav16k(p)
+        items.append({"path": p, "x": x, "spans": vad_spans(x), "bad": None,
+                      "grp": 50000 + g, "kind": "legacy_pos", "name": os.path.basename(p)})
+    neg = []
+    for pat in (("xiaomai", "neg_*.wav"), ("xiaomai_v4", "neg_*.wav"), ("nearwords", "*.wav"),
+                ("zh", "*.wav"), ("en", "*.wav")):
+        neg += sorted(glob.glob(os.path.join(LEGACY, *pat)))
+    neg += sorted(glob.glob(os.path.join(REAL, "ambient_*.wav")))
+    for i, p in enumerate(neg):
+        items.append({"path": p, "x": read_wav16k(p), "spans": [], "bad": None,
+                      "grp": 60000 + i, "kind": "legacy_neg", "name": os.path.basename(p)})
+    return items
+
+
+def holdout_groups(items, every=4):
+    """留出**整份源采集**：机内语料里每 every 份留 1 份（正负都按同一规则），
+    这样验收看到的词位置、房间噪声、麦路径增益都是训练没见过的组合。"""
+    hold = set()
+    pos_i = [it["grp"] for it in items if it["spans"]]
+    neg_i = [it["grp"] for it in items if not it["spans"]]
+    for lst in (pos_i, neg_i):
+        for g in lst[::every]:
+            hold.add(g)
+    return hold
+
+
+def build(n_aug=1, seed=42, verbose=True, legacy=None, holdout=True):
+    """返回 (X, y, grp)，与 train_kws.py 的 v10 接口一致。"""
+    corpus = load_corpus()
+    if not corpus:
+        raise SystemExit("没有机内声学语料：先跑 rig 的 --phase traindata，或用 KWS_CORPUS 指定 manifest.csv")
+    items = corpus + (load_legacy() if legacy is None or legacy else [])
+    hold = holdout_groups(items) if holdout else set()
+    rng = np.random.default_rng(seed)
+    X, y, g = [], [], []
+    stat = {"pos_win": 0, "neg_win": 0, "drop_ride": 0, "drop_hole": 0, "hold_win": 0}
+    for it in items:
+        x = it["x"]
+        wins = label_windows(x, it["spans"], it["bad"], tight=True)[0]
+        if not wins:
+            continue
+        if it["bad"] is not None:
+            stat["drop_hole"] += int(it["bad"][:x.size // FRAME + 1].sum())
+        for s, lab in wins:
+            if hold and it["grp"] in hold:
+                stat["hold_win"] += 1
+                continue
+            w = x[s:s + WIN]
+            stat["pos_win" if lab else "neg_win"] += 1
+            X.append(ei_mfcc(w)); y.append(lab); g.append(it["grp"])
+            for _ in range(n_aug):
+                X.append(ei_mfcc(_aug(w, rng))); y.append(lab); g.append(it["grp"])
+    X = np.asarray(X, dtype=np.float32)
+    y = np.asarray(y, dtype=np.int32)
+    g = np.asarray(g, dtype=np.int32)
+    if verbose:
+        print("语料 %d 份 + 旧语料 %d 份；进训练 正窗 %d / 负窗 %d（留出窗 %d 未进训练）"
+              % (len(corpus), len(items) - len(corpus), stat["pos_win"], stat["neg_win"],
+                 stat["hold_win"]))
+        print("正样本占比 %.1f%%  源文件 %d 个  特征 %s"
+              % (100.0 * y.mean(), len(np.unique(g)), X.shape))
+    return X, y, g
+
+
+def export_holdout(out_dir=HOLD):
+    """把留出的整份采集剪成短文件：词区（±0.15s）= 正例文件，词间静音/底噪区 = 负例文件。
+    剪出来的正例不带整窗补零，验收的"单条"读数才不会被静音窗稀释。"""
+    corpus = load_corpus()
+    if not corpus:
+        print("没有语料可剪")
+        return None
+    hold = holdout_groups(corpus)
+    items = [it for it in corpus if it["grp"] in hold]
+    os.makedirs(out_dir, exist_ok=True)
+    for old in glob.glob(os.path.join(out_dir, "*.wav")):
+        os.remove(old)
+    rows, np_, nn = [], 0, 0
+    pad = int(0.15 * SR)
+    for it in items:
+        x, name = it["x"], os.path.splitext(it["name"])[0]
+        spans = it["spans"]
+        for i, (a, b) in enumerate(spans):
+            s, e = max(0, a - pad), min(x.size, b + pad)
+            fn = "pos_%s_w%d.wav" % (name, i)
+            _write(os.path.join(out_dir, fn), x[s:e])
+            rows.append((fn, 1, "词区 %s %d-%d" % (name, a, b)))
+            np_ += 1
+        # 非词区（且不含丢帧）剪成 ~2.5s 的负例块
+        free = [(0, spans[0][0] if spans else x.size)] if not spans else []
+        if spans:
+            free = [(spans[i][1], spans[i + 1][0] if i + 1 < len(spans) else x.size)
+                    for i in range(len(spans))]
+        for j, (a, b) in enumerate(free):
+            k = a
+            while b - k >= int(2.5 * SR):
+                fn = "neg_%s_q%d.wav" % (name, j)
+                _write(os.path.join(out_dir, fn), x[k:k + int(2.5 * SR)])
+                rows.append((fn, 0, "词外 %s %d-%d" % (name, k, k + int(2.5 * SR))))
+                nn += 1
+                k += int(2.5 * SR)
+    man = os.path.join(out_dir, "manifest.csv")
+    with open(man, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["file", "label", "text"])
+        for fn, lab, note in rows:
+            w.writerow([fn, lab, note])
+    print("留出集 %s：正 %d / 负 %d（来自 %d 份整采）" % (man, np_, nn, len(items)))
+    return man
+
+
+def _write(path, x):
+    import wave
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        w.writeframes(np.asarray(x, dtype="<i2").tobytes())
+
+
+if __name__ == "__main__":
+    export_holdout()
+    build(legacy=True)

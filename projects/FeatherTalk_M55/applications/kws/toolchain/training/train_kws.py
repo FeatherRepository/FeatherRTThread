@@ -14,12 +14,16 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models, callbacks
 
-from dataset_v10 import build   # v10：50ms 密相位滑窗 + 留出集（见 dataset_v10.py 头部说明）
-
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
 os.makedirs(OUT, exist_ok=True)
 
 VERSION = os.environ.get("KWS_VERSION", "v10")
+# 数据集口径随版本走：v11 的标签是**逐窗**的（词区才算正例，词间静音归负例），
+# v10 及以前是整份文件一个标签——审计证明那会把 TTS 的静音垫也教成唤醒词。
+if VERSION == "v11":
+    from dataset_v11 import build
+else:
+    from dataset_v10 import build
 MODEL_NAME = ("kws_xiaomai.tflite" if VERSION == "v9"
               else f"kws_xiaomai_{VERSION}.tflite")
 META_NAME = MODEL_NAME[: -len(".tflite")] + "_meta.json"

@@ -46,7 +46,11 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))          # toolchain/
 sys.path.insert(0, os.path.join(ROOT, "training"))
+sys.path.insert(0, HERE)
+from kws_console import force_utf8                        # noqa: E402
 from ei_mfcc import ei_mfcc                                # noqa: E402
+
+force_utf8()
 
 SR = 16000
 
