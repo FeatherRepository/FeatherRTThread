@@ -36,6 +36,9 @@ LEGACY = os.path.join(DATA, "wakeword")
 REAL = os.path.join(DATA, "real")
 HOLD = os.path.join(DATA, "holdout_v11")
 
+# 响度归一化目标（0=关闭）。开启时必须同步改板端 kws.cpp 的 DSP 前处理。
+NORM_LEVEL = float(os.environ.get("KWS_NORM_LEVEL", "0") or 0)
+
 SR = 16000
 WIN = 16000
 STRIDE = 800                 # 50ms = 验收 --jitter 10 的同一套窗相位
@@ -139,7 +142,11 @@ def label_windows(x, spans, bad_frames=None, tight=True):
 
 
 def load_corpus(manifest=None):
-    """→ [(wav路径, 标签, 词区间列表, 无效帧掩码, 源文件号, 说明)]，按整份采集给 grp。"""
+    """→ [(wav路径, 标签, 词区间列表, 无效帧掩码, 源文件号, 说明)]，按整份采集给 grp。
+
+    负样本里剔除**含完整唤醒词**的近词（如"小麦小麦吗"）：用户说这句话时本就是在叫设备，
+    模型命中它不算误触。留着会让验收把"正确行为"记成误报，掩盖真正的误触。
+    """
     manifest = manifest or newest_corpus()
     items = []
     if not manifest or not os.path.exists(manifest):
@@ -150,8 +157,10 @@ def load_corpus(manifest=None):
             p = os.path.join(base, row["file"])
             if not os.path.exists(p):
                 continue
-            x = read_wav16k(p)
             lab = int(row["label"])
+            if lab == 0 and "小麦小麦" in (row.get("text") or ""):
+                continue                     # 含完整唤醒词的"负样本"不是负样本
+            x = read_wav16k(p)
             spans = word_spans(row, x.size) if lab == 1 else []
             bad = parse_holes(row.get("hole_spans", ""), x.size // FRAME + 1)
             items.append({"path": p, "x": x, "spans": spans, "bad": bad, "grp": gi,
@@ -198,6 +207,22 @@ def holdout_groups(items, every=4):
     return hold
 
 
+def norm_level(w, target=2000.0):
+    """把窗内 RMS 归一化到固定目标，彻底抹掉响度信息。
+
+    为什么必须做：机内语料的正样本全是音量 100 的响素材、空场负样本很安静，模型于是
+    学会"响 = 唤醒词"。实测证据（10-20 夜）：同一段 ambient 原始 0.52 分 → 放大 8 倍
+    0.88 分 → 经喇叭重录 0.996 分；而"持续大声噪声"（ambient_05，p10 底噪 1828 vs 其他
+    段 700~800）即使重训后仍拿 0.88 分。宽增益增强只是缓解，归一化才是根治。
+    **板端 kws.cpp 必须做同一变换**，否则训练/推理特征分布不一致。
+    """
+    x = np.asarray(w, dtype=np.float32)
+    rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
+    if rms < 1.0:
+        return w                      # 数字静音不放大，避免把量化噪声抬成信号
+    return np.clip(x * (target / rms), -32768, 32767).astype(np.int16)
+
+
 def build(n_aug=1, seed=42, verbose=True, legacy=None, holdout=True):
     """返回 (X, y, grp)，与 train_kws.py 的 v10 接口一致。"""
     corpus = load_corpus()
@@ -221,9 +246,13 @@ def build(n_aug=1, seed=42, verbose=True, legacy=None, holdout=True):
                 continue
             w = x[s:s + WIN]
             stat["pos_win" if lab else "neg_win"] += 1
+            if NORM_LEVEL > 0:         # 默认关闭：板端未做归一化时训练也不能做，否则特征错配
+                w = norm_level(w, NORM_LEVEL)
             X.append(ei_mfcc(w)); y.append(lab); g.append(it["grp"])
             for _ in range(n_aug):
-                X.append(ei_mfcc(_aug(w, rng))); y.append(lab); g.append(it["grp"])
+                # 宽增益（0.25~3.0）在归一化之上再叠加电平抖动，防模型对残余电平敏感
+                X.append(ei_mfcc(_aug(w, rng, gain=(0.25, 3.0))))
+                y.append(lab); g.append(it["grp"])
     X = np.asarray(X, dtype=np.float32)
     y = np.asarray(y, dtype=np.int32)
     g = np.asarray(g, dtype=np.int32)
@@ -266,12 +295,18 @@ def export_holdout(out_dir=HOLD):
                     for i in range(len(spans))]
         for j, (a, b) in enumerate(free):
             k = a
+            ci = 0
             while b - k >= int(2.5 * SR):
-                fn = "neg_%s_q%d.wav" % (name, j)
+                # 文件名必须带**块序号 ci**：此前用区间序号 j，同一区间内的块互相覆盖，
+                # 一段 8s 空场只落盘最后 2.5s 一块——而混淆音往往在别处，验收因此漏检
+                # （10-20 夜"零误触"假象的真因：manifest 47 条负样本、磁盘上只有 18 个文件，
+                #  kws_validate 静默跳过缺失文件）。
+                fn = "neg_%s_q%d_%d.wav" % (name, j, ci)
                 _write(os.path.join(out_dir, fn), x[k:k + int(2.5 * SR)])
                 rows.append((fn, 0, "词外 %s %d-%d" % (name, k, k + int(2.5 * SR))))
                 nn += 1
                 k += int(2.5 * SR)
+                ci += 1
     man = os.path.join(out_dir, "manifest.csv")
     with open(man, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)

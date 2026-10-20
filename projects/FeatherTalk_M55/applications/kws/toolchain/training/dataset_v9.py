@@ -40,9 +40,14 @@ def windows(x):
     return out
 
 
-def _aug(w, rng):
-    """轻增强：增益 + 噪声 + 语速 + 平移（不做频谱改变）"""
-    y = w.astype(np.float32) * rng.uniform(0.5, 1.3)
+def _aug(w, rng, gain=(0.5, 1.3)):
+    """轻增强：增益 + 噪声 + 语速 + 平移（不做频谱改变）
+
+    gain 可调：v11 起用宽增益（0.25~3.0）。窄增益（0.5~1.3）下模型会把**响度当特征**——
+    正样本全是音量 100 的响素材、负样本大量是安静空场，于是"响 = 唤醒词"。
+    10-20 夜实测：同一段 ambient 原始 0.52 分，放大 8 倍变 0.88 分，经喇叭重录后 0.996。
+    """
+    y = w.astype(np.float32) * rng.uniform(*gain)
     if rng.random() < 0.8:
         snr = rng.uniform(8, 35)
         p = np.mean(y ** 2) + 1e-9

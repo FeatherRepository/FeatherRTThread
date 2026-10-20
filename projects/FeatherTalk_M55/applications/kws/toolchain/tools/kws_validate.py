@@ -52,6 +52,9 @@ from ei_mfcc import ei_mfcc                                # noqa: E402
 
 force_utf8()
 
+# v11 起的响度归一化目标（0=关闭，保持 v9/v10 原口径）；与 dataset_v11.norm_level 一致
+NORM_LEVEL = float(os.environ.get("KWS_NORM_LEVEL", "0") or 0)
+
 SR = 16000
 
 
@@ -83,7 +86,14 @@ class TfliteScorer:
 
     def score_window(self, samples):
         iscale, izp, oscale, ozp = self.q
-        feats = ei_mfcc(samples)
+        s = np.asarray(samples, dtype=np.float32)
+        if NORM_LEVEL > 0:
+            # v11 起训练用 RMS 归一化（dataset_v11.norm_level）抹掉响度捷径，
+            # 验收必须做同一变换，否则特征分布不一致、读数无意义。
+            r = float(np.sqrt(np.mean(s * s))) if s.size else 0.0
+            if r >= 1.0:
+                s = np.clip(s * (NORM_LEVEL / r), -32768, 32767)
+        feats = ei_mfcc(s.astype(np.int16) if NORM_LEVEL > 0 else samples)
         q = np.clip(np.round(feats / iscale) + izp, -128, 127).astype(np.int8)
         self.it.set_tensor(self.inp["index"], q.reshape(self.inp["shape"]))
         self.it.invoke()
@@ -230,6 +240,7 @@ def main():
         pos_files += sorted(glob.glob(os.path.join(args.pos, args.pos_include + ".wav")))
     if args.neg:
         neg_files += sorted(glob.glob(os.path.join(args.neg, args.neg_include + ".wav")))
+    missing = []
     for m in args.manifest or []:
         base = os.path.dirname(os.path.abspath(m))
         with open(m, encoding="utf-8") as f:
@@ -239,6 +250,12 @@ def main():
                     dst = pos_files if row["label"] == "1" else neg_files
                     dst.append(p)
                     texts[os.path.abspath(p)] = row.get("text", "")
+                else:
+                    missing.append(p)
+    if missing:
+        # 静默跳过会让"manifest 里 47 条、实际只测了 18 条"这种漏检无声通过
+        # （10-20 夜留出集导出 bug 就是这样藏了一整晚）。
+        print(f"⚠ manifest 有 {len(missing)} 条样本文件不存在，已跳过（首个：{missing[0]}）")
     if not pos_files or not neg_files:
         ap.error("正/负样本为空（--pos/--neg 或 --manifest）")
 
