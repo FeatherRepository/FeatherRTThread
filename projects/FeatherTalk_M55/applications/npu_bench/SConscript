@@ -1,0 +1,16 @@
+# R0.5-2 NPU 带宽基准（Ethos-U55 裸寄存器路径）
+#
+# 模型数据来源：tools/gen_tflite_flat.py 建 int8 FC 图 → Vela raw →
+# tools/emit_model_c.py 生成 npu_model.c。emit 时会**剥掉 COP 包装流**
+# （Vela npz 的 cmd_data 是驱动动作流，只有 COMMAND_STREAM 记录的载荷才是裸命令流，
+#  QBASE 必须指向它）。
+# 未生成时用 npu_model_stub.c 占位。
+
+from building import *
+
+cwd = GetCurrentDir()
+src = Glob('*.c')
+
+group = DefineGroup('npu_bench', src, depend=[''], CPPPATH=[cwd])
+
+Return('group')

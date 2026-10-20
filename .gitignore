@@ -58,3 +58,7 @@ cconfig.h
 /projects/FeatherTalk_M55/applications/kws/toolchain/logs/
 # 验收报表工作区（归档副本进 local_ai/reports，本目录可再生）
 /projects/FeatherTalk_M55/applications/kws/toolchain/reports/
+
+# npu_bench 可再生产物（重建命令见 applications/npu_bench/README.md）
+/projects/FeatherTalk_M55/applications/npu_bench/npu_model.c
+/projects/FeatherTalk_M55/applications/npu_bench/tools/out/
