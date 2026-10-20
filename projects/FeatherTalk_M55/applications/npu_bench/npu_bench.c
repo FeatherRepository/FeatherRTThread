@@ -301,6 +301,13 @@ static void fill_pattern(rt_uint8_t *p, rt_uint32_t n)
 
 static int npu_bench(int argc, char **argv)
 {
+    /* 模型数据缺失（未跑生成链，stub 的 len=0）时直接提示，不让 NPU 空转 */
+    if (npu_cmd_stream_len == 0 || npu_weights_len == 0)
+    {
+        rt_kprintf("[npu] 无模型数据：先跑 tools/gen_tflite_flat.py + Vela + "
+                   "tools/emit_model_c.py 生成 npu_model.c（见 README.md）\n");
+        return -1;
+    }
     rt_bool_t use_m55_region = RT_FALSE;
     rt_bool_t use_soc_region = RT_FALSE;
     rt_bool_t use_shared_region = RT_FALSE;
