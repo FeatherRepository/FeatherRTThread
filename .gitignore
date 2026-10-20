@@ -62,3 +62,6 @@ cconfig.h
 # npu_bench 可再生产物（重建命令见 applications/npu_bench/README.md）
 /projects/FeatherTalk_M55/applications/npu_bench/npu_model.c
 /projects/FeatherTalk_M55/applications/npu_bench/tools/out/
+
+# 原始跑批轮次（中间产物；入库的是过滤后的 data/boardmic_v11）
+/projects/FeatherTalk_M55/applications/kws/toolchain/data/boardmic/

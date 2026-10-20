@@ -1379,7 +1379,11 @@ def phase_traindata(a, flog):
     cols = ["file", "label", "scenario", "clip", "text", "sec", "reps", "lag_sec",
             "clip_sec", "loop_gap", "push_gain", "corr", "lift", "floor_p90",
             "hole_runs", "hole_ms",
-            "hole_spans", "peak_ok", "ck_ok", "saturation", "drop_heads"]
+            "hole_spans", "peak_ok", "ck_ok", "saturation", "drop_heads",
+            # 剂量门结论必须落进 manifest：DictWriter 用 extrasaction="ignore"，
+            # 不在 cols 里就静默丢——10-20 夜合并脚本因此退回 corr/lift 判据，
+            # 把 12 段空场负样本（corr=0 无激励）全判出局。
+            "dose_ok"]
     rows = []
 
     per = a.cap_sec * 9.0 + a.gap + 6.0      # 录 + 回吐(实测约 8×实时) + 间隔 + 灌数摊销

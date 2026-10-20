@@ -29,7 +29,12 @@ LIFT_MIN = 1.25
 
 
 def row_gate(row):
-    """返回 (ok, why)。dose_ok 列存在时以它为准；否则用 rig 的剂量门限补判。"""
+    """返回 (ok, why)。dose_ok 列存在时以它为准；否则用 rig 的剂量门限补判。
+
+    无激励的负样本（room 空场：clip 为空、reps=0、corr=0）必须放行——剂量门的作用是
+    验证"激励确实进了麦"，没有激励就无从验证，而空场底噪正是误触治理最需要的负样本。
+    老格式 manifest 没有 dose_ok 列时若按 corr>=0.30 判，会把 12 段空场全判出局。
+    """
     f = (row.get("file") or "")
     if f.replace("\\", "/").startswith("fail/"):
         return False, "fail-dir"
@@ -37,9 +42,15 @@ def row_gate(row):
     if d is not None and d != "":
         return (str(d).strip().lower() in ("1", "true", "yes")), "dose_ok"
     try:
+        reps = int(row.get("reps") or 0)
+        clip = (row.get("clip") or "").strip()
+    except ValueError:
+        return False, "unparseable"
+    if not clip and reps == 0:
+        return True, "no-stimulus-neg"      # 空场负样本：无激励可验，直接收
+    try:
         corr = float(row.get("corr") or 0)
         lift = float(row.get("lift") or 0)
-        reps = int(row.get("reps") or 0)
     except ValueError:
         return False, "unparseable"
     if reps <= 0:
@@ -92,7 +103,7 @@ def main():
     cols = ["file", "label", "scenario", "clip", "text", "sec", "reps", "lag_sec",
             "clip_sec", "loop_gap", "push_gain", "corr", "lift", "floor_p90",
             "hole_runs", "hole_ms", "hole_spans", "peak_ok", "ck_ok", "saturation",
-            "drop_heads"]
+            "drop_heads", "dose_ok"]
     seen = set()
     cols = [c for c in cols if not (c in seen or seen.add(c))]
     cols = [c for c in cols if any(c in r for r in rows)]
