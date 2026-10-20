@@ -223,6 +223,62 @@ def norm_level(w, target=2000.0):
     return np.clip(x * (target / rms), -32768, 32767).astype(np.int16)
 
 
+def synth_steady_noise(rng, n, sr=SR):
+    """合成"持续稳态噪声"窗：白噪 / 粉噪 / 低频嗡嗡 / 带通噪声，电平覆盖安静到很响。
+
+    为什么必须合成：10-21 凌晨实测，最大的**真误触**源就是"持续大声噪声"——ambient_05
+    （底噪 p10=1828，其余环境段只有 700~800）被模型打了 0.88~0.996 分，而真语料里这类
+    样本极少（25 段空场 + 6 段环境音里只有 1 段是稳态大声）。模型尾部 GAP 池化对时间
+    结构不敏感，稳态噪声在时间上平坦，正好钻这个空子。
+    """
+    out = []
+    kinds = rng.integers(0, 4, size=n)
+    for k in kinds:
+        w = rng.normal(0, 1, sr).astype(np.float32)
+        if k == 1:                       # 粉噪（1/f）：累积白噪去均值
+            w = np.cumsum(w); w = w - w.mean()
+        elif k == 2:                     # 低频嗡嗡（风扇/压缩机）：50Hz 基频+谐波
+            t = np.arange(sr) / sr
+            w = (0.6 * np.sin(2 * np.pi * 50 * t) + 0.25 * np.sin(2 * np.pi * 100 * t)
+                 + 0.15 * np.sin(2 * np.pi * 150 * t) + 0.1 * w)
+        elif k == 3:                     # 带通噪声（电视/混响底噪）
+            w = np.diff(np.concatenate([[0.0], w]))
+            w = np.convolve(w, np.ones(8) / 8.0, mode="same")
+        w = w - w.mean()
+        rms = float(np.sqrt(np.mean(w * w))) + 1e-9
+        out.append(np.clip(w * (rng.uniform(400.0, 8000.0) / rms), -32768, 32767).astype(np.int16))
+    return out
+
+
+def synth_onset_negatives(rng, n, sr=SR):
+    """合成"静音→突发声响"窗：随机位置的短促爆发（噪声/音调/敲击），前后是安静。
+
+    为什么必须补这一类（10-21 凌晨实测的决定性证据）：`ambient_02.wav` 原始逐窗打分
+    全是 0.00，但**循环 3 遍、中间插 0.8s 静音后**分数飙到 0.65 / 0.95 / 1.00。
+    即模型学到的是"**静音→突发**"这个转换，而不是"小麦小麦"——因为训练负样本几乎
+    全是**没有突发的安静空场**，正样本全是"安静→词"，于是"有动静"就等价于唤醒词。
+    现实里这意味着关门、碰碗、椅子响都可能触发。
+    """
+    out = []
+    for _ in range(n):
+        w = rng.normal(0, 0.02, sr).astype(np.float32)        # 极低底噪
+        ln = int(rng.uniform(0.08, 0.9) * sr)                  # 爆发长度 80~900ms
+        st = int(rng.integers(0, max(1, sr - ln)))
+        kind = int(rng.integers(0, 3))
+        if kind == 0:                                          # 宽带噪声爆发（碰撞/摩擦）
+            burst = rng.normal(0, 1, ln)
+        elif kind == 1:                                        # 短音调（门铃/提示音/敲击）
+            t = np.arange(ln) / sr
+            f0 = rng.uniform(180, 1600)
+            burst = np.sin(2 * np.pi * f0 * t) * np.exp(-t * rng.uniform(3, 12))
+        else:                                                  # 衰减冲击（敲桌子/关门）
+            burst = rng.normal(0, 1, ln) * np.exp(-np.arange(ln) / (ln * rng.uniform(0.1, 0.5)))
+        burst = burst / (np.sqrt(np.mean(burst ** 2)) + 1e-9) * rng.uniform(800, 9000)
+        w[st:st + ln] += burst.astype(np.float32)
+        out.append(np.clip(w, -32768, 32767).astype(np.int16))
+    return out
+
+
 def build(n_aug=1, seed=42, verbose=True, legacy=None, holdout=True):
     """返回 (X, y, grp)，与 train_kws.py 的 v10 接口一致。"""
     corpus = load_corpus()
@@ -253,13 +309,31 @@ def build(n_aug=1, seed=42, verbose=True, legacy=None, holdout=True):
                 # 宽增益（0.25~3.0）在归一化之上再叠加电平抖动，防模型对残余电平敏感
                 X.append(ei_mfcc(_aug(w, rng, gain=(0.25, 3.0))))
                 y.append(lab); g.append(it["grp"])
+    # 合成负样本（独立组号 70000/71000，不进留出集——是"补充负样本"不是"评测集"）
+    n_synth = int(os.environ.get("KWS_SYNTH_NEG", "600") or 0)
+    if n_synth > 0:
+        for w in synth_steady_noise(rng, n_synth):
+            stat["neg_win"] += 1
+            X.append(ei_mfcc(w)); y.append(0); g.append(70000)
+            for _ in range(n_aug):
+                X.append(ei_mfcc(_aug(w, rng, gain=(0.25, 3.0))))
+                y.append(0); g.append(70000)
+    n_onset = int(os.environ.get("KWS_SYNTH_ONSET", "1000") or 0)
+    if n_onset > 0:
+        for w in synth_onset_negatives(rng, n_onset):
+            stat["neg_win"] += 1
+            X.append(ei_mfcc(w)); y.append(0); g.append(71000)
+            for _ in range(n_aug):
+                X.append(ei_mfcc(_aug(w, rng, gain=(0.25, 3.0))))
+                y.append(0); g.append(71000)
     X = np.asarray(X, dtype=np.float32)
     y = np.asarray(y, dtype=np.int32)
     g = np.asarray(g, dtype=np.int32)
     if verbose:
-        print("语料 %d 份 + 旧语料 %d 份；进训练 正窗 %d / 负窗 %d（留出窗 %d 未进训练）"
-              % (len(corpus), len(items) - len(corpus), stat["pos_win"], stat["neg_win"],
-                 stat["hold_win"]))
+        print("语料 %d 份 + 旧语料 %d 份 + 合成稳态噪声 %d / 起音 %d 窗；"
+              "进训练 正窗 %d / 负窗 %d（留出窗 %d 未进训练）"
+              % (len(corpus), len(items) - len(corpus), n_synth, n_onset,
+                 stat["pos_win"], stat["neg_win"], stat["hold_win"]))
         print("正样本占比 %.1f%%  源文件 %d 个  特征 %s"
               % (100.0 * y.mean(), len(np.unique(g)), X.shape))
     return X, y, g

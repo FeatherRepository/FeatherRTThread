@@ -44,7 +44,19 @@ def make_model():
     x = layers.SeparableConv2D(64, (3, 3), padding="same", use_bias=False)(x)
     x = layers.BatchNormalization()(x); x = layers.ReLU()(x)
     x = layers.MaxPool2D((2, 2))(x)
-    x = layers.GlobalAveragePooling2D()(x)
+    # 池化方式可选（KWS_POOL）：
+    #   gap（默认，v9/v10/v11 现役）= GlobalAveragePooling —— 对时间结构不敏感，
+    #      "持续稳态噪声"在时间上平坦，正好钻这个空子（10-21 凌晨 ambient_05 拿 0.88~0.996）
+    #   flat = 保留时间轴 flatten（6x1x64=384 → Dense），让模型能学"能量随时间怎么变"
+    #   gapmax = GAP 与 GlobalMax 拼接（128 维），显式给"峰值 vs 平均"两个统计量
+    pool = os.environ.get("KWS_POOL", "gap").lower()
+    if pool == "flat":
+        x = layers.Flatten()(x)
+    elif pool == "gapmax":
+        x = layers.Concatenate()([layers.GlobalAveragePooling2D()(x),
+                                  layers.GlobalMaxPooling2D()(x)])
+    else:
+        x = layers.GlobalAveragePooling2D()(x)
     x = layers.Dropout(0.3)(x)
     out = layers.Dense(NCLASS, activation="softmax", name="scores")(x)
     return models.Model(inp, out)
