@@ -39,6 +39,12 @@ HOLD = os.path.join(DATA, "holdout_v11")
 # 响度归一化目标（0=关闭）。开启时必须同步改板端 kws.cpp 的 DSP 前处理。
 NORM_LEVEL = float(os.environ.get("KWS_NORM_LEVEL", "0") or 0)
 
+# 正样本"换人/换房间"增强条数（0=关闭，只影响训练侧）。
+# **默认 0 = 关**：10-21 实测开 3 条反而更差（检出 98.9%→92.2%、误触 8→9 条），
+# 且新增的方言音色会把"小麦小麦"念成另一种发音，反而模糊了唤醒词的声学定义。
+# 代码保留，是对"A I人声+换人增强能否替代真人样本"这个问题的一次否定回答。
+KWS_SPK_AUG = int(os.environ.get("KWS_SPK_AUG", "0"))
+
 SR = 16000
 WIN = 16000
 STRIDE = 800                 # 50ms = 验收 --jitter 10 的同一套窗相位
@@ -172,7 +178,8 @@ def load_legacy(pos_vad=True):
     """旧语料：正样本走 VAD 只留有声窗，负样本整份负例（与 v10 同一批文件，口径不同）。"""
     items = []
     g = 0
-    for pat in (("xiaomai", "pos_*.wav"), ("xiaomai_v4", "pos_*.wav")):
+    for pat in (("xiaomai", "pos_*.wav"), ("xiaomai_v4", "pos_*.wav"),
+                ("xiaomai_v5", "pos_*.wav")):
         for p in sorted(glob.glob(os.path.join(LEGACY, *pat))):
             g += 1
             x = read_wav16k(p)
@@ -302,6 +309,69 @@ def load_transient_raw():
     return items
 
 
+def _ola_time_stretch(x, factor):
+    """OLA 时长拉伸（factor>1 变长）。只用 numpy，近似，够做增强。"""
+    win = np.hanning(1024).astype(np.float32)
+    hop = 256
+    n_out = int(len(x) * factor) + 1024
+    out = np.zeros(n_out, dtype=np.float32)
+    pos_out = 0
+    for pos in range(0, max(1, len(x) - 1024), hop):
+        out[pos_out:pos_out + 1024] += x[pos:pos + 1024] * win
+        pos_out += int(round(hop * factor))
+    return out[:int(len(x) * factor)]
+
+
+def speaker_aug(w, rng, sr=SR):
+    """说话人 + 声学环境多样性增强（**只用于训练**，板子上跑的还是原始音频）。
+
+    为什么必须做：真人正样本永远稀缺（10-21 时只有 2 个人），而唤醒词泛化的关键正是
+    对"谁在说、在什么房间、离多远"不变形。这里用四类扰动把一条素材变成多个"虚拟说话人"：
+      ① 移调 ±4 半音（基频 = 声带长度，男女/老幼差异主要来自它）
+      ② EQ：随机低通/高通（模拟麦克风与距离对频谱的衰减）
+      ③ 房间混响：合成指数衰减 RIR，随机 RT60 0.15~0.7s
+      ④ 时长 ±10%（说话节奏）
+    只用 numpy/scipy（环境里没有 librosa）。
+    """
+    from scipy.signal import resample_poly, butter, lfilter, fftconvolve
+    x = np.asarray(w, dtype=np.float64)
+
+    # ① 移调：重采样改音高 → OLA 拉回原时长
+    semis = rng.uniform(-4.0, 4.0)
+    k = 2.0 ** (semis / 12.0)
+    if k > 1.02 or k < 0.98:
+        short = resample_poly(x, 1, max(1, int(round(k * 1000))), axis=0)  # 变短、音高变高
+        if len(short) >= 1024 and x.size > 0:
+            restored = _ola_time_stretch(short, len(x) / max(1, len(short)))
+            x = restored[:max(1024, x.size)] if len(restored) >= 1024 else x
+
+    # ② EQ：一次低通 + 一次高通，截止频率随机
+    for cutoff, btype in ((rng.uniform(700, 4000), "low"),
+                          (rng.uniform(150, 900), "high")):
+        try:
+            b, a = butter(2, min(cutoff / (sr / 2.0), 0.99), btype=btype)
+            x = lfilter(b, a, x)
+        except Exception:
+            pass
+
+    # ③ 房间混响：合成指数衰减噪声 RIR
+    rt60 = rng.uniform(0.15, 0.7)
+    n = int(rt60 * sr)
+    rir = rng.normal(0, 1, n) * np.exp(-np.arange(n) / (rt60 * sr / 6.9))
+    rir[0] = 1.0                                   # 保留直达声
+    rir = rir / (np.sqrt(np.sum(rir ** 2)) + 1e-9)
+    wet = rng.uniform(0.15, 0.5)
+    y = (1.0 - wet) * x + wet * fftconvolve(x, rir)[:len(x)]
+
+    # ④ 时长 ±10%（说话节奏）
+    r = rng.uniform(0.9, 1.1)
+    if abs(r - 1.0) > 0.02 and len(y) > 2048:
+        n2 = int(round(len(y) / r))
+        y = resample_poly(y, n2, len(y))
+
+    return np.clip(y, -32768, 32767).astype(np.int16)
+
+
 def build(n_aug=1, seed=42, verbose=True, legacy=None, holdout=True):
     """返回 (X, y, grp)，与 train_kws.py 的 v10 接口一致。"""
     corpus = load_corpus()
@@ -334,6 +404,12 @@ def build(n_aug=1, seed=42, verbose=True, legacy=None, holdout=True):
                 # 宽增益（0.25~3.0）在归一化之上再叠加电平抖动，防模型对残余电平敏感
                 X.append(ei_mfcc(_aug(w, rng, gain=(0.25, 3.0))))
                 y.append(lab); g.append(it["grp"])
+            if lab == 1 and KWS_SPK_AUG > 0:
+                # 正样本专属：把一条唤醒词变成多个"虚拟说话人"（移调+EQ+混响+节奏）。
+                # 真人正样本永远稀缺（10-21 时只有 2 个人），靠这个补说话人多样性。
+                for _ in range(KWS_SPK_AUG):
+                    X.append(ei_mfcc(speaker_aug(w, rng)))
+                    y.append(lab); g.append(it["grp"])
     # 合成负样本（独立组号 70000/71000，不进留出集——是"补充负样本"不是"评测集"）
     n_synth = int(os.environ.get("KWS_SYNTH_NEG", "600") or 0)
     if n_synth > 0:
