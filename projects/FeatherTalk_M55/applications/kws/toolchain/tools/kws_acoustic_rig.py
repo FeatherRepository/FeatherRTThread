@@ -284,6 +284,22 @@ def load_texts():
     return out
 
 
+def dose_transient(x):
+    """瞬态素材的剂量判据：**"确实有一次明显事件"**，而不是互相关。
+
+    为什么不能用互相关：敲门/鼠标点击/拍手这类素材是稀疏事件，8s 采集里 95% 是静音，
+    互相关被静音段稀释到 0.5 以下（10-21 凌晨实测 20 段只过 1 段，19 段被误判废）。
+    判据：至少有一帧（10ms）的均值 ≥ 中位帧的 4 倍且绝对值 ≥ 300 —— 即"有过一次突发"。
+    """
+    n = (x.size // 160) * 160
+    if n == 0:
+        return False
+    fr = np.abs(x[:n]).reshape(-1, 160).mean(axis=1)
+    med = float(np.median(fr)) + 1.0
+    pk = float(fr.max())
+    return pk >= 4.0 * med and pk >= 300.0
+
+
 def default_scenarios():
     def files_of(d, pat, limit):
         base = os.path.join(DATA, "wakeword", d)
@@ -291,6 +307,14 @@ def default_scenarios():
             return []
         return [os.path.join(base, n) for n in sorted(os.listdir(base))
                 if n.startswith(pat) and n.endswith(".wav")][:limit]
+
+    def files_in(rel, limit=None):
+        """data/ 下任意子目录里的 wav（按名排序截断）。"""
+        base = os.path.join(DATA, rel)
+        if not os.path.isdir(base):
+            return []
+        fs = [os.path.join(base, n) for n in sorted(os.listdir(base)) if n.endswith(".wav")]
+        return fs[:limit] if limit else fs
     real = os.path.join(DATA, "real")
     reals = (lambda pre: [os.path.join(real, n) for n in sorted(os.listdir(real))
                           if n.startswith(pre) and n.endswith(".wav")]) if os.path.isdir(real) \
@@ -304,9 +328,17 @@ def default_scenarios():
         # v4 的 32 条多音色 TTS 正样本此前 rig 从未用过——正样本是 v11 的瓶颈（v9/v10 只有
         # 1 条真实正样本进训练），这里补进来：同一句话、不同音色/语速，经板载声路采集。
         {"name": "wake_tts_v4", "kind": "pos", "files": files_of("xiaomai_v4", "pos_", 32)},
-        {"name": "nearword", "kind": "neg", "files": files_of("nearwords", "neg_", 8)},
+        # 近词源从 8 扩到全部 24：小卖/小迈/买卖/卖麦/小麦/小麦麦/小麦苗…（10-21 凌晨
+        # 实测近词是仅次于"起音"的第二大误触源，8 条源只够覆盖 1/3 的词形）
+        {"name": "nearword", "kind": "neg", "files": files_of("nearwords", "neg_", 24)},
         {"name": "zh_sentence", "kind": "neg", "files": files_of("xiaomai", "neg_", 8)},
         {"name": "reply", "kind": "neg", "files": reps},
+        # 真实非语音瞬态（ESC-50 公开库）：敲门/键盘/鼠标/拍手/玻璃碎/脚步/钟表滴答/
+        # 门轴/咳嗽/喝水。10-21 凌晨诊断出模型靠"能量起音"判别而不是词内容——原负样本
+        # 全是**没有瞬态的安静空场**，这一类是补那块拼图的关键（合成噪声补不动）。
+        {"name": "transient", "kind": "neg", "files": files_in("transient"),
+         # 稀疏事件：剂量用峰值判据，放大目标调低（fit_level 到 9000 会把底噪一起抬 20 倍）
+         "dose": "peak", "stim_target": 3000.0},
         # 环境音**不拉平**：它的作用就是"真实房间声压下的底噪/瞬态"，放大它等于伪造一种
         # 板上不会遇到的噪声强度，而这正是模型误触的那一类，必须保持原生电平。
         {"name": "ambient", "kind": "neg", "files": reals("ambient_"), "level": False},
@@ -1415,7 +1447,7 @@ def phase_traindata(a, flog):
                 if loaded != clip:
                     pcm0 = load_pcm(path)
                     if sc.get("level", True):
-                        pcm0, gain = fit_level(pcm0, a.stim_target, a.stim_peak_cap)
+                        pcm0, gain = fit_level(pcm0, sc.get("stim_target", a.stim_target), a.stim_peak_cap)
                     else:
                         gain = 1.0
                     gap = np.zeros(int(a.loop_gap * 16000), dtype=pcm0.dtype)
@@ -1473,8 +1505,12 @@ def phase_traindata(a, flog):
                     x, lag, clip_sec, reps, a.loop_gap)
                 lift = sp["lift"] if sp else None
                 floor = quiet_floor(x, lag or 0.0, clip_sec, reps, a.loop_gap)
-                dose_ok = (stim is None) or (corr >= a.corr_min
-                                             and (lift or 1.0) >= a.lift_min)
+                if sc.get("dose") == "peak":
+                    # 稀疏瞬态：互相关被静音稀释，改用"确实有过一次突发"的峰值判据
+                    dose_ok = dose_transient(x)
+                else:
+                    dose_ok = (stim is None) or (corr >= a.corr_min
+                                                 and (lift or 1.0) >= a.lift_min)
                 if dose_ok or att == a.dose_retries:
                     break
                 # 不达标就**同一段素材重录**，不重灌：一轮采集 ~2min，直接丢进 fail/ 等于

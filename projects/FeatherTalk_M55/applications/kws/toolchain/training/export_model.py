@@ -20,7 +20,10 @@ SUF = ("_v" + VERSION) if VERSION else ""
 TFLITE = os.path.join(OUT, "kws_xiaomai%s.tflite" % SUF)
 META = os.path.join(OUT, "kws_xiaomai%s_meta.json" % SUF)
 HEADER = os.path.join(OUT, "tflite_learn_333519_3%s.h" % SUF)
-ARENA_SIZE = 32768   # 张量总和上界 21528B + TFLM scratch/结构开销；16384 装不下
+# TFLM arena：张量总和 ~21.3KB + scratch/结构开销。gapmax 池化（GAP+GlobalMax 拼接）
+# 实测在 32768 下 AllocateTensors() failed——CONCATENATION/REDUCE_MAX 的 scratch 更多，
+# 49152 起跑通（10-21 凌晨实测）。环境变量 KWS_ARENA_SIZE 可覆盖。
+ARENA_SIZE = int(os.environ.get("KWS_ARENA_SIZE", "49152"))
 
 HEAD = """/*
  * 本地训练生成（小麦项目 R0-2）— 由 export_model.py 自动生成

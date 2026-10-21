@@ -24,7 +24,11 @@
 
 #include "edge-impulse-sdk/tensorflow/lite/micro/kernels/micro_ops.h"
 
-#define EI_TFLITE_RESOLVER static tflite::MicroMutableOpResolver<10> resolver; \
+/* 12：新增 AddConcatenation + AddReduceMax，供 v11.4 的 gapmax 池化
+ * （GlobalAveragePooling 与 GlobalMaxPooling 拼接）使用。缺任何一个都表现为
+ * AllocateTensors() failed、KWS 一次推理都跑不起来（10-21 凌晨实测，极难诊断：
+ *  TFLM 不打印具体是哪个算子没注册）。 */
+#define EI_TFLITE_RESOLVER static tflite::MicroMutableOpResolver<12> resolver; \
     resolver.AddConv2D(); \
     resolver.AddFullyConnected(); \
     resolver.AddMaxPool2D(); \
@@ -34,6 +38,8 @@
     resolver.AddMean(); \
     resolver.AddShape(); \
     resolver.AddPack(); \
-    resolver.AddStridedSlice();
+    resolver.AddStridedSlice(); \
+    resolver.AddConcatenation(); \
+    resolver.AddReduceMax();
 
 #endif // _EI_CLASSIFIER_TFLITE_RESOLVER_H_

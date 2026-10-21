@@ -3,8 +3,8 @@
     1,
     650
   ],
-  "input_scale": 0.05422301962971687,
-  "input_zero_point": 2,
+  "input_scale": 0.055115580558776855,
+  "input_zero_point": 0,
   "output_shape": [
     1,
     2

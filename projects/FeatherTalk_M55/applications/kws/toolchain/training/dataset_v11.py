@@ -279,12 +279,37 @@ def synth_onset_negatives(rng, n, sr=SR):
     return out
 
 
+def load_transient_raw():
+    """ESC-50 原始瞬态文件（data/transient/*.wav）直接作负样本，不经板载声路。
+
+    与板采瞬态互补：板采（~20 段）覆盖真实声路但样本少；原始文件（71 条 × 5s）
+    提供多样性。注意域差（PC 文件 vs 板载麦）——所以两者都要，不能只靠这一路。
+    """
+    items = []
+    d = os.path.join(DATA, "transient")
+    if not os.path.isdir(d):
+        return items
+    for i, n in enumerate(sorted(os.listdir(d))):
+        if not n.endswith(".wav"):
+            continue
+        p = os.path.join(d, n)
+        try:
+            x = read_wav16k(p)
+        except Exception:
+            continue
+        items.append({"path": p, "x": x, "spans": [], "bad": None,
+                      "grp": 80000 + i, "kind": "transient_raw", "name": n})
+    return items
+
+
 def build(n_aug=1, seed=42, verbose=True, legacy=None, holdout=True):
     """返回 (X, y, grp)，与 train_kws.py 的 v10 接口一致。"""
     corpus = load_corpus()
     if not corpus:
         raise SystemExit("没有机内声学语料：先跑 rig 的 --phase traindata，或用 KWS_CORPUS 指定 manifest.csv")
     items = corpus + (load_legacy() if legacy is None or legacy else [])
+    if os.environ.get("KWS_TRANSIENT_RAW", "1") != "0":
+        items += load_transient_raw()
     hold = holdout_groups(items) if holdout else set()
     rng = np.random.default_rng(seed)
     X, y, g = [], [], []

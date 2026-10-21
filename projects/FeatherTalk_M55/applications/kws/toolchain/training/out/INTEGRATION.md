@@ -1,6 +1,6 @@
 # 固件集成说明（自动生成）
 
-模型：`out/kws_xiaomai_v11.tflite`（14848 字节）→ 头文件 `out/tflite_learn_333519_3_v11.h`
+模型：`out/kws_xiaomai_v11.tflite`（15360 字节）→ 头文件 `out/tflite_learn_333519_3_v11.h`
 
 ## 需要替换/修改的文件
 
@@ -14,14 +14,14 @@
    → `{ "noice", "xiaomai" }`
 
 3. **改 arena size** `model-parameters/model_metadata.h`
-   `EI_CLASSIFIER_TFLITE_LARGEST_ARENA_SIZE` → 32768
+   `EI_CLASSIFIER_TFLITE_LARGEST_ARENA_SIZE` → 49152
 
 4. **改 kws.h 标签** `applications/kws/kws.h`
    `KWS_WAKE_WORD_LABEL` → `"xiaomai"`
 
 ## 模型量化参数（核对）
 
-- 输入：shape [1, 650]  scale=0.05422301962971687  zp=2
+- 输入：shape [1, 650]  scale=0.055115580558776855  zp=0
 - 输出：shape [1, 2]  scale=0.00390625  zp=-128
 - 标签：['noice', 'xiaomai']
 
