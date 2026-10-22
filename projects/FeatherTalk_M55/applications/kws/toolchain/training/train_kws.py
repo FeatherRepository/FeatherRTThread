@@ -20,7 +20,7 @@ os.makedirs(OUT, exist_ok=True)
 VERSION = os.environ.get("KWS_VERSION", "v10")
 # 数据集口径随版本走：v11 的标签是**逐窗**的（词区才算正例，词间静音归负例），
 # v10 及以前是整份文件一个标签——审计证明那会把 TTS 的静音垫也教成唤醒词。
-if VERSION == "v11":
+if VERSION in ("v11", "v12", "v13", "v14", "v15", "v17"):
     from dataset_v11 import build
 else:
     from dataset_v10 import build
@@ -82,9 +82,28 @@ def main():
 
     cw = {0: len(ytr) / (2 * max(1, (ytr == 0).sum())),
           1: len(ytr) / (2 * max(1, (ytr == 1).sum()))}
-    model.fit(Xtr, ytr, validation_data=(Xva, yva), epochs=60, batch_size=32,
+    model.fit(Xtr, ytr, validation_data=(Xva, yva), epochs=int(os.environ.get("KWS_EPOCHS", "60")), batch_size=32,
               class_weight=cw, verbose=2,
               callbacks=[callbacks.EarlyStopping(patience=12, restore_best_weights=True)])
+
+    # ---- 诊断：float 模型对真实样本打分（区分"训练塌缩" vs "int8 转换塌缩"）----
+    try:
+        import glob as _glob
+        from ei_mfcc import ei_mfcc as _mfcc
+        from dataset_v9 import read_wav16k as _read
+        _real = os.path.join(os.path.dirname(OUT), "..", "data", "real")
+        _fs = (sorted(_glob.glob(os.path.join(_real, "wake_*.wav")))[:2]
+               + sorted(_glob.glob(os.path.join(_real, "ambient_*.wav")))[:2])
+        print("[float-diag] 真实样本 float 打分（xiaomai 概率）：")
+        for _p in _fs:
+            _x = _read(_p); _best = 0.0
+            for _s in range(0, max(1, len(_x) - 16000 + 1), 8000):
+                _f = np.asarray(_mfcc(_x[_s:_s + 16000])).reshape(1, -1)
+                _best = max(_best, float(model.predict(_f, verbose=0)[0][1]))
+            print("   %-28s float=%.3f" % (os.path.basename(_p), _best))
+        model.save(os.path.join(OUT, "kws_xiaomai_%s_float.keras" % VERSION))
+    except Exception as _e:
+        print("[float-diag] skip:", type(_e).__name__, _e)
 
     # 全 int8 量化
     def rep():
@@ -130,6 +149,27 @@ def main():
         pred = int(np.argmax((out - ozp) * oscale))
         correct += int(pred == yva[i])
     print(f"量化后验证集准确率: {correct}/{len(Xva)} = {correct / len(Xva):.3f}")
+
+    # ---- 诊断：int8 模型对同一批真实样本打分（与 float-diag 对照）----
+    try:
+        import glob as _glob
+        from ei_mfcc import ei_mfcc as _mfcc
+        from dataset_v9 import read_wav16k as _read
+        _real = os.path.join(os.path.dirname(OUT), "..", "data", "real")
+        _fs = (sorted(_glob.glob(os.path.join(_real, "wake_*.wav")))[:2]
+               + sorted(_glob.glob(os.path.join(_real, "ambient_*.wav")))[:2])
+        print("[int8-diag] 真实样本 int8 打分（xiaomai 概率）：")
+        for _p in _fs:
+            _x = _read(_p); _best = 0.0
+            for _s in range(0, max(1, len(_x) - 16000 + 1), 8000):
+                _f = np.asarray(_mfcc(_x[_s:_s + 16000]))
+                _q = np.clip(np.round(_f / iscale) + izp, -128, 127).astype(np.int8).reshape(ide["shape"])
+                interp.set_tensor(ide["index"], _q); interp.invoke()
+                _o = interp.get_tensor(ode["index"]).astype(np.float32).reshape(-1)
+                _best = max(_best, float(((_o - ozp) * oscale)[1]))
+            print("   %-28s int8=%.3f" % (os.path.basename(_p), _best))
+    except Exception as _e:
+        print("[int8-diag] skip:", type(_e).__name__, _e)
 
 
 if __name__ == "__main__":

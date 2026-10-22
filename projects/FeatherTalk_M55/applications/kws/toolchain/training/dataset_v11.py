@@ -45,6 +45,11 @@ NORM_LEVEL = float(os.environ.get("KWS_NORM_LEVEL", "0") or 0)
 # 代码保留，是对"A I人声+换人增强能否替代真人样本"这个问题的一次否定回答。
 KWS_SPK_AUG = int(os.environ.get("KWS_SPK_AUG", "0"))
 
+# SpecAugment（训练侧正则，参考 microWakeWord）：对 650 维 MFCC 做时间/频率掩码，
+# 每个窗口额外生成 KWS_SPEC_AUG 条掩码副本（0=关）。它不是"加数据"，而是逼模型
+# 在被遮挡时仍认得出唤醒词，抑制对局部纹理的过拟合——v12 用它测"数据/正则能否救 14.8KB"。
+KWS_SPEC_AUG = int(os.environ.get("KWS_SPEC_AUG", "0"))
+
 SR = 16000
 WIN = 16000
 STRIDE = 800                 # 50ms = 验收 --jitter 10 的同一套窗相位
@@ -54,10 +59,18 @@ VAD_FRAC = 0.15              # 有声判据：帧 RMS > 该文件 p95 的 15%
 
 
 def newest_corpus():
-    """缺省取 data/boardmic 下最新一次的语料；KWS_CORPUS 可指到具体 manifest.csv 或其目录。"""
+    """缺省取 data/boardmic 下最新一次的语料；KWS_CORPUS 可指到具体 manifest.csv 或其目录。
+
+    10-22 修正：优先用 `data/boardmic_all_v15/manifest.csv`（把全部小麦小麦-era 采集合并、
+    含 rig 真声正样本）。此前直接取"最新一次采集"，而最新一次恰好是 16 条全近词负样本，
+    导致训练时**一条 rig 正样本都没有**，重训模型对真声输出常数、完全学不到。
+    """
     p = os.environ.get("KWS_CORPUS", "")
     if p:
         return p if p.endswith(".csv") else os.path.join(p, "manifest.csv")
+    merged = os.path.join(DATA, "boardmic_all_v15", "manifest.csv")
+    if os.path.exists(merged):
+        return merged
     cands = sorted(glob.glob(os.path.join(DATA, "boardmic", "*", "manifest.csv")))
     return cands[-1] if cands else ""
 
@@ -372,6 +385,25 @@ def speaker_aug(w, rng, sr=SR):
     return np.clip(y, -32768, 32767).astype(np.int16)
 
 
+def spec_augment(feat, rng, n_time=2, n_freq=2, time_w=6, freq_w=2):
+    """对单条 (650,) MFCC 特征做 SpecAugment（时间/频率掩码）。
+
+    650 = 50 帧 × 13 bin。时间掩码把随机连续 1..time_w 帧整列置 0（≈均值），
+    频率掩码把随机连续 1..freq_w bin 整行置 0。参考 microWakeWord 的 SpecAugment。
+    特征已是标准化后的值（实测 ~[-3,3.7]），置 0 落在均值附近，语义上是"抹掉"。
+    """
+    f = np.asarray(feat, dtype=np.float32).reshape(50, 13).copy()
+    for _ in range(n_time):
+        w = int(rng.integers(1, time_w + 1))
+        t0 = int(rng.integers(0, 50 - w + 1))
+        f[t0:t0 + w, :] = 0.0
+    for _ in range(n_freq):
+        w = int(rng.integers(1, freq_w + 1))
+        b0 = int(rng.integers(0, 13 - w + 1))
+        f[:, b0:b0 + w] = 0.0
+    return f.reshape(-1)
+
+
 def build(n_aug=1, seed=42, verbose=True, legacy=None, holdout=True):
     """返回 (X, y, grp)，与 train_kws.py 的 v10 接口一致。"""
     corpus = load_corpus()
@@ -399,11 +431,14 @@ def build(n_aug=1, seed=42, verbose=True, legacy=None, holdout=True):
             stat["pos_win" if lab else "neg_win"] += 1
             if NORM_LEVEL > 0:         # 默认关闭：板端未做归一化时训练也不能做，否则特征错配
                 w = norm_level(w, NORM_LEVEL)
-            X.append(ei_mfcc(w)); y.append(lab); g.append(it["grp"])
+            feat = ei_mfcc(w)
+            X.append(feat); y.append(lab); g.append(it["grp"])
             for _ in range(n_aug):
                 # 宽增益（0.25~3.0）在归一化之上再叠加电平抖动，防模型对残余电平敏感
                 X.append(ei_mfcc(_aug(w, rng, gain=(0.25, 3.0))))
                 y.append(lab); g.append(it["grp"])
+            for _ in range(KWS_SPEC_AUG):
+                X.append(spec_augment(feat, rng)); y.append(lab); g.append(it["grp"])
             if lab == 1 and KWS_SPK_AUG > 0:
                 # 正样本专属：把一条唤醒词变成多个"虚拟说话人"（移调+EQ+混响+节奏）。
                 # 真人正样本永远稀缺（10-21 时只有 2 个人），靠这个补说话人多样性。
@@ -415,19 +450,34 @@ def build(n_aug=1, seed=42, verbose=True, legacy=None, holdout=True):
     if n_synth > 0:
         for w in synth_steady_noise(rng, n_synth):
             stat["neg_win"] += 1
-            X.append(ei_mfcc(w)); y.append(0); g.append(70000)
+            feat = ei_mfcc(w)
+            X.append(feat); y.append(0); g.append(70000)
             for _ in range(n_aug):
                 X.append(ei_mfcc(_aug(w, rng, gain=(0.25, 3.0))))
                 y.append(0); g.append(70000)
+            for _ in range(KWS_SPEC_AUG):
+                X.append(spec_augment(feat, rng)); y.append(0); g.append(70000)
     n_onset = int(os.environ.get("KWS_SYNTH_ONSET", "1000") or 0)
     if n_onset > 0:
         for w in synth_onset_negatives(rng, n_onset):
             stat["neg_win"] += 1
-            X.append(ei_mfcc(w)); y.append(0); g.append(71000)
+            feat = ei_mfcc(w)
+            X.append(feat); y.append(0); g.append(71000)
             for _ in range(n_aug):
                 X.append(ei_mfcc(_aug(w, rng, gain=(0.25, 3.0))))
                 y.append(0); g.append(71000)
+            for _ in range(KWS_SPEC_AUG):
+                X.append(spec_augment(feat, rng)); y.append(0); g.append(71000)
     X = np.asarray(X, dtype=np.float32)
+    # 极端特征值裁剪（10-22 定位 dataset_v11 训练塌缩的真因）：正常 MFCC 约 [-7,6]，
+    # 但个别 rig 采集窗会出现 ~2e5 的离群值（DC 偏置 / 削波），不裁剪会让梯度爆炸，
+    # 模型塌成常数输出（train acc 甚至低于全负基线）。dataset_v10 走文件级口径恰好没踩到。
+    _maxabs = float(np.abs(X).max()) if X.size else 0.0
+    if _maxabs > 10.0:
+        _n_out = int((np.abs(X) > 10.0).sum())
+        if verbose:
+            print("警告：裁剪 %d 个极端特征值（|x|>10，max=%.0f）" % (_n_out, _maxabs))
+        X = np.clip(X, -10.0, 10.0)
     y = np.asarray(y, dtype=np.int32)
     g = np.asarray(g, dtype=np.int32)
     if verbose:
