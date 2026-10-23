@@ -20,7 +20,7 @@ os.makedirs(OUT, exist_ok=True)
 VERSION = os.environ.get("KWS_VERSION", "v10")
 # 数据集口径随版本走：v11 的标签是**逐窗**的（词区才算正例，词间静音归负例），
 # v10 及以前是整份文件一个标签——审计证明那会把 TTS 的静音垫也教成唤醒词。
-if VERSION in ("v11", "v12", "v13", "v14", "v15", "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26"):
+if VERSION in ("v11", "v12", "v13", "v14", "v15", "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27"):
     from dataset_v11 import build
 else:
     from dataset_v10 import build
@@ -35,11 +35,16 @@ def make_model():
     # 输入张量必须是 [1,650]（与 EI 运行时喂入的特征形状一致；4D 会导致推理报错）
     inp = layers.Input(shape=(FRAMES * BINS,), name="mfcc")
     x = layers.Reshape((FRAMES, BINS, 1))(inp)
-    # 路线 A：MixConv（多核深度卷积并行拼接，microWakeWord 风格）。KWS_ARCH=mixconv 启用。
-    if os.environ.get("KWS_ARCH", "dscnn").lower() == "mixconv":
-        x = layers.Conv2D(16, (3, 3), strides=2, padding="same", use_bias=False)(x)
+    # 路线 A：MixConv（多核深度卷积并行拼接，microWakeWord 风格）。KWS_ARCH=mixconv|big 启用。
+    # big = 大容量版：arena 已确认走 1.4MB 堆分配（不是 256KB 内部 RAM），模型可以做大 10 倍。
+    _arch = os.environ.get("KWS_ARCH", "dscnn").lower()
+    if _arch in ("mixconv", "big"):
+        _w = int(os.environ.get("KWS_WIDTH", "2" if _arch == "big" else "1"))
+        x = layers.Conv2D(16 * _w, (3, 3), strides=2, padding="same", use_bias=False)(x)
         x = layers.BatchNormalization()(x); x = layers.ReLU()(x)
-        for filters, kernels in ((32, ((3, 3), (5, 5))), (64, ((3, 3),))):
+        for _bi, (filters, kernels) in enumerate(((32 * _w, ((3, 3), (5, 5))),
+                                                 (64 * _w, ((3, 3), (5, 5))),
+                                                 (128 * _w, ((3, 3),)))):
             outs = []
             for k in kernels:
                 y = layers.DepthwiseConv2D(k, padding="same", use_bias=False)(x)
@@ -48,7 +53,8 @@ def make_model():
             x = layers.Concatenate()(outs) if len(outs) > 1 else outs[0]
             x = layers.Conv2D(filters, (1, 1), use_bias=False)(x)
             x = layers.BatchNormalization()(x); x = layers.ReLU()(x)
-            x = layers.MaxPool2D((2, 2))(x)
+            if _bi < 2:   # 只池化两次：50x13 输入连池三次会把频率维池成 0
+                x = layers.MaxPool2D((2, 2))(x)
         x = layers.GlobalAveragePooling2D()(x)
         x = layers.Dropout(0.3)(x)
         return models.Model(inp, layers.Dense(NCLASS, activation="softmax", name="scores")(x))

@@ -3,6 +3,15 @@
 
 #include <rtthread.h>
 
+/* TFLM arena 的实际情况（2026-10-23 查证）：
+ * EI SDK 的 arena 有两条路——定义了 EI_CLASSIFIER_ALLOCATION_STATIC 才是静态数组
+ * （可用 DEFINE_SECTION(EI_TENSOR_ARENA_LOCATION) 指定段）；本项目**没定义**它，
+ * 所以走 ei_aligned_calloc(16, arena_size)，从 RT-Thread 堆分配。
+ * 而 link.ld 里 .heap 横跨整个 m55_data_secondary（1.4MB SOC SRAM，快），
+ * 远大于内部 RAM 的 256KB（.bss 已占 244KB）。
+ * ⇒ **模型能变大的真正杠杆就是把模型头的 arena_size 调大**（KWS_ARENA_SIZE），
+ *    而不是把模型压成 18.6KB。内部 RAM 从来不是瓶颈，堆才是可用的那块。*/
+
 #ifdef __cplusplus
 extern "C" {
 #endif
