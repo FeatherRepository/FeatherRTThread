@@ -20,7 +20,7 @@ os.makedirs(OUT, exist_ok=True)
 VERSION = os.environ.get("KWS_VERSION", "v10")
 # 数据集口径随版本走：v11 的标签是**逐窗**的（词区才算正例，词间静音归负例），
 # v10 及以前是整份文件一个标签——审计证明那会把 TTS 的静音垫也教成唤醒词。
-if VERSION in ("v11", "v12", "v13", "v14", "v15", "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24"):
+if VERSION in ("v11", "v12", "v13", "v14", "v15", "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26"):
     from dataset_v11 import build
 else:
     from dataset_v10 import build

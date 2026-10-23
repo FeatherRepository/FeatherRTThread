@@ -197,7 +197,7 @@ def load_legacy(pos_vad=True):
     items = []
     g = 0
     for pat in (("xiaomai", "pos_*.wav"), ("xiaomai_v4", "pos_*.wav"),
-                ("xiaomai_v5", "pos_*.wav")):
+                ("xiaomai_v5", "pos_*.wav"), ("xiaomai_v6", "pos_*.wav")):
         for p in sorted(glob.glob(os.path.join(LEGACY, *pat))):
             g += 1
             x = read_wav16k(p)
