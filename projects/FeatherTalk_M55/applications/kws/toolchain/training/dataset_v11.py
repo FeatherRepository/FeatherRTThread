@@ -45,6 +45,11 @@ NORM_LEVEL = float(os.environ.get("KWS_NORM_LEVEL", "0") or 0)
 # 代码保留，是对"A I人声+换人增强能否替代真人样本"这个问题的一次否定回答。
 KWS_SPK_AUG = int(os.environ.get("KWS_SPK_AUG", "0"))
 
+# 板载声路模拟（KWS_BOARD_SIM）：对每条干净 TTS 正样本生成 N 条"板载喇叭→麦"路径的
+# 合成正样本（随机 RIR + 从已有板载采集估出的频响/底噪）。不需要真人再采集，
+# 直接把干净 TTS 的域搬到板载路径上——解决"干净 TTS 训不出板载召回"的域差问题。
+KWS_BOARD_SIM = int(os.environ.get("KWS_BOARD_SIM", "0") or 0)
+
 # SpecAugment（训练侧正则，参考 microWakeWord）：对 650 维 MFCC 做时间/频率掩码，
 # 每个窗口额外生成 KWS_SPEC_AUG 条掩码副本（0=关）。它不是"加数据"，而是逼模型
 # 在被遮挡时仍认得出唤醒词，抑制对局部纹理的过拟合——v12 用它测"数据/正则能否救 14.8KB"。
@@ -412,6 +417,26 @@ def build(n_aug=1, seed=42, verbose=True, legacy=None, holdout=True):
     items = corpus + (load_legacy() if legacy is None or legacy else [])
     if os.environ.get("KWS_TRANSIENT_RAW", "1") != "0":
         items += load_transient_raw()
+    if KWS_BOARD_SIM > 0:
+        from board_sim import estimate_board_profile, simulate_board
+        _src_roots = [os.path.join(DATA, "wakeword", d) for d in ("xiaomai", "xiaomai_v4", "xiaomai_v5")]
+        _caps = sorted(glob.glob(os.path.join(DATA, "boardmic", "*")))
+        _prof = estimate_board_profile(_caps, _src_roots)
+        _srng = np.random.default_rng(seed + 4242)
+        _n = 0
+        for _it in list(items):
+            if _it["kind"] == "legacy_pos" and _it.get("spans"):
+                for _k in range(KWS_BOARD_SIM):
+                    _xa = simulate_board(_it["x"], _prof, _srng)
+                    _sp = vad_spans(_xa)
+                    if not _sp:
+                        continue
+                    items.append({"kind": "legacy_sim", "name": "%s_sim%d" % (_it["name"], _k),
+                                  "x": _xa, "spans": _sp, "bad": None, "grp": 800000 + _n})
+                    _n += 1
+        if verbose:
+            print("板载声路模拟：新增 %d 条合成板载正样本（每正样本 %d 条，底噪 %.0f）"
+                  % (_n, KWS_BOARD_SIM, _prof["noise_rms"]))
     hold = holdout_groups(items) if holdout else set()
     rng = np.random.default_rng(seed)
     X, y, g = [], [], []

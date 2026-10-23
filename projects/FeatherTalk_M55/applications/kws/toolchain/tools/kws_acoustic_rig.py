@@ -328,6 +328,9 @@ def default_scenarios():
         # v4 的 32 条多音色 TTS 正样本此前 rig 从未用过——正样本是 v11 的瓶颈（v9/v10 只有
         # 1 条真实正样本进训练），这里补进来：同一句话、不同音色/语速，经板载声路采集。
         {"name": "wake_tts_v4", "kind": "pos", "files": files_of("xiaomai_v4", "pos_", 32)},
+        # 对数扫频（实测板载冲激响应用）：kind=neg 只为让 rig 自动播放并录制，
+        # 不参与训练；录下来做反卷积就能拿到板子的真实 IR。
+        {"name": "sweep", "kind": "neg", "files": files_in("sweep", 1)},
         # 近词源从 8 扩到全部 24：小卖/小迈/买卖/卖麦/小麦/小麦麦/小麦苗…（10-21 凌晨
         # 实测近词是仅次于"起音"的第二大误触源，8 条源只够覆盖 1/3 的词形）
         {"name": "nearword", "kind": "neg", "files": files_of("nearwords", "neg_", 24)},
