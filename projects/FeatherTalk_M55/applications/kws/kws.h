@@ -57,10 +57,13 @@ extern "C" {
 #define KWS_HIST_HITS         2
 #endif
 
-/* KWS 线程优先级（20 = 与已验证的 XiaoZhi 实现一致；
- * 若与 UI 抢占有影响，可调到 25） */
+/* KWS 线程优先级。
+ * 2026-10-23 修正：原为 20（与 msh shell 同级）。rig 灌数据时 shell 要解析几百行 hex，
+ * 与 KWS 线程同优先级互相抢，导致音频缓冲溢出——实测大模型（NN 61ms）交付率从 58% 崩到 19%，
+ * 召回测量被严重削弱。这里提到 shell 之上（串口接收是中断驱动的，不会丢数据，只是解析变慢）。
+ * RT-Thread 里数字越小优先级越高；msh shell 默认 20，故取 10。 */
 #ifndef KWS_THREAD_PRIORITY
-#define KWS_THREAD_PRIORITY   20
+#define KWS_THREAD_PRIORITY   10
 #endif
 
 /* 开机自启：1 = main() 里 IPC/UI 就绪后自动 kws_start()（无需手动敲命令）。
