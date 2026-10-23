@@ -20,7 +20,7 @@ os.makedirs(OUT, exist_ok=True)
 VERSION = os.environ.get("KWS_VERSION", "v10")
 # 数据集口径随版本走：v11 的标签是**逐窗**的（词区才算正例，词间静音归负例），
 # v10 及以前是整份文件一个标签——审计证明那会把 TTS 的静音垫也教成唤醒词。
-if VERSION in ("v11", "v12", "v13", "v14", "v15", "v17"):
+if VERSION in ("v11", "v12", "v13", "v14", "v15", "v17", "v18", "v19", "v20"):
     from dataset_v11 import build
 else:
     from dataset_v10 import build
@@ -82,6 +82,11 @@ def main():
 
     cw = {0: len(ytr) / (2 * max(1, (ytr == 0).sum())),
           1: len(ytr) / (2 * max(1, (ytr == 1).sum()))}
+    # 负类权重倍率（KWS_NEG_MULT，默认 1）：>1 让模型更保守、压误触（v19 用）。
+    _nm = float(os.environ.get("KWS_NEG_MULT", "1") or 1)
+    if _nm != 1.0:
+        cw[0] *= _nm
+        print("负类权重 ×%.2f → cw=%s" % (_nm, cw))
     model.fit(Xtr, ytr, validation_data=(Xva, yva), epochs=int(os.environ.get("KWS_EPOCHS", "60")), batch_size=32,
               class_weight=cw, verbose=2,
               callbacks=[callbacks.EarlyStopping(patience=12, restore_best_weights=True)])
