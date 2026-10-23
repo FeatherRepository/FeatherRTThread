@@ -42,7 +42,12 @@ if not os.path.isfile(firmware_source):
 # 显式源清单: btfw_data.c (旧 BTANT 变体) 不再参与构建,
 # 统一使用子模块里板选的 wlbga 固件 (与 AIROC 参考同一份)
 src = [os.path.join(bt_root, f) for f in
-       ('bt_main.c', 'bt_hcd_download.c', 'bt_uart_block_rtthread.c',
+       ('bt_service_core.c',  # 原 bt_main.c 拆分: 生命周期/状态机 (INIT 宏集中于此, 保链接序)
+        'bt_diag.c',           # 诊断计数器/事件环/HCI 抓包环
+        'bt_gatt_ft.c',        # GATT 服务 (att 回调/notify/SMP)
+        'bt_adv.c',            # 广播与三态通道管理
+        'bt_bringup.c',        # S0-S5 上电时序/HCD/波特率切换
+        'bt_hcd_download.c', 'bt_uart_block_rtthread.c',
         'hal_uart_dma_rtthread.c', 'hal_cpu_rtthread.c', 'hal_time_ms_rtthread.c',
         'bt_a2dp_sink.c',    # M4b: A2DP sink + AVRCP + 媒体包 -> 跨核 ring
         'bt_a2dp_source.c',  # M5: A2DP source + 反向 ring -> 蓝牙耳机
