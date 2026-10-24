@@ -8,7 +8,7 @@ train_kws.py — 训练「小麦小麦」唤醒词 DS-CNN 并导出 int8 TFLite
       版本号由环境变量 KWS_VERSION 决定，默认 v10；只有显式 KWS_VERSION=v9 才写板上产物
       kws_xiaomai.tflite —— 10-18 曾差点用 v10 覆盖掉固件引用的 v9。
 """
-import os, json
+import os, json, re
 import numpy as np
 
 import tensorflow as tf
@@ -18,9 +18,13 @@ OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
 os.makedirs(OUT, exist_ok=True)
 
 VERSION = os.environ.get("KWS_VERSION", "v10")
+# 两级 verifier：ROLE=stage1（默认，一级宽召回）| verifier（二级收紧，吃难负样本）
+ROLE = os.environ.get("KWS_ROLE", "stage1").lower()
 # 数据集口径随版本走：v11 的标签是**逐窗**的（词区才算正例，词间静音归负例），
 # v10 及以前是整份文件一个标签——审计证明那会把 TTS 的静音垫也教成唤醒词。
-if VERSION in ("v11", "v12", "v13", "v14", "v15", "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27"):
+# v32 起是两级模型（stage1=v32a / verifier=v32v），同样走 v11 口径。
+_m = re.match(r"v(\d+)", VERSION)
+if _m and int(_m.group(1)) >= 11:
     from dataset_v11 import build
 else:
     from dataset_v10 import build
@@ -39,12 +43,12 @@ def make_model():
     # big = 大容量版：arena 已确认走 1.4MB 堆分配（不是 256KB 内部 RAM），模型可以做大 10 倍。
     _arch = os.environ.get("KWS_ARCH", "dscnn").lower()
     if _arch in ("mixconv", "big"):
-        _w = int(os.environ.get("KWS_WIDTH", "2" if _arch == "big" else "1"))
-        x = layers.Conv2D(16 * _w, (3, 3), strides=2, padding="same", use_bias=False)(x)
+        _w = float(os.environ.get("KWS_WIDTH", "2" if _arch == "big" else "1"))
+        x = layers.Conv2D(int(16 * _w), (3, 3), strides=2, padding="same", use_bias=False)(x)
         x = layers.BatchNormalization()(x); x = layers.ReLU()(x)
-        for _bi, (filters, kernels) in enumerate(((32 * _w, ((3, 3), (5, 5))),
-                                                 (64 * _w, ((3, 3), (5, 5))),
-                                                 (128 * _w, ((3, 3),)))):
+        for _bi, (filters, kernels) in enumerate(((int(32 * _w), ((3, 3), (5, 5))),
+                                                 (int(64 * _w), ((3, 3), (5, 5))),
+                                                 (int(128 * _w), ((3, 3),)))):
             outs = []
             for k in kernels:
                 y = layers.DepthwiseConv2D(k, padding="same", use_bias=False)(x)
@@ -86,6 +90,13 @@ def make_model():
 
 
 def main():
+    # verifier 默认吃难负样本、负权重更高（精度导向）；一级故意不用（宽召回导向）
+    if ROLE == "verifier" and os.environ.get("KWS_HARD_NEG") is None:
+        os.environ["KWS_HARD_NEG"] = "1"
+    if ROLE == "verifier" and os.environ.get("KWS_NEG_MULT") is None:
+        os.environ["KWS_NEG_MULT"] = "2.0"
+    print("=== KWS_ROLE=%s  VERSION=%s ===" % (ROLE, VERSION))
+
     X, y, grp = build(n_aug=2, seed=42)             # (N,650) 直接作为输入
 
     # 验证集按**源文件**整份留出：密相位窗互为近重复，按窗随机切会让 EarlyStopping

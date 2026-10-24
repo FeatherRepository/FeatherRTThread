@@ -95,6 +95,34 @@ static float         s_score_max = 0.0f;
 static float         s_conf        = KWS_CONFIDENCE;
 static int           s_hist_hits   = KWS_HIST_HITS;
 static uint32_t      s_cooldown_ms = KWS_COOLDOWN_MS;
+
+/* ---------------- 二级 verifier（两级唤醒判定） ----------------
+ * 一级（EI 主模型）低门控 → 二级（独立 TFLM 实例）高阈值确认。
+ * 二级与一级**完全独立**：自己的模型（kws_verif.h）、自己的 arena（堆分配）、
+ * 自己的解释器；但复用一级的环形缓冲与 signal_get_data——同一 1s 窗 ⇒ 同一份
+ * MFCC 特征（extract_mfcc_features 与 run_classifier 内部调的是同一个函数，
+ * eval_dump_features 已验证两条路特征一致）。
+ * 设计依据见 kws.h 的 KWS_VERIF_* 注释与 local_ai/docs/HARDWARE_FACTS.md。 */
+#if KWS_VERIF_ENABLE
+#include "kws_verif.h"        /* export_model.py vNN --name kws_verif 生成 */
+#include "tensorflow/lite/micro/micro_interpreter.h"
+#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+
+/* 二级的三个大对象（解释器 ~172B / resolver ~540B / 特征缓冲 2.6KB）全部放堆：
+ * 内部 RAM（m55_data_INTERNAL 256KB，.bss 已逼近 252KB 上限）放不下，
+ * 10-24 链接器实测 overflow——堆（m55_data_secondary 1.4MB）有的是空间。
+ * 与 s_verif_arena（二级 arena）一样，init 时分配、永不释放（模块级单例）。 */
+static tflite::MicroInterpreter *s_verif       = RT_NULL;
+static uint8_t                *s_verif_arena  = RT_NULL;
+static float                  *s_verif_feat   = RT_NULL;
+static float                   s_verif_gate   = KWS_VERIF_GATE;
+static float                   s_verif_conf   = KWS_VERIF_CONF;
+static bool                    s_verif_ok     = false;
+static uint32_t                s_verif_runs   = 0;   /* 二级被调次数（门控命中数） */
+static uint32_t                s_verif_fails  = 0;   /* 二级推理失败次数 */
+static float                   s_verif_last   = -1.0f;
+static float                   s_verif_max    = 0.0f;
+#endif
 static volatile int  s_dump_frames = 0;      /* >0 时线程进入转储模式：把麦克风样本流到串口 */
 static volatile int  s_dump_idx = 0;         /* 已吐出的帧号，写进每行行首给 PC 定位（丢行可检出） */
 /* kws capture：先把连续音频录进 RAM，录满后再按帧回吐串口。
@@ -207,6 +235,117 @@ static int signal_get_data(size_t offset, size_t length, float *out_ptr)
     numpy::int16_to_float(&s_ring[offset], out_ptr, length);
     return 0;
 }
+
+#if KWS_VERIF_ENABLE
+/* 二级初始化：独立解释器 + 独立 arena（堆）。失败不致命——退化为单级判定。 */
+static void verifier_init(void)
+{
+    const tflite::Model *model = tflite::GetModel(kws_verif);
+    if (model->version() != TFLITE_SCHEMA_VERSION)
+    {
+        LOG_E("[verif] schema 版本不匹配 (%d != %d)，二级停用",
+              (int)model->version(), (int)TFLITE_SCHEMA_VERSION);
+        return;
+    }
+    /* 全部对象从堆分配（内部 RAM 实测只剩 1536 字节余量：
+     * .data 6272 + .noinit 152 + .bss 250088 = 256512 / 262144，再留 4KB 栈）。
+     * resolver 用**精简算子表**（与 EI SDK 给一级用的 tflite-resolver.h 同一套 12 个）：
+     * AllOpsResolver 光对象就 ~10KB，静态放必溢出。 */
+    typedef tflite::MicroMutableOpResolver<12> VerifResolver;
+    void *rmem = rt_malloc(sizeof(VerifResolver));
+    if (rmem == RT_NULL)
+    {
+        LOG_E("[verif] resolver 分配失败（%d 字节），二级停用", (int)sizeof(VerifResolver));
+        return;
+    }
+    VerifResolver *resolver = new (rmem) VerifResolver();
+    resolver->AddConv2D();
+    resolver->AddFullyConnected();
+    resolver->AddMaxPool2D();
+    resolver->AddReshape();
+    resolver->AddSoftmax();
+    resolver->AddDepthwiseConv2D();
+    resolver->AddMean();
+    resolver->AddShape();
+    resolver->AddPack();
+    resolver->AddStridedSlice();
+    resolver->AddConcatenation();
+    resolver->AddReduceMax();
+
+    s_verif_arena = (uint8_t *)rt_malloc(KWS_VERIF_ARENA_BYTES);
+    s_verif_feat = (float *)rt_malloc(650 * sizeof(float));
+    void *imem = rt_malloc(sizeof(tflite::MicroInterpreter));
+    if (s_verif_arena == RT_NULL || s_verif_feat == RT_NULL || imem == RT_NULL)
+    {
+        LOG_E("[verif] arena/特征/解释器分配失败，二级停用");
+        return;
+    }
+    /* placement new：MicroInterpreter 无默认构造；本工程 startup 不走 init_array，
+     * 与 EI 句柄的手动构造同一套办法（见 kws_init）。 */
+    s_verif = new (imem) tflite::MicroInterpreter(model, *resolver,
+                                                  s_verif_arena, KWS_VERIF_ARENA_BYTES);
+    if (s_verif->AllocateTensors(false) != kTfLiteOk)
+    {
+        LOG_E("[verif] AllocateTensors 失败（arena %d 不够？模型 %d 字节），二级停用",
+              KWS_VERIF_ARENA_BYTES, (int)kws_verif_len);
+        s_verif = RT_NULL;
+        return;
+    }
+    int n_in = (int)(s_verif->input(0)->bytes / sizeof(int8_t));
+    if (n_in != 650)
+    {
+        LOG_E("[verif] 输入 %d != 650（与一级窗口口径不一致），二级停用", n_in);
+        s_verif = RT_NULL;
+        return;
+    }
+    s_verif_ok = true;
+    LOG_I("[verif] 二级模型就绪: 模型=%d字节 arena=%d(实际%d) 输入650 输出%d类 gate=%.2f conf=%.2f",
+          (int)kws_verif_len, KWS_VERIF_ARENA_BYTES, (int)s_verif->arena_used_bytes(),
+          (int)(s_verif->output(0)->bytes / sizeof(int8_t)),
+          s_verif_gate, s_verif_conf);
+}
+
+/* 二级打分：对**当前 1s 窗**（与一级同一段 s_ring）提取 MFCC → 量化 → 推理。
+ * 返回 P(xiaomai)；任何失败返回 -1（调用方按"未确认"处理，绝不放行）。 */
+static float verifier_score(void)
+{
+    if (!s_verif_ok || s_verif == RT_NULL)
+        return -1.0f;
+
+    /* 与 eval_dump_features 同一条已验证路径：extract_mfcc_features（含 cmvnw） */
+    float *feat = s_verif_feat;
+    if (feat == RT_NULL)
+        return -1.0f;
+    matrix_t fm(1, 650, feat);
+    signal_t vsig;
+    vsig.total_length = EI_CLASSIFIER_RAW_SAMPLE_COUNT;
+    vsig.get_data = &signal_get_data;
+    if (extract_mfcc_features(&vsig, &fm, (void *)&ei_dsp_config_333519_2,
+                              (float)EI_CLASSIFIER_FREQUENCY) != EIDSP_OK)
+    {
+        s_verif_fails++;
+        return -1.0f;
+    }
+
+    TfLiteTensor *in = s_verif->input(0);
+    int8_t *tin = in->data.int8;
+    float iscale = in->params.scale;
+    int izp = in->params.zero_point;
+    for (int i = 0; i < 650; i++)
+    {
+        int q = (int)(feat[i] / iscale + 0.5f) + izp;   /* feat 已归一化过，非负 */
+        tin[i] = (int8_t)(q < -128 ? -128 : (q > 127 ? 127 : q));
+    }
+    if (s_verif->Invoke() != kTfLiteOk)
+    {
+        s_verif_fails++;
+        return -1.0f;
+    }
+    TfLiteTensor *out = s_verif->output(0);
+    /* 输出 2 类：index 1 = xiaomai（与一级 label 口径一致） */
+    return ((float)out->data.int8[1] - (float)out->params.zero_point) * out->params.scale;
+}
+#endif /* KWS_VERIF_ENABLE */
 
 /* ---------------- 推理 ---------------- */
 
@@ -1063,7 +1202,38 @@ static void kws_thread(void *param)
             if (s_score_hist[hb] < 0xFFFF) s_score_hist[hb]++;
             if (ww > s_score_max) s_score_max = ww;
 
-            s_hist[s_hist_pos % KWS_HIST_LEN] = (ww > s_conf) ? 1 : 0;
+            /* ---- 唤醒判定：一级门控 → 二级 verifier 确认 → 持续性判据 ----
+             * 一级用低门控（宽召回）：漏一个窗就丢掉一次唤醒机会，所以门要低；
+             * 二级用高阈值（精度）：专门在"一级高分误触窗"上训练过，把一级放进来的
+             * nearword_sentence/reply/transient/板载负样本挡在门外。
+             * 只有一级过门控的 hop 才花二级的 CPU（DSP 重提取 + NN）。 */
+            int hit = 0;
+#if KWS_VERIF_ENABLE
+            if (s_verif_ok)
+            {
+                if (ww > s_verif_gate)
+                {
+                    float vs = verifier_score();
+                    s_verif_runs++;
+                    s_verif_last = vs;
+                    if (vs > s_verif_max) s_verif_max = vs;
+                    hit = (vs >= 0.0f && vs >= s_verif_conf);
+#if KWS_VERIF_LOG
+                    if (s_verif_runs % 5 == 0 || hit)
+                        LOG_I("[verif] #%u gate=%.2f→verif=%.2f %s",
+                              s_inferences, ww, vs, hit ? "HIT" : "rej");
+#endif
+                }
+                /* ww ≤ 门控：hit=0（一级都没看上的窗，二级不用跑） */
+            }
+            else
+            {
+                hit = (ww > s_conf);          /* 二级不可用 → 退化单级（v31 行为） */
+            }
+#else
+            hit = (ww > s_conf);
+#endif
+            s_hist[s_hist_pos % KWS_HIST_LEN] = (uint8_t)hit;
             s_hist_pos++;
 
             {
@@ -1159,6 +1329,13 @@ int kws_init(void)
         LOG_I("KWS 环形缓冲 %d 字节（堆）", EI_CLASSIFIER_RAW_SAMPLE_COUNT * (int)sizeof(int16_t));
     }
 
+#if KWS_VERIF_ENABLE
+    /* 二级 verifier：独立解释器 + arena（堆）。放在线程创建前——失败也只是停用二级，
+     * 单级判定照常工作。模型头 kws_verif.h 由 export_model.py --name kws_verif 生成，
+     * 与一级模型头 tflite_learn_333519_3.h 符号不重名，可同时链入。 */
+    verifier_init();
+#endif
+
     s_tid = rt_thread_create("kws", kws_thread, RT_NULL, 8192,
                              KWS_THREAD_PRIORITY, 5);
     if (s_tid == RT_NULL)
@@ -1252,6 +1429,12 @@ int kws_info(void)
     LOG_I("窗口: %dms / hop %dms", KWS_WINDOW_MS, KWS_HOP_MS);
     LOG_I("模型: %s (sr=%dHz, %dms/窗)", EI_CLASSIFIER_PROJECT_NAME,
           EI_CLASSIFIER_FREQUENCY, KWS_WINDOW_MS);
+#if KWS_VERIF_ENABLE
+    LOG_I("二级: %s（门控 %d%% → 确认 %d%%，调用 %u 次/失败 %u，最近 %.2f 峰值 %.2f）",
+          s_verif_ok ? "启用" : "停用",
+          (int)(s_verif_gate * 100), (int)(s_verif_conf * 100),
+          s_verif_runs, s_verif_fails, s_verif_last, s_verif_max);
+#endif
     LOG_I("推理: %u 次，命中: %u 次，唤醒词最近分数: %d%%",
           s_inferences, s_detections, (int)(s_last_score * 100));
     {
@@ -1894,6 +2077,8 @@ static int cmd_kws(int argc, char **argv)
         rt_kprintf("  kws conf  [0~100]    读/改唤醒阈值（%%，运行期生效）\n");
         rt_kprintf("  kws hits  [1~3]      读/改确认窗数（最近 3 窗里要几窗超阈值）\n");
         rt_kprintf("  kws cool  [ms]       读/改两次命中的最小间隔\n");
+        rt_kprintf("  kws verif [off|on|gate <0~100>|conf <0~100>]  二级 verifier 状态/调参\n");
+        rt_kprintf("                         （一级低门控宽召回 → 二级高阈值确认，两级都过才唤醒）\n");
         rt_kprintf("  kws reset            清零分数直方图（换场景前用）\n");
         rt_kprintf("  kws mic [秒]         免SD麦克风实测（默认3秒，输出电平统计）\n");
         rt_kprintf("  kws dump [秒]        麦克风原始PCM以hex行流向串口（实时流会丢帧）\n");
@@ -1992,6 +2177,58 @@ static int cmd_kws(int argc, char **argv)
               (int)(s_conf * 100.0f), s_hist_hits, KWS_HIST_LEN, (unsigned)s_cooldown_ms);
         return 0;
     }
+    else if (!strcmp(argv[1], "verif"))
+    {
+        /* 二级 verifier 运行期调参：门控/确认阈值都能在会话里扫，不用重烧固件 */
+#if KWS_VERIF_ENABLE
+        if (argc >= 3)
+        {
+            if (!strcmp(argv[2], "off"))
+            {
+                s_verif_ok = false;
+                LOG_I("二级已停用（退化单级，阈值 %d%%）", (int)(s_conf * 100.0f));
+            }
+            else if (!strcmp(argv[2], "on"))
+            {
+                if (s_verif != RT_NULL)
+                {
+                    s_verif_ok = true;
+                    LOG_I("二级已启用");
+                }
+                else
+                {
+                    LOG_E("二级模型未初始化，无法启用");
+                    return -1;
+                }
+            }
+            else if (!strcmp(argv[2], "gate") && argc >= 4)
+            {
+                int v = atoi(argv[3]);
+                if (v < 0 || v > 100) { LOG_E("门控是 0~100 的百分数"); return -1; }
+                s_verif_gate = v / 100.0f;
+            }
+            else if (!strcmp(argv[2], "conf") && argc >= 4)
+            {
+                int v = atoi(argv[3]);
+                if (v < 0 || v > 100) { LOG_E("确认阈值是 0~100 的百分数"); return -1; }
+                s_verif_conf = v / 100.0f;
+            }
+            else
+            {
+                LOG_E("用法: kws verif [off|on|gate <0~100>|conf <0~100>]");
+                return -1;
+            }
+        }
+        LOG_I("二级: %s（门控 %d%% → 确认 %d%%，调用 %u 次/失败 %u，最近 %.2f 峰值 %.2f）",
+              s_verif_ok ? "启用" : "停用",
+              (int)(s_verif_gate * 100.0f), (int)(s_verif_conf * 100.0f),
+              s_verif_runs, s_verif_fails, s_verif_last, s_verif_max);
+        return 0;
+#else
+        LOG_I("本固件未编入二级 verifier（KWS_VERIF_ENABLE=0）");
+        return 0;
+#endif
+    }
     else if (!strcmp(argv[1], "reset"))
     {
         memset(s_score_hist, 0, sizeof(s_score_hist));
@@ -2021,5 +2258,5 @@ static int cmd_kws(int argc, char **argv)
     rt_kprintf("未知子命令: %s\n", argv[1]);
     return -1;
 }
-MSH_CMD_EXPORT_ALIAS(cmd_kws, kws, KWS: start|stop|testevt|info|mic|conf|hits|cool|reset|capture|eval|dsp|pushstart|push|pushstat|play|stopplay|echo);
+MSH_CMD_EXPORT_ALIAS(cmd_kws, kws, KWS: start|stop|testevt|info|mic|conf|hits|cool|verif|reset|capture|eval|dsp|pushstart|push|pushstat|play|stopplay|echo);
 #endif

@@ -57,6 +57,48 @@ extern "C" {
 #define KWS_HIST_HITS         2
 #endif
 
+/* ============================================================
+ * 二级 verifier（两级唤醒判定，2026-10-24 加入）
+ *
+ * 背景：v11.4→v31 十七个版本全部落在同一条"召回 vs 精确"权衡曲线上——
+ * 加正样本召回升、误触跟着涨；压负样本误触降、召回归零。单级模型做不到两头都要。
+ * v27~v31 证明容量（18.6KB→93KB）不是根因，根因是**单级决策边界**：
+ * nearword_sentence（"小麦麦真好吃"）/ reply（"我在"）/ transient 的分数分布
+ * 与正样本大面积重叠（v31 挖出 169 个 1s 窗，一级打分最高到 1.00）。
+ *
+ * 方案（OpenWakeWord 的标准做法）：一级宽召回 + 二级收紧。
+ *   一级 = 现役大模型，**低门控**（KWS_VERIF_GATE，只求不漏）；
+ *   二级 = 独立 TFLM 实例（kws_verif.h，同一份 1s MFCC 特征，复用同一环形缓冲），
+ *          专门在"一级高分误触窗"（mine_hard_negs.py 产物）上训练过，
+ *          **高阈值**（KWS_VERIF_CONF）才放行。
+ *   两级都过 → 记 1 个命中窗，仍走 KWS_HIST_HITS 持续性判据。
+ *
+ * 代价：只有一级过门控的 hop 才跑二级（DSP 重提取 ~17ms + NN ~60ms），
+ * 负样本占多数的场景几乎不额外花 CPU。verifier 初始化失败时自动退化为单级
+ * （ww > KWS_CONFIDENCE），行为回落到 v31。
+ * ============================================================ */
+#ifndef KWS_VERIF_ENABLE
+#define KWS_VERIF_ENABLE      1
+#endif
+/* 一级门控（宽召回）：低于它不跑二级、直接记 0。
+ * v31 板测分数带：真人峰 61~90、难负样本峰最高 100 —— 门控取 0.50 让大部分
+ * 正样本窗都能进二级，由二级做精度。运行期可用 `kws verif gate <0~100>` 改。 */
+#ifndef KWS_VERIF_GATE
+#define KWS_VERIF_GATE        0.50f
+#endif
+/* 二级确认阈值（精度）：二级是"在难负样本上训练过的收紧器"，
+ * 0.75 起试，按板测误触/召回再调。运行期 `kws verif conf <0~100>` 改。 */
+#ifndef KWS_VERIF_CONF
+#define KWS_VERIF_CONF        0.75f
+#endif
+/* 二级 arena：tensor 总字节实测 ~119KB（大模型），256KB 含 scratch 足够。
+ * 从同一块 1.4MB 堆分配（一级已占 512KB）。 */
+#define KWS_VERIF_ARENA_BYTES (256 * 1024)
+/* 二级门控命中时打印一行 gate/verif 分数（调参期开，平时关省串口） */
+#ifndef KWS_VERIF_LOG
+#define KWS_VERIF_LOG         1
+#endif
+
 /* KWS 线程优先级。
  * 2026-10-23 修正：原为 20（与 msh shell 同级）。rig 灌数据时 shell 要解析几百行 hex，
  * 与 KWS 线程同优先级互相抢，导致音频缓冲溢出——实测大模型（NN 61ms）交付率从 58% 崩到 19%，

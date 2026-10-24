@@ -56,10 +56,15 @@ KWS_BOARD_SIM = int(os.environ.get("KWS_BOARD_SIM", "0") or 0)
 KWS_SPEC_AUG = int(os.environ.get("KWS_SPEC_AUG", "0"))
 
 SR = 16000
-WIN = 16000
+# 窗长可配（KWS_WIN_MS）：一级固定 1000ms（与固件 signal_get_data 的 16000 口径一致）；
+# verifier 如需 2s 长窗上下文，设 KWS_WIN_MS=2000（注意合成负样本长度与短负样本
+# 补齐逻辑都按 WIN 走，load_hard_negs 的 1s 难负窗也会被跳过——见 build() 注释）。
+WIN = int(round(16000 * float(os.environ.get("KWS_WIN_MS", "1000") or 1000) / 1000.0))
 STRIDE = 800                 # 50ms = 验收 --jitter 10 的同一套窗相位
 FRAME = 160                  # 回吐帧 = 10ms
-POS_OVERLAP = 0.5 * WIN      # 与词重叠半个窗以上才算正例
+# 正例判据：与词重叠 ≥0.5s（绝对量，不随窗长放大——verifier 若用 2s 窗，词常只占尾段，
+# 用"半个窗"会把最贴近部署形态的窗全判成骑窗丢掉）
+POS_OVERLAP = 0.5 * min(WIN, 16000)
 VAD_FRAC = 0.15              # 有声判据：帧 RMS > 该文件 p95 的 15%
 
 
@@ -213,10 +218,32 @@ def load_legacy(pos_vad=True):
     for pat in (("xiaomai", "neg_*.wav"), ("xiaomai_v4", "neg_*.wav"), ("nearwords", "*.wav"),
                 ("zh", "*.wav"), ("en", "*.wav")):
         neg += sorted(glob.glob(os.path.join(LEGACY, *pat)))
+    # 设备应答语（"我在/在呢/来啦"）：v11.4 板测 reply 误触 97.3/h 的大户，
+    # 但 10-24 审计发现它**从没进过训练**（只在 rig 场景里播，靠板采负样本间接覆盖）。
+    # 干净 TTS 版直接进来，gen_reply_corpus.py 产物。
+    neg += sorted(glob.glob(os.path.join(DATA, "reply", "*.wav")))
     neg += sorted(glob.glob(os.path.join(REAL, "ambient_*.wav")))
     for i, p in enumerate(neg):
         items.append({"path": p, "x": read_wav16k(p), "spans": [], "bad": None,
                       "grp": 60000 + i, "kind": "legacy_neg", "name": os.path.basename(p)})
+    return items
+
+
+def load_hard_negs():
+    """难负样本：一级模型（stage1）在负样本音频上打出高分的那些窗（mine_hard_negs.py 产物）。
+
+    为什么单独一类：v30/v31 板测证实误触集中在 nearword_sentence / zh_sentence / reply
+    这几类**语音负样本**上，而普通训练里它们和几百条合成负样本混在一起、权重被稀释。
+    把"一级真正看走眼的窗"挖出来重点学，verifier 才能在一级的失效点上下功夫。
+    每条 = 恰好 WIN 个样本（16000），spans=[] ⇒ label_windows 只出一个负例窗。
+    """
+    items = []
+    for i, p in enumerate(sorted(glob.glob(os.path.join(DATA, "hard_negs", "*.wav")))):
+        x = read_wav16k(p)
+        if x.size < WIN:
+            continue
+        items.append({"path": p, "x": x, "spans": [], "bad": None,
+                      "grp": 90000 + i, "kind": "hard_neg", "name": os.path.basename(p)})
     return items
 
 
@@ -417,6 +444,12 @@ def build(n_aug=1, seed=42, verbose=True, legacy=None, holdout=True):
     items = corpus + (load_legacy() if legacy is None or legacy else [])
     if os.environ.get("KWS_TRANSIENT_RAW", "1") != "0":
         items += load_transient_raw()
+    # 难负样本（verifier 专用；一级模型故意不用——它要的是宽召回，精度交给二级）
+    if os.environ.get("KWS_HARD_NEG", "0") != "0":
+        _hn = load_hard_negs()
+        items += _hn
+        if verbose:
+            print("难负样本（一级高分误触窗）：%d 条 → 全部按负例训练" % len(_hn))
     if KWS_BOARD_SIM > 0:
         from board_sim import estimate_board_profile, simulate_board
         _src_roots = [os.path.join(DATA, "wakeword", d) for d in ("xiaomai", "xiaomai_v4", "xiaomai_v5")]

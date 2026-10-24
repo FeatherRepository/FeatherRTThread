@@ -7,19 +7,28 @@ export_model.py — 把训练好的 int8 TFLite 转成固件可用的头文件
 用法：
     python export_model.py            # 板上v9产物：out/kws_xiaomai.tflite → tflite_learn_333519_3.h
     python export_model.py v11        # 版本化：out/kws_xiaomai_v11.tflite → tflite_learn_333519_3_v11.h
+    python export_model.py v32v --name kws_verif   # verifier：符号改名（与一级模型头文件共存）
 输出：out/tflite_learn_333519_3.h（或版本化名字）  +  out/INTEGRATION.md
 """
-import os, json, sys
+import os, json, sys, argparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "out")
 # 可选版本参数：python export_model.py v11 → 读 out/kws_xiaomai_v11.tflite，写版本化头文件。
 # 不给参数时保持老行为（out/kws_xiaomai.tflite → tflite_learn_333519_3.h），那是板上引用的文件。
-VERSION = (sys.argv[1].lstrip("v") if len(sys.argv) > 1 else "")
+_ap = argparse.ArgumentParser()
+_ap.add_argument("ver", nargs="?", default="")
+_ap.add_argument("--name", default="", help="模型符号名（默认 tflite_learn_333519_3；verifier 用 kws_verif）")
+_args = _ap.parse_args()
+VERSION = _args.ver.lstrip("v")
 SUF = ("_v" + VERSION) if VERSION else ""
+SYM = _args.name or "tflite_learn_333519_3"          # 头文件里的数组/长度符号基名
 TFLITE = os.path.join(OUT, "kws_xiaomai%s.tflite" % SUF)
 META = os.path.join(OUT, "kws_xiaomai%s_meta.json" % SUF)
-HEADER = os.path.join(OUT, "tflite_learn_333519_3%s.h" % SUF)
+# --name 给定（verifier 等第二模型）时用固定文件名 out/<name>.h——固件 include 的是
+# 稳定名字，版本号只进 git 留档（手动 cp 一份 *_vNN.h）。不给 --name 时保持老行为
+# （版本化后缀，兼容既有一键替换流程）。
+HEADER = os.path.join(OUT, ("%s.h" % SYM) if _args.name else "%s%s.h" % (SYM, SUF))
 # TFLM arena：张量总和 ~21.3KB + scratch/结构开销。gapmax 池化（GAP+GlobalMax 拼接）
 # 实测在 32768 下 AllocateTensors() failed——CONCATENATION/REDUCE_MAX 的 scratch 更多，
 # 49152 起跑通（10-21 凌晨实测）。环境变量 KWS_ARENA_SIZE 可覆盖。
@@ -59,18 +68,28 @@ MODEL_SECTION(EI_MODEL_SECTION) ALIGN(16) const unsigned char tflite_learn_33351
 """
 
 
+def head_for(sym):
+    """按符号基名生成头文件头（verifier 与一级模型符号不重名才能同时链进固件）。"""
+    guard = "_EI_%s_H_" % sym.upper()
+    return (HEAD
+            .replace("_EI_CLASSIFIER_TFLITE_LEARN_333519_3_H_", guard)
+            .replace("EI_CLASSIFIER_TFLITE_LEARN_333519_3_ARENA_SIZE", "%s_ARENA_SIZE" % sym.upper())
+            .replace("tflite_learn_333519_3_arena_size", "%s_arena_size" % sym)
+            .replace("tflite_learn_333519_3[]", "%s[]" % sym))
+
+
 def main():
     with open(TFLITE, "rb") as f:
         data = f.read()
     n = len(data)
 
-    lines = [HEAD.replace("__ARENA__", str(ARENA_SIZE))]
+    lines = [head_for(SYM).replace("__ARENA__", str(ARENA_SIZE))]
     for i in range(0, n, 12):
         chunk = data[i:i + 12]
         lines.append("  " + ", ".join(f"0x{b:02x}" for b in chunk) + ",")
     lines.append("};\n")
-    lines.append(f"unsigned int tflite_learn_333519_3_len = {n};\n")
-    lines.append("#endif // _EI_CLASSIFIER_TFLITE_LEARN_333519_3_H_\n")
+    lines.append(f"unsigned int {SYM}_len = {n};\n")
+    lines.append("#endif // _EI_%s_H_\n" % SYM.upper())
 
     with open(HEADER, "w") as f:
         f.write("\n".join(lines))

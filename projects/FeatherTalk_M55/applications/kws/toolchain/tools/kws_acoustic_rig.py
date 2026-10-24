@@ -164,16 +164,66 @@ def fit_level(pcm, target_p95=9000.0, peak_cap=32000.0):
     return np.clip(x * g, -32768, 32767).astype("<i2"), round(float(g), 3)
 
 
+def list_out_devices():
+    """枚举 waveOut 输出设备 → [(索引, 名字, 声道数)]（PC+音箱通路选设备用）。"""
+    class WAVEOUTCAPS(ctypes.Structure):
+        _fields_ = [("wMid", ctypes.c_ushort), ("wPid", ctypes.c_ushort),
+                    ("vDriverVersion", ctypes.c_uint),
+                    ("szPname", ctypes.c_wchar * 32),
+                    ("dwFormats", ctypes.c_uint), ("wChannels", ctypes.c_ushort),
+                    ("wReserved1", ctypes.c_ushort), ("dwSupport", ctypes.c_uint)]
+    out = []
+    try:
+        n = winmm.waveOutGetNumDevs()
+    except Exception:
+        return out
+    for i in range(n):
+        caps = WAVEOUTCAPS()
+        if winmm.waveOutGetDevCapsW(i, ctypes.byref(caps), ctypes.sizeof(caps)) == 0:
+            out.append((i, caps.szPname, int(caps.wChannels)))
+    return out
+
+
+def resolve_out_device(spec):
+    """--pc-device 解析：空 → (None, "系统默认")；纯数字 → 索引；否则按名字片段匹配。
+
+    名字匹配优先**最长匹配**（"扬声器 (花再 Evo Play)" 同时含"扬声器"和"花再"，
+    取最具体的那条），多条同分时取索引最小。找不到就报错——PC 源静默回落到默认设备
+    会让整批语料采到错误的物理位置，宁可直接失败。
+    """
+    devs = list_out_devices()
+    if not spec:
+        return None, "系统默认"
+    s = str(spec).strip()
+    if s.isdigit():
+        i = int(s)
+        for d in devs:
+            if d[0] == i:
+                return i, d[1]
+        raise SystemExit("--pc-device %s 越界（现有 %d 个设备）" % (s, len(devs)))
+    hits = [d for d in devs if s.lower() in d[1].lower()]
+    if not hits:
+        raise SystemExit("--pc-device %r 没匹配到设备。可用：%s"
+                         % (s, "; ".join("%d=%s" % (d[0], d[1]) for d in devs)))
+    hits.sort(key=lambda d: (-len(d[1]), d[0]))
+    return hits[0][0], hits[0][1]
+
+
 class Player:
     """winmm waveOut 直接吃内存里的 PCM。
 
     为什么不用 MCI：同一个 WAV 放 C:\\ft\\x.wav 能开、放工程内 119 字符路径就随机报
     304/275，且起播时刻要靠猜。waveOut 没有文件名这层，起播即 waveOutWrite 返回那一刻，
     自测台的时间归因才有硬保证。
+
+    device：waveOut 设备索引（0 起）。None = WAVE_MAPPER（Windows 默认输出设备）。
+    **PC+音箱通路必须显式选设备**：默认设备可能是笔记本内置喇叭/HDMI，声音出去了但
+    位置和距离全错，语料就废了。`--pc-device` 支持索引或名字片段（见 resolve_out_device）。
     """
 
-    def __init__(self, sr=16000):
+    def __init__(self, sr=16000, device=None):
         self.sr = sr
+        self.device = device
         self.hwo = uptr()
         self.hdr = None
         self.buf = None
@@ -184,16 +234,23 @@ class Player:
         return load_pcm(path, self.sr)
 
     def play(self, path):
+        return self.play_pcm(self.to_pcm(path))
+
+    def play_pcm(self, pcm):
+        """直接播内存里的 int16 PCM（PC 源采集用，省掉"先写临时 wav 再读回"）。
+        起播时刻 = waveOutWrite 返回那一刻，与板载 PLAY_BEGIN 的精度同级。"""
         self.close()
-        pcm = self.to_pcm(path)
+        pcm = np.ascontiguousarray(np.asarray(pcm, dtype="<i2"))
         self.buf = ctypes.create_string_buffer(pcm.tobytes(), pcm.nbytes)
         fmt = WAVEFORMATEX(1, 1, self.sr, self.sr * 2, 2, 16, 0)
         self.evt = _kernel32.CreateEventW(None, True, False, None)
         if self.hwo.value is None:
-            r = winmm.waveOutOpen(ctypes.byref(self.hwo), WAVE_MAPPER, ctypes.byref(fmt),
+            dev = WAVE_MAPPER if self.device is None else self.device
+            r = winmm.waveOutOpen(ctypes.byref(self.hwo), dev, ctypes.byref(fmt),
                                   self.evt, 0, CALLBACK_EVENT)
             if r != 0:
-                raise RuntimeError("waveOutOpen 返回 %d（默认输出设备不可用？）" % r)
+                raise RuntimeError("waveOutOpen 返回 %d（设备 %s 不可用？）"
+                                   % (r, "默认" if self.device is None else self.device))
             self.open = True
         self.hdr = WAVEHDR(ctypes.cast(self.buf, uptr), pcm.nbytes, 0, None, 0, 0, None, None)
         if winmm.waveOutPrepareHeader(self.hwo, ctypes.byref(self.hdr), ctypes.sizeof(self.hdr)):
@@ -334,6 +391,12 @@ def default_scenarios():
         # 近词源从 8 扩到全部 24：小卖/小迈/买卖/卖麦/小麦/小麦麦/小麦苗…（10-21 凌晨
         # 实测近词是仅次于"起音"的第二大误触源，8 条源只够覆盖 1/3 的词形）
         {"name": "nearword", "kind": "neg", "files": files_of("nearwords", "neg_", 24)},
+        # 自然语境近词句子（10-24 新增）：**含「小麦」但整句不是唤醒词**。
+        # v30 实测 nearword 203.9/h + zh_sentence 221.5/h，而 v27 只有 2.2/h——差异就是
+        # "正样本加到 73 条后边界变松，但模型没见过小麦嵌在自然句里的形态"。
+        # 现有 nearwords 是 24 条孤立词，补不了这一块；本场景由 gen_sentence_corpus.py 产出。
+        {"name": "nearword_sentence", "kind": "neg",
+         "files": files_of("nearword_sentences", "neg_", 80)},
         {"name": "zh_sentence", "kind": "neg", "files": files_of("xiaomai", "neg_", 8)},
         {"name": "reply", "kind": "neg", "files": reps},
         # 真实非语音瞬态（ESC-50 公开库）：敲门/键盘/鼠标/拍手/玻璃碎/脚步/钟表滴答/
@@ -630,6 +693,58 @@ class BoardSource:
         return (int(m.group(2)) / 1000.0) if m else None
 
 
+class PcSource:
+    """PC 声卡 → 外接音箱 → 空气 → 板载麦。与 BoardSource 接口对齐，可直接替换。
+
+    与板载源的差异（都是"更简单"的方向）：
+      - 不走串口灌数：没有板上 RAM 容量上限、没有 push 回执/乱码/序号错位风险；
+      - 起播由 waveOutWrite 返回时刻决定，精度与板载 PLAY_BEGIN 同级；
+      - **但声压不受脚本控制**：板载源能改 `feather_audio_volume`，PC 源只能靠系统音量。
+        所以跑之前必须把 Windows 音量固定在某一档并记下来，跑完不要动——否则同一批
+        语料里混进不同声压，域会脏。
+
+    ⚠ 前置闸门：`--phase proof --source pc` 必须先通过。
+      该臂历史上被判过不可信（"数字静音对照和真音一样高"），机制是 PC 与板子共地串扰
+      或声卡底噪——那种情况下采到的"空气声"其实是电耦合，语料全废。
+      判定看 proof 输出：真实出声抬升 ≥3× 且 数字静音对照 <2×。
+    """
+
+    def __init__(self, log=None, device=None):
+        self.log = log or (lambda *x: None)
+        self.player = Player(device=device)
+        self.pcm = None
+        self.name = None
+
+    def push(self, name, pcm, attempts=1):
+        """与 BoardSource.push 同签名；PC 源只是把 PCM 留在内存里。"""
+        self.pcm = np.ascontiguousarray(np.asarray(pcm, dtype="<i2"))
+        self.name = name
+        return {"clip": name, "want": {"n": int(self.pcm.size)}, "board": {},
+                "lines": 0, "resync": 0, "sec": self.pcm.size / 16000.0}
+
+    def play(self, loops=1, tries=2):
+        """返回 (板端时戳, PC 时戳, 素材秒数)。PC 源没有板端时基，第一项给 0.0。"""
+        if self.pcm is None:
+            raise RuntimeError("PC 源没有素材（先 push 再 play）")
+        data = np.tile(self.pcm, loops) if loops > 1 else self.pcm
+        for k in range(tries):
+            try:
+                t, dur = self.player.play_pcm(data)
+                return 0.0, t, dur
+            except RuntimeError as e:
+                if k == tries - 1:
+                    raise
+                self.log("  PC 放音失败（%s），0.4s 后重试" % e)
+                time.sleep(0.4)
+
+    def wait_done(self, after_pc, timeout=120.0):
+        """PC 播放是同步的（waveOutWrite 已把整段交给驱动），没有等价的 PLAY_DONE。"""
+        return None
+
+    def shutdown(self):
+        self.player.shutdown()
+
+
 def mic_run(mon, ser, sec):
     """跑一条 kws mic（它占住控制台线程，所以期间发不进任何命令），取逐帧电平统计。"""
     t0 = time.perf_counter()
@@ -713,7 +828,7 @@ def phase_proof_pc(a, flog, ser, mon):
     ser.write(b"feather_audio_status\r\n")
     time.sleep(1.2)
     audio_status = "\n".join(l for _, l in mon.lines[-40:] if "sound0" in l or "mic0" in l)
-    player = Player()
+    player = Player(device=a.pc_dev_index)
     dur = a.sec + 6
     ser.write(("kws mic %d\r\n" % dur).encode())
     time.sleep(1.2)
@@ -996,7 +1111,7 @@ def phase_matrix(a, flog):
     mon = Monitor(ser, flog)
     mon.start()
 
-    player = Player()
+    player = Player(device=a.pc_dev_index)
     rng = np.random.default_rng(a.seed)
     events, quiet = [], []
     print("计划：%s" % "  ".join("%s×%d(%s)" % (s["name"], a.rounds, s["kind"]) for s in scenarios))
@@ -1392,21 +1507,33 @@ def phase_traindata(a, flog):
 
     mon = Monitor(ser, flog)
     mon.start()
-    src = BoardSource(mon, ser, log=say)
+    pc_src = (a.source == "pc")
+    src = PcSource(log=say, device=a.pc_dev_index) if pc_src else BoardSource(mon, ser, log=say)
     rec = MicRecorder(mon, ser, log=say)
     vol_re = re.compile(r"sound0 volume=(\d+)")
-    t = time.perf_counter()
-    ser.write(b"feather_audio_volume\r\n")
-    _l, _p, _m = mon.wait_for(vol_re, t, 5.0)
-    vol0 = int(_m.group(1)) if _m else None
-    t = time.perf_counter()
-    ser.write(("feather_audio_volume %d\r\n" % a.volume).encode())
-    mon.wait_for(vol_re, t, 5.0)
-    if vol0 is not None:
-        say("喇叭音量: %s → %d（跑完还原到 %s）" % (vol0, a.volume, vol0))
+    vol0 = None
+    if pc_src:
+        say("音源 = PC 声卡 + 外接音箱（板载喇叭音量不参与）")
+        say("  ⚠ 系统音量必须固定在某一档且全程不动，否则同一批语料会混进不同声压")
+        if not a.distance:
+            say("  ⚠ 未给 --distance：距离不写进 manifest，事后无法按距离分层复现")
+    else:
+        t = time.perf_counter()
+        ser.write(b"feather_audio_volume\r\n")
+        _l, _p, _m = mon.wait_for(vol_re, t, 5.0)
+        vol0 = int(_m.group(1)) if _m else None
+        t = time.perf_counter()
+        ser.write(("feather_audio_volume %d\r\n" % a.volume).encode())
+        mon.wait_for(vol_re, t, 5.0)
+        if vol0 is not None:
+            say("喇叭音量: %s → %d（跑完还原到 %s）" % (vol0, a.volume, vol0))
 
     out_root = os.path.join(DATA, a.out_dir)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    if a.source == "pc":
+        stamp += "_pc"
+        if a.distance:
+            stamp += "_d%g" % a.distance
     out_dir = os.path.join(out_root, stamp)
     for d in ("pos", "neg", "fail"):
         os.makedirs(os.path.join(out_dir, d), exist_ok=True)
@@ -1418,7 +1545,11 @@ def phase_traindata(a, flog):
             # 剂量门结论必须落进 manifest：DictWriter 用 extrasaction="ignore"，
             # 不在 cols 里就静默丢——10-20 夜合并脚本因此退回 corr/lift 判据，
             # 把 12 段空场负样本（corr=0 无激励）全判出局。
-            "dose_ok"]
+            "dose_ok",
+            # 10-24 新增：音源类型与距离必须进 manifest。PC 音箱与板载喇叭是两条不同的
+            # 声路，混在一起训练就等于把两个域塞进一份语料；距离同理（0.3m 与 2m 的
+            # 直达/混响比例差一个量级）。
+            "source", "distance"]
     rows = []
 
     per = a.cap_sec * 9.0 + a.gap + 6.0      # 录 + 回吐(实测约 8×实时) + 间隔 + 灌数摊销
@@ -1543,7 +1674,9 @@ def phase_traindata(a, flog):
                          "drop_heads": len(st["dropped_heads"]),
                          "hole_spans": ",".join("%d-%d" % (h[0], h[0] + h[1] - 1)
                                                  for h in holes),
-                         "dose_ok": dose_ok})
+                         "dose_ok": dose_ok,
+                         "source": a.source,
+                         "distance": (a.distance if a.distance else "")})
             say("  %-11s c%-2d %-16s %.1fs  剂量 corr=%.2f 抬升=%s 底噪=%s 增益%.2f× 洞 %d 段/%dms  "
                 "削顶 %.2f%%  校验 %s  存 %s%s"
                 % (sc["name"], c, clip or "（空场）", sec, corr,
@@ -1559,6 +1692,8 @@ def phase_traindata(a, flog):
         ser.write(("feather_audio_volume %d\r\n" % vol0).encode())
         mon.wait_for(vol_re, t, 5.0)
         say("喇叭音量已还原: %s" % vol0)
+    if pc_src:
+        src.shutdown()
     ser.write(b"kws stop\r\n")
     time.sleep(0.5)
     mon.stop_now()
@@ -1644,8 +1779,20 @@ def main():
                          "窗口放宽只会让搜索摊薄、把无关段的相关抬上来，故收紧到 2s")
     ap.add_argument("--out-dir", default=os.path.join("boardmic"),
                     help="traindata 语料根目录（相对 toolchain/data）")
+    ap.add_argument("--distance", type=float, default=0.0,
+                    help="音源到板载麦的距离（米）。只记录进 manifest/目录名，不改变行为；"
+                         "PC 源建议必填，否则事后无法按距离分层复现")
     ap.add_argument("--note", default="")
+    ap.add_argument("--pc-device", default="",
+                    help="PC 源的输出设备：索引或名字片段（如 0 / 花再 / Evo）。"
+                         "留空 = Windows 默认设备。PC+外接音箱通路必须显式指定，"
+                         "否则声音可能从笔记本内置喇叭/HDMI 出去，采到的语料位置全错")
     a = ap.parse_args()
+
+    # PC 源：先解析输出设备并打印——日志里必须留下"声音到底从哪个设备出去"的证据
+    a.pc_dev_index, a.pc_dev_name = None, "系统默认"
+    if a.source == "pc":
+        a.pc_dev_index, a.pc_dev_name = resolve_out_device(a.pc_device)
 
     os.makedirs(LOG_DIR, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1654,6 +1801,9 @@ def main():
     with open(log_path, "w", encoding="utf-8") as flog:
         flog.write("===== 声学回踩 %s 阶段 %s =====\n端口 %s@%d  环境: %s\n" %
                    (a.phase, datetime.datetime.now(), a.port, a.baud, a.note or "（未填）"))
+        if a.source == "pc":
+            flog.write("PC 输出设备: [%s] %s\n" %
+                       ("默认" if a.pc_dev_index is None else a.pc_dev_index, a.pc_dev_name))
         t_open = time.perf_counter()
         if a.phase == "proof":
             out = phase_proof(a, flog)
