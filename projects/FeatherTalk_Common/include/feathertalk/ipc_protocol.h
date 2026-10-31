@@ -23,7 +23,11 @@ typedef enum
     FEATHERTALK_IPC_MSG_SYSTEM_STATUS = 7,
     FEATHERTALK_IPC_MSG_QUICK_STATUS  = 8,
     FEATHERTALK_IPC_MSG_QUICK_COMMAND = 9,
-    FEATHERTALK_IPC_MSG_AUDIO_DB      = 10
+    FEATHERTALK_IPC_MSG_AUDIO_DB      = 10,
+    /* KWS 唤醒事件（M55 -> M33）：本地唤醒词命中时上报，M33 可据此做
+     * 产品级反应（日志/计数/后续 UI 或音频联动）。旧固件收到未知 ID 直接
+     * 忽略，向后兼容，无需 bump ABI。 */
+    FEATHERTALK_IPC_MSG_KWS_EVENT     = 11
 } feathertalk_ipc_message_id_t;
 
 typedef enum
@@ -162,6 +166,20 @@ typedef struct
     uint8_t reserved[3];
 } feathertalk_ipc_audio_db_t;
 
+/* KWS 唤醒事件（M55 -> M33）。 confidence 为 0~100 的百分数；
+ * label_id 为 Edge Impulse 类别索引（当前模型: 1 = xiaomai）。 */
+typedef struct
+{
+    uint16_t abi_version;
+    uint16_t message_id;
+    uint32_t sequence;
+    uint32_t uptime_ms;
+    uint8_t  label_id;
+    uint8_t  confidence_pct;
+    uint8_t  flags;          /* bit0: 冷却判据触发（2/3 窗确认） */
+    uint8_t  reserved[1];
+} feathertalk_ipc_kws_event_t;
+
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(sizeof(feathertalk_ipc_message_t) == FEATHERTALK_IPC_WIRE_BYTES,
                "FeatherTalk IPC payload must fit the PSoC E84 IPC frame");
@@ -173,6 +191,8 @@ _Static_assert(sizeof(feathertalk_ipc_quick_command_t) == FEATHERTALK_IPC_WIRE_B
                "FeatherTalk quick command must fit the PSoC E84 IPC frame");
 _Static_assert(sizeof(feathertalk_ipc_audio_db_t) == FEATHERTALK_IPC_WIRE_BYTES,
                "FeatherTalk audio doorbell must fit the PSoC E84 IPC frame");
+_Static_assert(sizeof(feathertalk_ipc_kws_event_t) == FEATHERTALK_IPC_WIRE_BYTES,
+               "FeatherTalk KWS event must fit the PSoC E84 IPC frame");
 #endif
 
 #ifdef __cplusplus

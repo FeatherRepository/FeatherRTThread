@@ -1,0 +1,65 @@
+file,label,text,voice,rate
+pos_0000.wav,1,小麦小麦,zh-CN-XiaoxiaoNeural,+0%
+pos_0001.wav,1,小麦小麦,zh-CN-YunxiNeural,-10%
+pos_0002.wav,1,小麦小麦,zh-CN-XiaoyiNeural,+10%
+pos_0003.wav,1,小麦小麦,zh-CN-YunjianNeural,+0%
+pos_0005.wav,1,小麦小麦,zh-CN-XiaoxiaoNeural,+10%
+pos_0006.wav,1,小麦小麦,zh-CN-YunxiNeural,+0%
+pos_0007.wav,1,小麦小麦,zh-CN-XiaoyiNeural,-10%
+pos_0008.wav,1,小麦小麦,zh-CN-YunjianNeural,+10%
+pos_0010.wav,1,小麦小麦,zh-CN-XiaoxiaoNeural,-10%
+pos_0011.wav,1,小麦小麦,zh-CN-YunxiNeural,+10%
+pos_0012.wav,1,小麦小麦,zh-CN-XiaoyiNeural,+0%
+pos_0013.wav,1,小麦小麦,zh-CN-YunjianNeural,-10%
+pos_0015.wav,1,小麦小麦,zh-CN-XiaoxiaoNeural,+0%
+pos_0016.wav,1,小麦小麦,zh-CN-YunxiNeural,-10%
+pos_0017.wav,1,小麦小麦,zh-CN-XiaoyiNeural,+10%
+pos_0018.wav,1,小麦小麦,zh-CN-YunjianNeural,+0%
+pos_0020.wav,1,小麦小麦,zh-CN-XiaoxiaoNeural,+10%
+pos_0021.wav,1,小麦小麦,zh-CN-YunxiNeural,+0%
+pos_0022.wav,1,小麦小麦,zh-CN-XiaoyiNeural,-10%
+pos_0023.wav,1,小麦小麦,zh-CN-YunjianNeural,+10%
+pos_0025.wav,1,小麦小麦,zh-CN-XiaoxiaoNeural,-10%
+pos_0026.wav,1,小麦小麦,zh-CN-YunxiNeural,+10%
+pos_0027.wav,1,小麦小麦,zh-CN-XiaoyiNeural,+0%
+pos_0028.wav,1,小麦小麦,zh-CN-YunjianNeural,-10%
+pos_0030.wav,1,小麦小麦,zh-CN-XiaoxiaoNeural,+0%
+pos_0031.wav,1,小麦小麦,zh-CN-YunxiNeural,-10%
+pos_0032.wav,1,小麦小麦,zh-CN-XiaoyiNeural,+10%
+pos_0033.wav,1,小麦小麦,zh-CN-YunjianNeural,+0%
+pos_0035.wav,1,小麦小麦,zh-CN-XiaoxiaoNeural,+10%
+pos_0036.wav,1,小麦小麦,zh-CN-YunxiNeural,+0%
+pos_0037.wav,1,小麦小麦,zh-CN-XiaoyiNeural,-10%
+pos_0038.wav,1,小麦小麦,zh-CN-YunjianNeural,+10%
+neg_0000.wav,0,今天天气不错我们出去玩吧,zh-CN-XiaoxiaoNeural,+0%
+neg_0001.wav,0,请把窗户关一下好吗,zh-CN-YunxiNeural,+0%
+neg_0002.wav,0,我想听一首轻松的音乐,zh-CN-XiaoyiNeural,+0%
+neg_0003.wav,0,妈妈说明天要下雨记得带伞,zh-CN-YunjianNeural,+0%
+neg_0005.wav,0,爸爸在书房里打电话,zh-CN-XiaoxiaoNeural,+0%
+neg_0006.wav,0,我想喝一杯温水谢谢,zh-CN-YunxiNeural,+0%
+neg_0007.wav,0,明天早上八点开会别迟到,zh-CN-XiaoyiNeural,+0%
+neg_0008.wav,0,电脑开机速度有点慢,zh-CN-YunjianNeural,+0%
+neg_0010.wav,0,这本书我看了一半很有意思,zh-CN-XiaoxiaoNeural,+0%
+neg_0011.wav,0,周末想去爬山要不要一起,zh-CN-YunxiNeural,+0%
+neg_0012.wav,0,手机快没电了充电器在哪,zh-CN-XiaoyiNeural,+0%
+neg_0013.wav,0,晚饭吃面条还是米饭,zh-CN-YunjianNeural,+0%
+neg_0015.wav,0,小区楼下的花都开了,zh-CN-XiaoxiaoNeural,+0%
+neg_0016.wav,0,小朋友们在操场上跑步,zh-CN-YunxiNeural,+0%
+neg_0017.wav,0,小声点说话别人在休息,zh-CN-XiaoyiNeural,+0%
+neg_0018.wav,0,Sold out.,zh-CN-YunjianNeural,+0%
+neg_0020.wav,0,The weather is nice today,zh-CN-XiaoxiaoNeural,+0%
+neg_0021.wav,0,Can you help me find my keys,zh-CN-YunxiNeural,+0%
+neg_0022.wav,0,Let's meet at the station tomorrow,zh-CN-XiaoyiNeural,+0%
+neg_0023.wav,0,This song sounds really good,zh-CN-YunjianNeural,+0%
+neg_0025.wav,0,I think we should leave now,zh-CN-XiaoxiaoNeural,+0%
+neg_0026.wav,0,My phone battery is almost empty,zh-CN-YunxiNeural,+0%
+neg_0027.wav,0,The meeting starts in ten minutes,zh-CN-XiaoyiNeural,+0%
+neg_0028.wav,0,She said she would call back later,zh-CN-YunjianNeural,+0%
+neg_0030.wav,0,Could you pass me the salt please,zh-CN-XiaoxiaoNeural,+0%
+neg_0031.wav,0,I don't understand this question,zh-CN-YunxiNeural,+0%
+neg_0032.wav,0,The train arrives at seven thirty,zh-CN-XiaoyiNeural,+0%
+neg_0033.wav,0,He is reading a book in the garden,zh-CN-YunjianNeural,+0%
+neg_0035.wav,0,It was a long and tiring day,zh-CN-XiaoxiaoNeural,+0%
+neg_0036.wav,0,What time does the shop open,zh-CN-YunxiNeural,+0%
+neg_0037.wav,0,I'd like to book a table for two,zh-CN-XiaoyiNeural,+0%
+neg_0038.wav,0,The kids are playing in the yard,zh-CN-YunjianNeural,+0%

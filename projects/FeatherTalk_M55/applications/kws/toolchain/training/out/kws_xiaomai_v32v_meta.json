@@ -1,0 +1,18 @@
+{
+  "input_shape": [
+    1,
+    650
+  ],
+  "input_scale": 0.0667966902256012,
+  "input_zero_point": -23,
+  "output_shape": [
+    1,
+    2
+  ],
+  "output_scale": 0.00390625,
+  "output_zero_point": -128,
+  "labels": [
+    "noice",
+    "xiaomai"
+  ]
+}

@@ -72,7 +72,7 @@
 #define FINSH_USING_HISTORY
 #define FINSH_HISTORY_LINES 5
 #define FINSH_USING_SYMTAB
-#define FINSH_CMD_SIZE 80
+#define FINSH_CMD_SIZE 1024
 #define MSH_USING_BUILT_IN_COMMANDS
 #define FINSH_USING_DESCRIPTION
 #define FINSH_ARG_MAX 10
@@ -118,7 +118,7 @@
 #define RT_SYSTEM_WORKQUEUE_PRIORITY 23
 #define RT_USING_SERIAL
 #define RT_USING_SERIAL_V1
-#define RT_SERIAL_RB_BUFSZ 128
+#define RT_SERIAL_RB_BUFSZ 2048
 #define RT_USING_I2C
 #define RT_USING_I2C_BITOPS
 #define RT_USING_PIN
@@ -132,7 +132,12 @@
 #define RT_USING_AUDIO
 #define RT_AUDIO_REPLAY_MP_BLOCK_SIZE 4096
 #define RT_AUDIO_REPLAY_MP_BLOCK_COUNT 2
-#define RT_AUDIO_RECORD_PIPE_SIZE 2048
+/* PDM record pipe: full pipe is overwritten (rt_ringbuffer_put_force) = audio lost.
+ * Stereo int16 @16k = 64 B/ms, so the old 2048 B held only 32 ms, while one KWS
+ * inference stalls the consumer for ~81 ms (DSP 51 + NN 30) -> every hop a hole.
+ * 8192 B = 128 ms, above the 81 ms steady-state backlog the consumer needs.
+ * Keep this file ASCII: building.py reads it with the GBK codec. */
+#define RT_AUDIO_RECORD_PIPE_SIZE 8192
 #define RT_USING_TOUCH
 #define RT_TOUCH_PIN_IRQ
 #define RT_USING_LCD

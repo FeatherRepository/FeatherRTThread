@@ -46,7 +46,7 @@
 #include "edge-impulse-sdk/classifier/inferencing_engines/engines.h"
 #include "edge-impulse-sdk/classifier/postprocessing/ei_postprocessing_common.h"
 
-const char* ei_classifier_inferencing_categories_333519_1[] = { "noice", "xiaorui" };
+const char* ei_classifier_inferencing_categories_333519_1[] = { "noice", "xiaomai" };
 
 ei_dsp_named_axis_t ei_dsp_config_333519_2_named_axes[] = {
     { .name = "Signal", .axis = 0 }

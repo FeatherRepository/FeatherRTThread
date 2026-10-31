@@ -11,6 +11,8 @@
 #include <feathertalk/version.h>
 #include "ipc/feathertalk_ipc.h"
 #include "drv_lcd.h"
+#include "led_indicator.h"
+#include "kws/kws.h"
 #ifdef FEATHERTALK_USING_GPU_UI
 #include "gpu_ui/feathertalk_gpu_ui.h"
 #endif
@@ -36,6 +38,22 @@
 #ifndef BSP_LCD_ROTATION_DEGREES
 #define BSP_LCD_ROTATION_DEGREES 0
 #endif
+
+/* ---------------- 板载绿灯指示 ----------------
+ * 常态 500ms 心跳；唤醒词命中时 100ms 快闪 1s（feathertalk_m55_wake_flash）。
+ * 单线程（main 循环）执行翻转，无需额外线程。 */
+#define LED_HEARTBEAT_MS   500U
+#define LED_WAKE_FLASH_MS  100U
+#define LED_WAKE_FLASH_LEN_MS 1000U
+
+static volatile rt_bool_t s_led_wake_flash = RT_FALSE;
+static rt_uint32_t s_led_wake_until_ms = 0;
+
+void feathertalk_m55_wake_flash(void)
+{
+    s_led_wake_flash = RT_TRUE;
+    s_led_wake_until_ms = rt_tick_get_millisecond() + LED_WAKE_FLASH_LEN_MS;
+}
 
 #if defined(FEATHERTALK_USING_GPU_UI)
 #define BSP_UI_NAME "feather-gpu-native"
@@ -153,11 +171,34 @@ int main(void)
     m55_lcd_backlight_enable();
     feathertalk_ipc_set_lvgl_ready();
 
+#if defined(KWS_AUTOSTART) && (KWS_AUTOSTART)
+    /* 唤醒词开机自启（kws.h 旋钮，-DKWS_AUTOSTART=0 可关）。
+     * 放在 IPC/UI 就绪之后：IPC 在线才能把命中事件报给 M33，
+     * 且避开启动期 ES8388/i2s0 初始化的资源争抢。 */
+    if (kws_start() == 0)
+        rt_kprintf("[kws] 开机自启完成，对着麦克风喊「小麦小麦」\n");
+    else
+        rt_kprintf("[kws] 开机自启失败（麦克风被占用？可手动 kws start）\n");
+#endif
+
     while (1)
     {
         uint32_t now = rt_tick_get_millisecond();
 
-        if ((now - last_led_ms) >= 500U)
+        if (s_led_wake_flash)
+        {
+            if ((int32_t)(now - s_led_wake_until_ms) >= 0)
+            {
+                s_led_wake_flash = RT_FALSE;   /* 快闪窗口结束，交还心跳 */
+            }
+            else if ((now - last_led_ms) >= LED_WAKE_FLASH_MS)
+            {
+                led_on = !led_on;
+                rt_pin_write(LED_PIN_G, led_on ? PIN_HIGH : PIN_LOW);
+                last_led_ms = now;
+            }
+        }
+        else if ((now - last_led_ms) >= LED_HEARTBEAT_MS)
         {
             led_on = !led_on;
             rt_pin_write(LED_PIN_G, led_on ? PIN_HIGH : PIN_LOW);

@@ -42,3 +42,26 @@ cconfig.h
 /tmp/
 /tools/freather/logs/
 /tools/freather/ble-validation-vendor/
+
+# ---- 本地唤醒词「小麦」训练链（applications/kws/toolchain）----
+# 可再生 TTS 语料不入库；板采真实样本 data/real 是不可再生资产，必须入库
+/projects/FeatherTalk_M55/applications/kws/toolchain/data/**/*.wav
+/projects/FeatherTalk_M55/applications/kws/toolchain/data/**/*.mp3
+!/projects/FeatherTalk_M55/applications/kws/toolchain/data/real/*.wav
+# 构建日志与串口排障产物（可再生，不入库）
+/projects/FeatherTalk_M55/*.log
+/projects/FeatherTalk_M55/*.stderr
+# 训练中间产物（每次 train_kws.py 都会重写，只保留定稿模型与固件头）
+/projects/FeatherTalk_M55/applications/kws/toolchain/training/out/*_tmp.tflite
+
+# 板采串口监听日志（可再生，不入库）
+/projects/FeatherTalk_M55/applications/kws/toolchain/logs/
+# 验收报表工作区（归档副本进 local_ai/reports，本目录可再生）
+/projects/FeatherTalk_M55/applications/kws/toolchain/reports/
+
+# npu_bench 可再生产物（重建命令见 applications/npu_bench/README.md）
+/projects/FeatherTalk_M55/applications/npu_bench/npu_model.c
+/projects/FeatherTalk_M55/applications/npu_bench/tools/out/
+
+# 原始跑批轮次（中间产物；入库的是过滤后的 data/boardmic_v11）
+/projects/FeatherTalk_M55/applications/kws/toolchain/data/boardmic/
