@@ -30,6 +30,7 @@ env = Environment(tools = ['mingw'],
     LINK = rtconfig.LINK, LINKFLAGS = rtconfig.LFLAGS)
 env.PrependENVPath('PATH', rtconfig.EXEC_PATH)
 env.Depends(TARGET, File('board/linker_scripts/link.ld'))
+env.Prepend(CPPPATH=[os.path.abspath('applications/airplay2/netconfig')])
 
 # FeatherTalk enables file-backed Gallery decoders without changing the
 # SDK-wide LVGL configuration used by the native demos.

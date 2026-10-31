@@ -444,7 +444,7 @@ SECTIONS
         . = ALIGN(4);
         __bss_start__ = .;
 
-        *(.bss*)
+        *(EXCLUDE_FILE(*edge-impulse* *applications/kws/kws.o *rtsp_handlers.o *airplay_mbed*) .bss*)
         *(COMMON)
 
         . = ALIGN(4);
@@ -474,6 +474,16 @@ SECTIONS
     }  > m55_data_secondary AT > m55_nvm_sel
 
     __m55_image_end__ = LOADADDR(.cy_socmem_data) + SIZEOF(.cy_socmem_data);
+
+    .bss_socmem (NOLOAD) :
+    {
+        . = ALIGN(4);
+        *edge-impulse*(.bss*)
+        *applications/kws/kws.o(.bss*)
+        *rtsp_handlers.o(.bss*)
+        *airplay_mbed*(.bss*)
+        . = ALIGN(4);
+    } > m55_data_secondary
 
     /* A section for the heap memory */
     .heap(NOLOAD) :

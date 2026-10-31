@@ -467,8 +467,8 @@ static void ft_bcst_evt_log(uint16_t a, uint16_t b)
 /* BIG_CREATED 回调里 packet buffer 被事件占用, 直接 request 会在
  * hci_iso_notify 的 buffer 检查处 return, 第一包永远发不出 (实测)。
  * 延迟到下一拍再 request */
-extern volatile uint8_t  g_ft_big_evt_raw[24];
-extern volatile uint8_t  g_ft_big_evt_raw_len;
+volatile uint8_t  g_ft_big_evt_raw[24];
+volatile uint8_t  g_ft_big_evt_raw_len;
 static void ft_bcst_request_send(btstack_timer_source_t *ts)
 {
     (void)ts;
@@ -489,7 +489,7 @@ static void ft_bcst_request_send(btstack_timer_source_t *ts)
 static void ft_bcst_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
                                 rt_uint8_t *packet, rt_uint16_t size)
 {
-    (void)channel; (void)size;
+    (void)channel;
     if (packet_type != HCI_EVENT_PACKET) return;
 
     switch (packet[0])
@@ -498,6 +498,12 @@ static void ft_bcst_hci_handler(rt_uint8_t packet_type, rt_uint16_t channel,
         ft_bcst_evt_log(0xB1, hci_event_gap_meta_get_subevent_code(packet));
         if (hci_event_gap_meta_get_subevent_code(packet) == GAP_SUBEVENT_BIG_CREATED)
         {
+            uint16_t raw_len = size > sizeof(g_ft_big_evt_raw) ? sizeof(g_ft_big_evt_raw) : size;
+            for (uint16_t i = 0; i < raw_len; i++)
+            {
+                g_ft_big_evt_raw[i] = packet[i];
+            }
+            g_ft_big_evt_raw_len = (uint8_t)raw_len;
             for (rt_uint32_t i = 0U; i < FT_BCST_NUM_BIS; i++)
             {
                 s_bis_handle[i] =

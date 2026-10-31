@@ -8,6 +8,12 @@ uint8_t att_server_notify(hci_con_handle_t h, uint16_t a, const uint8_t *p, uint
 uint8_t gap_disconnect(hci_con_handle_t h) { (void)h; return 0; }
 uint8_t gap_cis_accept(hci_con_handle_t h) { (void)h; return 0; }
 uint8_t gap_cis_reject(hci_con_handle_t h) { (void)h; return 0; }
+void gap_connectable_control(uint8_t enable) { (void)enable; }
+int bt_a2dp_sink_streaming(void) { return 0; }
+void bt_a2dp_sink_suspend_if_active(const char *why) { (void)why; }
+int bt_service_le_pairing_mode(void) { return 0; }
+int ft_le_audio_broadcast_active(void) { return 0; }
+void ft_le_audio_broadcast_stop_deferred(void) {}
 void hci_add_event_handler(btstack_packet_callback_registration_t *r) { (void)r; }
 void hci_register_iso_packet_handler(btstack_packet_handler_t h) { (void)h; }
 void hci_dump_log(int level, const char *fmt, ...) { (void)level; (void)fmt; }

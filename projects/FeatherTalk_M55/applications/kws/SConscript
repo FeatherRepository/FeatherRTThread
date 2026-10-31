@@ -4,14 +4,15 @@
 #       （../../Edgi_Talk_M55_XiaoZhi/edge-impulse），不重复占用 27MB 仓库空间。
 #       若将来 XiaoZhi 示例工程被移除，把该目录 cp -r 到本工程即可解耦。
 #
-# 模型：edge-impulse/tflite-model/tflite_learn_333519_3.h —— 现为本地自训的
-#       「小麦小麦」v9（标签 noice/xiaomai，arena 32768，resolver 10 算子）。
+# 模型与两级 verifier 位于 edge-impulse/tflite-model。
 #       替换模型时需同步 model_metadata.h 的 ARENA_SIZE、model_variables.h 的类别、
 #       tflite-resolver.h 的算子表，以及 kws.h 的 KWS_WAKE_WORD_LABEL="xiaomai"。
-#       训练/导出链与集成清单见归档仓 local_ai/training/out/INTEGRATION.md。
+#       训练/导出链与集成清单见 toolchain/training/out/INTEGRATION.md。
 
 from building import *
 import os
+import subprocess
+import rtconfig
 
 cwd = GetCurrentDir()
 
@@ -130,6 +131,12 @@ LOCAL_CFLAGS += ' -DARM_MATH_CM55 -DARM_MATH_DSP -DARM_MATH_LOOPUNROLL -DARM_MAT
 
 LOCAL_CXXFLAGS = LOCAL_CFLAGS
 LOCAL_CXXFLAGS += ' -std=c++17 -fno-rtti -fno-exceptions -fno-threadsafe-statics'
+if rtconfig.PLATFORM == 'gcc':
+    cxx = os.path.join(rtconfig.EXEC_PATH, rtconfig.CXX)
+    cxx_version = subprocess.check_output([cxx, '-dumpversion'], text=True).strip()
+    cxx_multilib = subprocess.check_output([cxx] + rtconfig.DEVICE.split() + ['-print-multi-directory'], text=True).strip()
+    cxx_target_include = os.path.normpath(os.path.join(rtconfig.EXEC_PATH, '..', 'arm-none-eabi', 'include', 'c++', cxx_version, 'arm-none-eabi', cxx_multilib))
+    LOCAL_CXXFLAGS += ' -isystem "' + cxx_target_include + '"'
 LOCAL_CXXFLAGS += ' -Wno-sign-compare -Wno-strict-aliasing'
 # -Wno-strict-aliasing 只消警告，不改代码生成。ei::numpy::log 用 *(int32_t*)&a
 # 型双关取指数（NVIDIA 快速 log），在 -O2 下按严格别名规则被优化掉尾数多项式，

@@ -7,3 +7,4 @@ pyocd-lib/
 
 # Reproducible font source/tool cache. Generated C fonts are tracked with UI.
 fonts/cache/
+airplay-test-vendor/

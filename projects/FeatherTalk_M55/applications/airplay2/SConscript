@@ -1,0 +1,43 @@
+from building import *
+import os
+cwd = GetCurrentDir()
+group = DefineGroup('AirPlay2Foundation', [x for x in Glob('*.c') if os.path.basename(str(x)) != 'ft_airplay_probe.c'],
+                    depend=['FEATHERTALK_USING_WIFI'], LOCAL_CPPPATH=[cwd])
+repo = os.path.normpath(os.path.join(cwd, '../../../..'))
+mbed = os.path.join(repo, 'projects/Edgi_Talk_M55_XiaoZhi/packages/mbedtls-v2.28.1/mbedtls')
+mbed_build = os.path.join(cwd, '../../build/airplay_mbed')
+copied = []
+headers = []
+for name in os.listdir(os.path.join(mbed, 'library')):
+    if name.endswith('.h'):
+        dest = os.path.join(mbed_build, name)
+        headers += Command(dest, os.path.join(mbed, 'library', name), [Mkdir(mbed_build), Copy('$TARGET', '$SOURCE')])
+for name in ['bignum.c', 'platform_util.c', 'aes.c', 'constant_time.c', 'md.c','sha512.c','hmac_drbg.c']:
+    dest = os.path.join(mbed_build, name)
+    Command(dest, os.path.join(mbed, 'library', name), [Mkdir(mbed_build), Copy('$TARGET', '$SOURCE')])
+    copied.append(File(dest))
+Depends(copied, headers)
+src = Glob('vendor/monocypher/*.c') + copied
+src += [File('port/' + f) for f in ['ap_crypto.c', 'ap_platform.c', 'ap_hap_device.c', 'ap_crypto_probe.c','ap_entropy.c','ap_seed_transport.c']]
+src += [File('vendor/esp/hap/' + f) for f in ['srp.c','tlv8.c','hap_crypto.c','hap_pair_setup.c','hap_pair_verify.c']]
+src += [x for x in Glob('vendor/esp/rtsp/*.c') if os.path.basename(str(x)) != 'rtsp_rsa.c']
+src += Glob('vendor/esp/plist/*.c')
+src += [File('vendor/esp/audio/'+f) for f in ['audio_receiver.c','audio_stream.c','audio_stream_realtime.c',
+    'audio_stream_buffered.c','audio_buffer.c','audio_timing.c','audio_crypto.c','audio_resample.c',
+    'resampler.c','audio_output_common.c']]
+src += [File('vendor/esp/network/'+f) for f in ['ptp_clock.c','ntp_clock.c','socket_utils.c']]
+src += [File('port/'+f) for f in ['ap_settings.c','ap_audio_output.c','ap_no_legacy.c','ap_decoder.cpp','ap_base64.c','ap_service.c']]
+src += Glob('vendor/alac/*.c') + Glob('vendor/alac/*.cpp')
+group = group + DefineGroup('AirPlay2Crypto', src, depend=['FEATHERTALK_USING_WIFI'],
+    LOCAL_CPPPATH=[cwd, cwd+'/port', cwd+'/vendor/monocypher', cwd+'/vendor/esp/hap', mbed+'/include', cwd+'/vendor/alac',
+             cwd+'/vendor/esp',cwd+'/vendor/esp/audio',cwd+'/vendor/esp/rtsp',cwd+'/vendor/esp/plist',cwd+'/vendor/esp/network',
+             ],
+    LOCAL_CXXFLAGS=' -fno-exceptions -fno-rtti',
+    LOCAL_CCFLAGS=' -DFT_AP_WITH_AAC -DFT_AP_WITH_BUFFERED -I"'+cwd+'/vendor/faad2/include" -I"'+cwd+'/port" -include "'+cwd+'/port/ap_alloc_redirect.h"')
+
+group = group + DefineGroup('AirPlay2AAC', Glob('vendor/faad2/libfaad/*.c'),depend=['FEATHERTALK_USING_WIFI'],
+    LOCAL_CPPPATH=[cwd+'/vendor/faad2/include',cwd+'/vendor/faad2/libfaad',cwd+'/port'],
+    LOCAL_CCFLAGS=' -fstack-usage -DLC_ONLY_DECODER -DDISABLE_SBR -DHAVE_INTTYPES_H=1 -DHAVE_STRING_H=1 -DHAVE_STRINGS_H=1 -DHAVE_MEMCPY=1 -DHAVE_LRINTF=1 -DPACKAGE_VERSION=\\"2.11.2\\" -include "'+cwd+'/port/ap_alloc_redirect.h"')
+group = group + DefineGroup('AirPlay2Discovery',[File('port/ap_discovery.c')],depend=['FEATHERTALK_USING_WIFI'],
+    LOCAL_CPPPATH=[cwd,cwd+'/port',cwd+'/vendor/esp/hap'],LOCAL_CCFLAGS=' -DFT_AP_WITH_AAC -DFT_AP_WITH_BUFFERED')
+Return('group')
