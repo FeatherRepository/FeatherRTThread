@@ -39,6 +39,11 @@ bool ft_gallery_render_image_path(const char *native_path,
                                   uint32_t maximum_width,
                                   uint32_t maximum_height,
                                   ft_gallery_rendered_image_t *rendered);
+bool ft_gallery_render_perspective_path(const char *native_path,
+                                        uint32_t size, int32_t direction,
+                                        ft_gallery_rendered_image_t *rendered);
+bool ft_gallery_render_reflection(const ft_gallery_rendered_image_t *source,
+                                  ft_gallery_rendered_image_t *rendered);
 void ft_gallery_release_rendered_image(ft_gallery_rendered_image_t *rendered);
 bool ft_gallery_can_open_file(const char *native_path);
 bool ft_gallery_request_open_file(const char *native_path);

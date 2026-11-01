@@ -35,3 +35,9 @@ rt_err_t bt_service_set_enabled(int on)
 int bt_service_busy(void) { return 0; }
 int bt_service_target(void) { return bt_service_enabled(); }
 int bt_service_error(void) { return 0; }
+
+rt_err_t bt_service_source_action(uint8_t value)
+{
+    (void)value;
+    return -RT_ENOSYS;
+}

@@ -6,6 +6,7 @@
 #include "feathertalk_audio.h"
 #include "feathertalk_player.h"
 #include "feathertalk_storage.h"
+#include "bt_audio/bt_source_route.h"
 
 #if defined(RT_USING_AUDIO) && defined(RT_USING_DFS)
 #include <drivers/audio.h>
@@ -18,6 +19,10 @@
 #define MINIMP3_ONLY_MP3
 #define MINIMP3_NO_SIMD
 #include "third_party/minimp3/minimp3.h"
+#include "bt_audio/player_bt_tap.h"
+
+extern bool ft_bt_a2dp_source_active(void);
+#define FT_PLAYER_BT_PCM_SAMPLES 6144U
 #endif
 
 #define FT_PLAYER_DEVICE          "sound0"
@@ -38,7 +43,8 @@ typedef enum
     FT_PLAYER_COMMAND_PLAY,
     FT_PLAYER_COMMAND_PAUSE,
     FT_PLAYER_COMMAND_RESUME,
-    FT_PLAYER_COMMAND_STOP
+    FT_PLAYER_COMMAND_STOP,
+    FT_PLAYER_COMMAND_SET_OUTPUT
 } ft_player_command_t;
 
 typedef struct
@@ -54,6 +60,7 @@ typedef struct
 {
     uint8_t io[FT_PLAYER_MP3_INPUT_SIZE];
     mp3d_sample_t decoded[MINIMP3_MAX_SAMPLES_PER_FRAME];
+    int16_t bt_pcm[FT_PLAYER_BT_PCM_SAMPLES];
     int16_t output[FT_PLAYER_MP3_OUTPUT_SAMPLES];
 } ft_player_workspace_t;
 
@@ -73,6 +80,7 @@ typedef struct
     size_t input_offset;
     size_t input_bytes;
     bool input_eof;
+    bool bt_output;
     mp3dec_t mp3;
 } ft_player_stream_t;
 
@@ -82,6 +90,7 @@ static ft_player_track_t s_tracks[FT_PLAYER_MAX_TRACKS];
 static ft_player_status_t s_status;
 static volatile ft_player_command_t s_command;
 static volatile size_t s_requested_track;
+static volatile ft_player_output_t s_output = FT_PLAYER_OUTPUT_SPEAKER;
 static rt_thread_t s_player_thread;
 static bool s_initialized;
 static char s_directory[FT_PLAYER_PATH_MAX] = FT_PLAYER_DEFAULT_DIRECTORY;
@@ -379,6 +388,11 @@ static void player_close_stream(ft_player_stream_t *stream)
         (void)close(stream->descriptor);
         stream->descriptor = -1;
     }
+    if (stream->bt_output)
+    {
+        ft_player_bt_tap_set_active(false);
+        stream->bt_output = false;
+    }
     ft_audio_release_output(FT_AUDIO_OUTPUT_OWNER_LOCAL_PLAYER);
     player_stream_reset(stream);
 }
@@ -415,21 +429,33 @@ static int player_open_stream(size_t index, ft_player_stream_t *stream)
         if (result != RT_EOK) return result;
         stream->data_offset = wav.data_offset;
         stream->data_bytes = wav.data_bytes;
-        output_rate = wav.sample_rate;
-        output_bits = wav.sample_bits;
+        output_rate = s_output == FT_PLAYER_OUTPUT_BT_A2DP ?
+                      48000U : wav.sample_rate;
+        output_bits = s_output == FT_PLAYER_OUTPUT_BT_A2DP ?
+                      16U : wav.sample_bits;
     }
     else
     {
-        output_rate = player_output_rate(track.sample_rate);
+        output_rate = s_output == FT_PLAYER_OUTPUT_BT_A2DP ?
+                      48000U : player_output_rate(track.sample_rate);
         output_bits = 16U;
         mp3dec_init(&stream->mp3);
     }
     stream->output_sample_rate = output_rate;
-    result = ft_audio_claim_output(FT_AUDIO_OUTPUT_OWNER_LOCAL_PLAYER);
-    if (result != RT_EOK) return result;
-    result = ft_audio_set_output_format(output_rate, output_bits,
-                                        track.channels);
-    if (result != RT_EOK) goto failed;
+    if (s_output == FT_PLAYER_OUTPUT_BT_A2DP)
+    {
+        stream->bt_output = true;
+        ft_player_bt_tap_reset();
+        ft_player_bt_tap_set_active(true);
+    }
+    else
+    {
+        result = ft_audio_claim_output(FT_AUDIO_OUTPUT_OWNER_LOCAL_PLAYER);
+        if (result != RT_EOK) return result;
+        result = ft_audio_set_output_format(output_rate, output_bits,
+                                            track.channels);
+        if (result != RT_EOK) goto failed;
+    }
     stream->descriptor = open(track.path, O_RDONLY | O_BINARY, 0);
     if (stream->descriptor < 0 ||
         (stream->data_offset != 0U &&
@@ -438,13 +464,16 @@ static int player_open_stream(size_t index, ft_player_stream_t *stream)
         result = -RT_EIO;
         goto failed;
     }
-    stream->device = rt_device_find(FT_PLAYER_DEVICE);
-    if (stream->device == RT_NULL ||
-        rt_device_open(stream->device, RT_DEVICE_OFLAG_WRONLY) != RT_EOK)
+    if (!stream->bt_output)
     {
-        stream->device = RT_NULL;
-        result = -RT_EIO;
-        goto failed;
+        stream->device = rt_device_find(FT_PLAYER_DEVICE);
+        if (stream->device == RT_NULL ||
+            rt_device_open(stream->device, RT_DEVICE_OFLAG_WRONLY) != RT_EOK)
+        {
+            stream->device = RT_NULL;
+            result = -RT_EIO;
+            goto failed;
+        }
     }
     player_lock();
     s_status.state = FT_PLAYER_PLAYING;
@@ -454,6 +483,7 @@ static int player_open_stream(size_t index, ft_player_stream_t *stream)
     s_status.sample_rate = output_rate;
     s_status.sample_bits = output_bits;
     s_status.channels = track.channels;
+    s_status.output = s_output;
     s_status.last_error = RT_EOK;
     s_status.generation++;
     player_unlock();
@@ -485,9 +515,14 @@ static void player_set_explicitly_stopped(void)
     player_unlock();
 }
 
+static int player_write_wav_bt(ft_player_stream_t *stream,
+                               ft_player_workspace_t *workspace);
+static int player_bt_write(const int16_t *samples, size_t count);
+
 static int player_write_wav(ft_player_stream_t *stream,
                             ft_player_workspace_t *workspace)
 {
+    if (stream->bt_output) return player_write_wav_bt(stream, workspace);
     uint32_t remaining = stream->data_bytes - stream->streamed_bytes;
     uint32_t request = remaining < FT_PLAYER_BUFFER_SIZE ?
                        remaining : FT_PLAYER_BUFFER_SIZE;
@@ -548,6 +583,99 @@ static size_t player_resample_frame(const mp3d_sample_t *input,
     return output_frames * channels;
 }
 
+static int player_bt_write(const int16_t *samples, size_t count)
+{
+    const uint8_t *bytes = (const uint8_t *)samples;
+    size_t length = count * sizeof(int16_t);
+    size_t offset = 0U;
+    rt_tick_t start = rt_tick_get();
+    while (offset < length)
+    {
+        uint32_t written = ft_player_bt_tap_write(bytes + offset,
+                                                  (uint32_t)(length - offset));
+        if (written != 0U)
+        {
+            offset += written;
+            continue;
+        }
+        if (rt_tick_get() - start > rt_tick_from_millisecond(2000))
+            return -RT_ETIMEOUT;
+        rt_thread_mdelay(2);
+    }
+    return RT_EOK;
+}
+
+static int16_t player_pcm_to_s16(const uint8_t *sample, uint8_t bits)
+{
+    if (bits == 8U) return (int16_t)(((int32_t)sample[0] - 128) << 8);
+    if (bits == 16U)
+        return (int16_t)((uint16_t)sample[0] | ((uint16_t)sample[1] << 8U));
+    if (bits == 24U)
+    {
+        int32_t value = (int32_t)sample[0] | ((int32_t)sample[1] << 8U) |
+                        ((int32_t)sample[2] << 16U);
+        if ((value & 0x800000) != 0) value |= ~0xFFFFFF;
+        return (int16_t)(value >> 8);
+    }
+    if (bits == 32U)
+    {
+        int32_t value = (int32_t)((uint32_t)sample[0] |
+                        ((uint32_t)sample[1] << 8U) |
+                        ((uint32_t)sample[2] << 16U) |
+                        ((uint32_t)sample[3] << 24U));
+        return (int16_t)(value >> 16);
+    }
+    return 0;
+}
+
+static int player_write_wav_bt(ft_player_stream_t *stream,
+                               ft_player_workspace_t *workspace)
+{
+    uint32_t remaining = stream->data_bytes - stream->streamed_bytes;
+    uint32_t frame_bytes = stream->channels * (stream->sample_bits / 8U);
+    uint32_t max_frames = FT_PLAYER_BT_PCM_SAMPLES / 2U;
+    uint32_t request;
+    int count;
+    size_t frames;
+    size_t output_samples;
+    if (stream->channels < 1U || stream->channels > 2U ||
+        stream->sample_bits < 8U || frame_bytes == 0U)
+        return -RT_EINVAL;
+    if (remaining == 0U) return 1;
+    request = remaining < max_frames * frame_bytes ?
+              remaining : max_frames * frame_bytes;
+    request -= request % frame_bytes;
+    if (request == 0U) return 1;
+    count = read(stream->descriptor, workspace->io, request);
+    if (count <= 0 || (uint32_t)count % frame_bytes != 0U)
+        return -RT_EIO;
+    frames = (size_t)count / frame_bytes;
+    for (size_t frame = 0U; frame < frames; frame++)
+    {
+        const uint8_t *source = workspace->io + frame * frame_bytes;
+        uint32_t sample_bytes = stream->sample_bits / 8U;
+        int16_t left = player_pcm_to_s16(source, stream->sample_bits);
+        int16_t right = stream->channels == 2U ?
+            player_pcm_to_s16(source + sample_bytes, stream->sample_bits) :
+            left;
+        workspace->bt_pcm[frame * 2U] = left;
+        workspace->bt_pcm[frame * 2U + 1U] = right;
+    }
+    output_samples = player_resample_frame(workspace->bt_pcm, frames, 2U,
+        stream->input_sample_rate, 48000U, workspace->output,
+        FT_PLAYER_BT_PCM_SAMPLES);
+    if (output_samples == 0U) return -RT_EIO;
+    if (player_bt_write(workspace->output, output_samples) != RT_EOK)
+        return -RT_ETIMEOUT;
+    stream->streamed_bytes += (uint32_t)count;
+    player_lock();
+    s_status.position_ms = (uint32_t)((uint64_t)stream->streamed_bytes *
+        1000U / (stream->input_sample_rate * stream->channels *
+                 (stream->sample_bits / 8U)));
+    player_unlock();
+    return RT_EOK;
+}
+
 static int player_fill_mp3(ft_player_stream_t *stream,
                            ft_player_workspace_t *workspace)
 {
@@ -600,10 +728,16 @@ static int player_write_mp3(ft_player_stream_t *stream,
             (size_t)samples, stream->channels, (uint32_t)frame.hz,
             stream->output_sample_rate, workspace->output,
             FT_PLAYER_MP3_OUTPUT_SAMPLES);
-        if (output_samples == 0U ||
-            rt_device_write(stream->device, 0, workspace->output,
-                            output_samples * sizeof(int16_t)) !=
-                (rt_ssize_t)(output_samples * sizeof(int16_t)))
+        if (output_samples == 0U)
+            return -RT_EIO;
+        if (stream->bt_output)
+        {
+            if (player_bt_write(workspace->output, output_samples) != RT_EOK)
+                return -RT_ETIMEOUT;
+        }
+        else if (rt_device_write(stream->device, 0, workspace->output,
+                                 output_samples * sizeof(int16_t)) !=
+                 (rt_ssize_t)(output_samples * sizeof(int16_t)))
             return -RT_EIO;
         stream->decoded_frames += (uint32_t)samples;
         player_lock();
@@ -655,6 +789,27 @@ static void player_worker(void *parameter)
             result = player_open_stream(requested_track, &stream);
             if (result != RT_EOK)
                 player_set_state(FT_PLAYER_ERROR, result);
+            continue;
+        }
+        if (command == FT_PLAYER_COMMAND_SET_OUTPUT)
+        {
+            ft_player_state_t previous;
+            int result;
+            player_lock();
+            previous = s_status.state;
+            player_unlock();
+            player_close_stream(&stream);
+            if (previous == FT_PLAYER_PLAYING ||
+                previous == FT_PLAYER_STARTING ||
+                previous == FT_PLAYER_PAUSED)
+            {
+                player_set_state(FT_PLAYER_STARTING, RT_EOK);
+                result = player_open_stream(requested_track, &stream);
+                if (result != RT_EOK)
+                    player_set_state(FT_PLAYER_ERROR, result);
+                else if (previous == FT_PLAYER_PAUSED)
+                    player_set_state(FT_PLAYER_PAUSED, RT_EOK);
+            }
             continue;
         }
         if (command == FT_PLAYER_COMMAND_PAUSE && stream.descriptor >= 0)
@@ -889,6 +1044,47 @@ int ft_player_stop(void)
     return player_request(FT_PLAYER_COMMAND_STOP, 0U);
 }
 
+int ft_player_set_output(ft_player_output_t output)
+{
+    ft_player_state_t state;
+    bool restart;
+    if (output != FT_PLAYER_OUTPUT_SPEAKER &&
+        output != FT_PLAYER_OUTPUT_BT_A2DP) return -RT_EINVAL;
+    /* One user-facing decision: the media output also selects what the A2DP
+     * Source encoder reads.  Speaker -> USB forwarding, BT -> local player. */
+    ft_bt_source_input_set(output == FT_PLAYER_OUTPUT_BT_A2DP ?
+                           FT_BT_SOURCE_INPUT_PLAYER :
+                           FT_BT_SOURCE_INPUT_USB);
+    player_lock();
+    if (s_output == output)
+    {
+        player_unlock();
+        return RT_EOK;
+    }
+    state = s_status.state;
+    restart = state == FT_PLAYER_PLAYING || state == FT_PLAYER_STARTING ||
+              state == FT_PLAYER_PAUSED;
+    s_output = output;
+    s_status.output = output;
+    s_status.generation++;
+    if (restart)
+    {
+        s_requested_track = s_status.current_track;
+        s_command = FT_PLAYER_COMMAND_SET_OUTPUT;
+    }
+    player_unlock();
+    return restart ? rt_event_send(&s_player_event, FT_PLAYER_EVENT_WAKE) : RT_EOK;
+}
+
+int ft_player_get_output(ft_player_output_t *output)
+{
+    if (output == RT_NULL) return -RT_EINVAL;
+    player_lock();
+    *output = s_output;
+    player_unlock();
+    return RT_EOK;
+}
+
 int ft_player_get_status(ft_player_status_t *status)
 {
     if (status == RT_NULL) return -RT_EINVAL;
@@ -908,6 +1104,7 @@ static int feathertalk_player_init(void)
     s_initialized = true;
     rt_memset(&s_status, 0, sizeof(s_status));
     s_status.state = FT_PLAYER_STOPPED;
+    s_status.output = FT_PLAYER_OUTPUT_SPEAKER;
     s_status.folder_loop = true;
     workspace = rt_malloc(sizeof(*workspace));
     if (workspace == RT_NULL) return -RT_ENOMEM;
@@ -934,6 +1131,11 @@ static const char *player_state_name(ft_player_state_t state)
            names[state] : "unknown";
 }
 
+static const char *player_output_name(ft_player_output_t output)
+{
+    return output == FT_PLAYER_OUTPUT_BT_A2DP ? "bt" : "speaker";
+}
+
 static int feather_player(int argc, char **argv)
 {
     ft_player_status_t status;
@@ -941,7 +1143,7 @@ static int feather_player(int argc, char **argv)
     int result = RT_EOK;
     if (argc < 2)
     {
-        rt_kprintf("usage: feather_player scan|list|dir [path]|loop <0|1>|status|play <index>|pause|resume|stop\n");
+        rt_kprintf("usage: feather_player scan|list|dir [path]|loop <0|1>|output speaker|bt|status|play <index>|pause|resume|stop\n");
         return -RT_EINVAL;
     }
     if (strcmp(argv[1], "scan") == 0)
@@ -977,7 +1179,15 @@ static int feather_player(int argc, char **argv)
     }
     if (strcmp(argv[1], "loop") == 0 && argc == 3)
         result = ft_player_set_folder_loop(strtoul(argv[2], RT_NULL, 10) != 0U);
-    if (strcmp(argv[1], "play") == 0 && argc == 3)
+    if (strcmp(argv[1], "output") == 0 && argc == 3)
+    {
+        ft_player_output_t output;
+        if (strcmp(argv[2], "bt") == 0) output = FT_PLAYER_OUTPUT_BT_A2DP;
+        else if (strcmp(argv[2], "speaker") == 0) output = FT_PLAYER_OUTPUT_SPEAKER;
+        else return -RT_EINVAL;
+        result = ft_player_set_output(output);
+    }
+    else if (strcmp(argv[1], "play") == 0 && argc == 3)
         result = ft_player_play((size_t)strtoul(argv[2], RT_NULL, 10));
     else if (strcmp(argv[1], "pause") == 0) result = ft_player_pause();
     else if (strcmp(argv[1], "resume") == 0) result = ft_player_resume();
@@ -985,8 +1195,9 @@ static int feather_player(int argc, char **argv)
     else if (strcmp(argv[1], "status") != 0 && strcmp(argv[1], "loop") != 0)
         result = -RT_EINVAL;
     (void)ft_player_get_status(&status);
-    rt_kprintf("player %s track=%u/%u position=%lu/%lu ms format=%lu/%u/%u loop=%u owner=%u error=%d result=%d\n",
-               player_state_name(status.state), (unsigned)status.current_track,
+    rt_kprintf("player %s output=%s track=%u/%u position=%lu/%lu ms format=%lu/%u/%u loop=%u owner=%u error=%d result=%d\n",
+               player_state_name(status.state), player_output_name(status.output),
+               (unsigned)status.current_track,
                (unsigned)status.track_count,
                (unsigned long)status.position_ms,
                (unsigned long)status.duration_ms,

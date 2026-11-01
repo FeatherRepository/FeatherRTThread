@@ -2,10 +2,12 @@
 #include <rtthread.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <feathertalk/version.h>
 #include "feathertalk_audio.h"
 #include "feathertalk_player.h"
 #include "feathertalk_storage.h"
+#include "bt_audio/bt_source_route.h"
 #include "feathertalk_usb.h"
 #include "ipc/feathertalk_ipc.h"
 #include "feathertalk_ui.h"
@@ -16,6 +18,7 @@
 #include "feathertalk_ui_recorder.h"
 #include "feathertalk_ui_wifi.h"
 #include "feathertalk_ui_keyboard.h"
+#include "lv_gpu_batch.h"
 
 #define FT_ACCENT_COUNT      5U
 #define FT_OPACITY_COUNT     3U
@@ -37,7 +40,8 @@
 #define FT_MEDIA_FLOW_CENTER       (FT_MEDIA_FLOW_CELL_COUNT / 2U)
 #define FT_MEDIA_FLOW_CONTROL_PERIOD_MS 10U
 #define FT_MEDIA_FLOW_SETTLE_MS         20U
-#define FT_MEDIA_FLOW_ANIM_MS           260U
+#define FT_MEDIA_FLOW_ANIM_MS           180U
+#define FT_BT_TRANSPORT_BUTTON_COUNT    3U
 
 typedef enum
 {
@@ -122,6 +126,10 @@ static void media_cover_control_timer_cb(lv_timer_t *timer);
 static void media_page_enter(void);
 static void media_page_leave(void);
 static void media_refresh_directory_label(void);
+static void media_cover_update_image(size_t index, const char *track_path);
+static void media_cover_update_image_direction(size_t index, const char *track_path,
+                                               int32_t direction);
+static void media_output_refresh(void);
 
 static const ft_app_descriptor_t s_apps[] =
 {
@@ -335,7 +343,16 @@ static lv_obj_t *s_usb_role_buttons[2];
 static lv_obj_t *s_bt_a2dp_buttons[2];
 static lv_obj_t *s_bt_le_buttons[2];
 static lv_obj_t *s_bt_le_status;
-static lv_obj_t *s_bt_transport_buttons[2];   /* [0]=经典 A2DP [1]=LE 音频 (与页面创建顺序一致) */
+static lv_obj_t *s_bt_transport_buttons[FT_BT_TRANSPORT_BUTTON_COUNT];
+static lv_obj_t *s_bt_source_status;
+static lv_obj_t *s_bt_source_input_button;
+static lv_obj_t *s_bt_source_result_caption;
+static lv_obj_t *s_bt_source_scan_button;
+static lv_obj_t *s_bt_source_disconnect_button;
+static lv_obj_t *s_bt_source_list;
+static uint32_t s_bt_source_sequence;
+static uint8_t s_bt_source_rendered_role = 0xFFU;
+static bool s_bt_source_snapshot_valid;
 static uint8_t s_bt_a2dp_role;   /* 0=SINK 1=SOURCE */
 static uint8_t s_bt_le_role;     /* 0=SERVER 单播 1=BROADCAST 广播 */
 static lv_obj_t *s_usb_function_buttons[2];
@@ -407,6 +424,8 @@ static lv_obj_t *s_media_artist_label;
 static lv_obj_t *s_media_album_label;
 static lv_obj_t *s_media_progress_label;
 static lv_obj_t *s_media_progress_bar;
+static lv_obj_t *s_media_output_buttons[2];
+static lv_obj_t *s_media_output_status;
 static lv_obj_t *s_media_volume;
 static lv_obj_t *s_media_directory_label;
 static lv_obj_t *s_media_loop_button;
@@ -424,6 +443,19 @@ static lv_obj_t *s_media_cover_shades[FT_MEDIA_FLOW_CELL_COUNT];
 static lv_obj_t *s_media_cover_discs[FT_MEDIA_FLOW_CELL_COUNT];
 static lv_obj_t *s_media_cover_dots[FT_MEDIA_FLOW_CELL_COUNT];
 static lv_obj_t *s_media_cover_titles[FT_MEDIA_FLOW_CELL_COUNT];
+static lv_obj_t *s_media_cover_images[FT_MEDIA_FLOW_CELL_COUNT];
+static lv_obj_t *s_media_front_images[FT_MEDIA_FLOW_CELL_COUNT];
+static lv_obj_t *s_media_reflection_images[FT_MEDIA_FLOW_CELL_COUNT];
+static lv_obj_t *s_media_front_reflection_images[FT_MEDIA_FLOW_CELL_COUNT];
+static lv_obj_t *s_media_reflection_fades[FT_MEDIA_FLOW_CELL_COUNT];
+static ft_gallery_rendered_image_t s_media_cover_bitmaps[FT_MEDIA_FLOW_CELL_COUNT];
+static ft_gallery_rendered_image_t s_media_reflection_bitmaps[FT_MEDIA_FLOW_CELL_COUNT];
+static ft_gallery_rendered_image_t s_media_front_bitmaps[FT_MEDIA_FLOW_CELL_COUNT];
+static ft_gallery_rendered_image_t s_media_front_reflection_bitmaps[FT_MEDIA_FLOW_CELL_COUNT];
+static int8_t s_media_cover_warp_direction[FT_MEDIA_FLOW_CELL_COUNT];
+static uint32_t s_media_cover_image_widths[FT_MEDIA_FLOW_CELL_COUNT];
+static uint32_t s_media_cover_image_heights[FT_MEDIA_FLOW_CELL_COUNT];
+static char s_media_cover_paths[FT_MEDIA_FLOW_CELL_COUNT][FT_PLAYER_PATH_MAX + 3U];
 static size_t s_media_cover_tracks[FT_MEDIA_FLOW_CELL_COUNT];
 static int16_t s_media_cover_perspective[FT_MEDIA_FLOW_CELL_COUNT];
 static uint8_t s_media_cover_opacity[FT_MEDIA_FLOW_CELL_COUNT];
@@ -2573,6 +2605,291 @@ static lv_obj_t *create_settings_audio_input_page(lv_obj_t *parent)
     return page;
 }
 
+static void settings_bt_source_action(uint8_t value)
+{
+    bool queued = feathertalk_ipc_bt_source_action(value) == RT_EOK;
+    if (s_bt_source_status != RT_NULL && lv_obj_is_valid(s_bt_source_status))
+        lv_label_set_text(s_bt_source_status,
+                          queued ? ft_preferences_text("请求已发送到 M33…",
+                                                      "Request sent to M33...") :
+                                   ft_preferences_text("请求发送失败，请重试",
+                                                       "Request failed; please retry"));
+}
+
+static void settings_bt_source_input_refresh(bool enabled)
+{
+    ft_bt_source_input_t input = ft_bt_source_input_get();
+    lv_obj_t *button = s_bt_source_input_button;
+    lv_obj_t *label;
+    const char *text;
+    if (button == RT_NULL || !lv_obj_is_valid(button)) return;
+    ft_state_button_apply(button, input == FT_BT_SOURCE_INPUT_PLAYER ? 1 : 0);
+    label = lv_obj_get_child(button, 0);
+    if (label != RT_NULL)
+    {
+        text = ft_preferences_text(
+            input == FT_BT_SOURCE_INPUT_PLAYER ? "音源: 本地" : "音源: USB",
+            input == FT_BT_SOURCE_INPUT_PLAYER ? "Source: Local" : "Source: USB");
+        if (strcmp(lv_label_get_text(label), text))
+            lv_label_set_text(label, text);
+    }
+    if (enabled) lv_obj_remove_state(button, LV_STATE_DISABLED);
+    else lv_obj_add_state(button, LV_STATE_DISABLED);
+}
+
+static void settings_bt_source_input_cb(lv_event_t *event)
+{
+    ft_bt_source_input_t input = ft_bt_source_input_get() ==
+                                 FT_BT_SOURCE_INPUT_PLAYER ?
+                                 FT_BT_SOURCE_INPUT_USB :
+                                 FT_BT_SOURCE_INPUT_PLAYER;
+    LV_UNUSED(event);
+    (void)ft_player_set_output(input == FT_BT_SOURCE_INPUT_PLAYER ?
+                               FT_PLAYER_OUTPUT_BT_A2DP :
+                               FT_PLAYER_OUTPUT_SPEAKER);
+    ft_bt_source_input_set(input);
+    settings_bt_source_input_refresh(true);
+    if (s_bt_source_status != RT_NULL && lv_obj_is_valid(s_bt_source_status))
+    {
+        if (input == FT_BT_SOURCE_INPUT_PLAYER)
+            lv_label_set_text(s_bt_source_status, ft_preferences_text(
+                "Source 音源：本地播放器。请在媒体页播放文件。",
+                "Source input: local player. Play a file from Media."));
+        else
+            lv_label_set_text(s_bt_source_status, ft_preferences_text(
+                "Source 音源：USB 音频。等待 USB 主机播放。",
+                "Source input: USB audio. Start playback on the USB host."));
+    }
+}
+
+static void settings_bt_source_scan_cb(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    if (s_bt_source_list != RT_NULL && lv_obj_is_valid(s_bt_source_list))
+        lv_obj_scroll_to_view(s_bt_source_list, LV_ANIM_ON);
+    else if (s_bt_source_status != RT_NULL && lv_obj_is_valid(s_bt_source_status))
+        lv_obj_scroll_to_view(s_bt_source_status, LV_ANIM_ON);
+    settings_bt_source_action(FEATHERTALK_BT_SOURCE_ACTION_SCAN);
+}
+
+static void settings_bt_source_disconnect_cb(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    settings_bt_source_action(FEATHERTALK_BT_SOURCE_ACTION_DISCONNECT);
+}
+
+static void settings_bt_source_connect_cb(lv_event_t *event)
+{
+    uint8_t index = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
+    settings_bt_source_action((uint8_t)(FEATHERTALK_BT_SOURCE_ACTION_CONNECT |
+                                       (index & FEATHERTALK_BT_SOURCE_INDEX_MASK)));
+}
+
+static void settings_bt_source_rebuild(const ft_bt_source_shared_t *source,
+                                       bool source_role)
+{
+    if (s_bt_source_list == RT_NULL || !lv_obj_is_valid(s_bt_source_list)) return;
+    lv_obj_clean(s_bt_source_list);
+    for (uint32_t i = 0U; i < source->count; i++)
+    {
+        const ft_bt_source_device_t *device = &source->devices[i];
+        char text[96];
+        char address[18];
+        const char *name = device->name_len != 0U ? device->name :
+                           ft_preferences_text("未命名设备", "Unnamed device");
+        lv_obj_t *row;
+        lv_obj_t *label;
+        lv_snprintf(address, sizeof(address), "%02X:%02X:%02X:%02X:%02X:%02X",
+                    device->addr[0], device->addr[1], device->addr[2],
+                    device->addr[3], device->addr[4], device->addr[5]);
+        lv_snprintf(text, sizeof(text), "%s%s\n%s", name,
+                    (device->flags & FT_BT_SOURCE_FLAG_CONNECTED) != 0U ?
+                    ft_preferences_text("（已连接）", " (connected)") : "",
+                    address);
+        row = create_flat_button(s_bt_source_list, text,
+                                 settings_bt_source_connect_cb,
+                                 (void *)(uintptr_t)i);
+        lv_obj_set_size(row, lv_pct(100), ft_layout_px(54));
+        label = lv_obj_get_child(row, 0);
+        if (label != RT_NULL)
+        {
+            lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+            lv_obj_set_width(label, lv_pct(92));
+            lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
+        }
+        if (!source_role ||
+            (source->state != FT_BT_SOURCE_STATE_CLOSED &&
+             source->state != FT_BT_SOURCE_STATE_ERROR))
+            lv_obj_add_state(row, LV_STATE_DISABLED);
+    }
+    if (source->count == 0U)
+    {
+        lv_obj_t *label = lv_label_create(s_bt_source_list);
+        lv_label_set_text(label, ft_preferences_text(
+            "尚未发现耳机，点击“扫描耳机”。",
+            "No headphones yet. Tap Scan headphones."));
+        lv_obj_set_width(label, lv_pct(100));
+        lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
+        lv_obj_set_style_text_color(label, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    }
+}
+
+static void settings_bt_source_refresh(bool available, bool enabled,
+                                       bool source_role)
+{
+    ft_bt_source_shared_t source;
+    int read_rc;
+    char text[160];
+    char peer_text[48];
+    const char *peer_name = RT_NULL;
+
+    if (s_bt_source_status == RT_NULL || !lv_obj_is_valid(s_bt_source_status))
+        return;
+    settings_bt_source_input_refresh(available && enabled && source_role);
+    read_rc = feathertalk_ipc_get_bt_source(&source);
+    if (read_rc != RT_EOK)
+    {
+        if (s_bt_source_snapshot_valid)
+        {
+            s_bt_source_snapshot_valid = false;
+            s_bt_source_sequence = 0U;
+            s_bt_source_rendered_role = 0xFFU;
+            if (s_bt_source_list != RT_NULL && lv_obj_is_valid(s_bt_source_list))
+                lv_obj_clean(s_bt_source_list);
+        }
+        lv_label_set_text(s_bt_source_status,
+            !available ? ft_preferences_text("蓝牙服务不可用", "Bluetooth service unavailable") :
+            !enabled ? ft_preferences_text("请先开启蓝牙", "Turn Bluetooth on first") :
+            ft_preferences_text("等待 M33 播放源状态…", "Waiting for M33 source status..."));
+        if (s_bt_source_result_caption != RT_NULL &&
+            lv_obj_is_valid(s_bt_source_result_caption))
+            lv_label_set_text(s_bt_source_result_caption,
+                              ft_preferences_text("扫描结果：等待状态…",
+                                                  "Scan results: waiting..."));
+        if (s_bt_source_scan_button != RT_NULL &&
+            lv_obj_is_valid(s_bt_source_scan_button))
+            lv_obj_add_state(s_bt_source_scan_button, LV_STATE_DISABLED);
+        if (s_bt_source_disconnect_button != RT_NULL &&
+            lv_obj_is_valid(s_bt_source_disconnect_button))
+            lv_obj_add_state(s_bt_source_disconnect_button, LV_STATE_DISABLED);
+        return;
+    }
+
+    if (!s_bt_source_snapshot_valid ||
+        s_bt_source_sequence != source.sequence ||
+        s_bt_source_rendered_role != s_bt_a2dp_role)
+    {
+        s_bt_source_snapshot_valid = true;
+        s_bt_source_sequence = source.sequence;
+        s_bt_source_rendered_role = s_bt_a2dp_role;
+        settings_bt_source_rebuild(&source, source_role);
+    }
+    if ((source.peer_flags & FT_BT_SOURCE_FLAG_CONNECTED) != 0U)
+    {
+        for (uint32_t i = 0U; i < source.count; i++)
+        {
+            if (memcmp(source.peer, source.devices[i].addr, 6U) == 0 &&
+                source.devices[i].name_len != 0U)
+            {
+                peer_name = source.devices[i].name;
+                break;
+            }
+        }
+        if (peer_name == RT_NULL)
+        {
+            lv_snprintf(peer_text, sizeof(peer_text),
+                        "%02X:%02X:%02X:%02X:%02X:%02X",
+                        source.peer[0], source.peer[1], source.peer[2],
+                        source.peer[3], source.peer[4], source.peer[5]);
+            peer_name = peer_text;
+        }
+    }
+    if (s_bt_source_result_caption != RT_NULL &&
+        lv_obj_is_valid(s_bt_source_result_caption))
+    {
+        if (peer_name != RT_NULL)
+            lv_snprintf(text, sizeof(text), ft_preferences_text(
+                "扫描结果：%lu 台%s · 已连接：%s",
+                "Scan results: %lu%s · connected: %s"),
+                (unsigned long)source.count,
+                source.scan_active ? ft_preferences_text("（扫描中）", " (scanning)") : "",
+                peer_name);
+        else
+            lv_snprintf(text, sizeof(text), ft_preferences_text(
+                "扫描结果：%lu 台%s", "Scan results: %lu%s"),
+                (unsigned long)source.count,
+                source.scan_active ? ft_preferences_text("（扫描中）", " (scanning)") : "");
+        lv_label_set_text(s_bt_source_result_caption, text);
+    }
+    if (peer_name != RT_NULL && source.state == FT_BT_SOURCE_STATE_PLAYING)
+        lv_snprintf(text, sizeof(text), ft_preferences_text(
+            "A2DP 已连接：%s，等待音频数据",
+            "A2DP connected: %s, waiting for audio"), peer_name);
+    else if (peer_name != RT_NULL && source.state == FT_BT_SOURCE_STATE_OPEN)
+        lv_snprintf(text, sizeof(text), ft_preferences_text(
+            "A2DP 已连接：%s", "A2DP connected: %s"), peer_name);
+    else
+        text[0] = '\0';
+
+    if (!source_role)
+        lv_snprintf(text, sizeof(text), "%s",
+            ft_preferences_text("请选择 A2DP SOURCE 后扫描耳机。",
+                                "Select A2DP SOURCE to scan for headphones."));
+    else if (source.scan_active)
+        lv_snprintf(text, sizeof(text), ft_preferences_text(
+            "正在扫描… 已发现 %lu 台设备",
+            "Scanning... %lu device(s) found"), (unsigned long)source.count);
+    else if (source.state == FT_BT_SOURCE_STATE_CONNECTING)
+        lv_snprintf(text, sizeof(text), "%s",
+            ft_preferences_text("正在连接耳机…", "Connecting to headphones..."));
+    else if (source.state == FT_BT_SOURCE_STATE_PLAYING)
+    {
+        if (text[0] == '\0')
+            lv_snprintf(text, sizeof(text), "%s",
+                ft_preferences_text("A2DP 已建立，等待音频数据",
+                                    "A2DP streaming path is ready"));
+    }
+    else if (source.state == FT_BT_SOURCE_STATE_OPEN)
+    {
+        if (text[0] == '\0')
+            lv_snprintf(text, sizeof(text), "%s",
+                ft_preferences_text("A2DP 已连接", "A2DP connected"));
+    }
+    else if (source.state == FT_BT_SOURCE_STATE_ERROR)
+        lv_snprintf(text, sizeof(text), "%s",
+            ft_preferences_text("上次连接失败，可重试",
+                                "Last connection failed; retry"));
+    else if (source.count != 0U)
+        lv_snprintf(text, sizeof(text), ft_preferences_text(
+            "已发现 %lu 台设备，请选择耳机",
+            "%lu device(s) found; choose headphones"), (unsigned long)source.count);
+    else
+        lv_snprintf(text, sizeof(text), "%s",
+            ft_preferences_text("未连接，点击“扫描耳机”开始。",
+                                "Not connected. Tap Scan headphones."));
+    lv_label_set_text(s_bt_source_status, text);
+
+    if (s_bt_source_scan_button != RT_NULL &&
+        lv_obj_is_valid(s_bt_source_scan_button))
+    {
+        if (!source_role || source.scan_active ||
+            (source.state != FT_BT_SOURCE_STATE_CLOSED &&
+             source.state != FT_BT_SOURCE_STATE_ERROR))
+            lv_obj_add_state(s_bt_source_scan_button, LV_STATE_DISABLED);
+        else
+            lv_obj_remove_state(s_bt_source_scan_button, LV_STATE_DISABLED);
+    }
+    if (s_bt_source_disconnect_button != RT_NULL &&
+        lv_obj_is_valid(s_bt_source_disconnect_button))
+    {
+        if (source.state == FT_BT_SOURCE_STATE_CLOSED ||
+            source.state == FT_BT_SOURCE_STATE_ERROR)
+            lv_obj_add_state(s_bt_source_disconnect_button, LV_STATE_DISABLED);
+        else
+            lv_obj_remove_state(s_bt_source_disconnect_button, LV_STATE_DISABLED);
+    }
+}
+
 static void settings_radio_refresh(lv_timer_t *timer)
 {
     (void)timer;
@@ -2630,15 +2947,17 @@ static void settings_radio_refresh(lv_timer_t *timer)
                                                             FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY)) : 0U;
     bool t_le = (transport & FEATHERTALK_TRANSPORT_FLAG_LE_ONLY) != 0U;
     bool t_classic = (transport & FEATHERTALK_TRANSPORT_FLAG_CLASSIC_ONLY) != 0U;
+    bool t_dual = !t_le && !t_classic;
     bool uc_streaming = (audio & FEATHERTALK_AUDIO_FLAG_LE_UNICAST) != 0U;
     bool a2_streaming = (audio & FEATHERTALK_AUDIO_FLAG_A2DP_SINK) != 0U;
     bool bc_active = (audio & FEATHERTALK_AUDIO_FLAG_BROADCAST) != 0U;
     {
         /* 三组按钮统一视觉: 激活橙/未激活蓝/锁定暗 (ft_state_button_apply) */
-        for (int i = 0; i < 2; i++)
+        for (int i = 0; i < (int)FT_BT_TRANSPORT_BUTTON_COUNT; i++)
         {
-            ft_state_button_apply(s_bt_transport_buttons[i],
-                                  (i == 0) ? (t_classic ? 1 : 0) : (t_le ? 1 : 0));
+            int selected = (i == 0) ? t_dual :
+                           (i == 1) ? t_classic : t_le;
+            ft_state_button_apply(s_bt_transport_buttons[i], selected ? 1 : 0);
         }
         for (int i = 0; i < 2; i++)
         {
@@ -2651,6 +2970,8 @@ static void settings_radio_refresh(lv_timer_t *timer)
                                    : uc_streaming;
             ft_state_button_apply(s_bt_le_buttons[i], locked ? -1 : 0);
         }
+        settings_bt_source_refresh(available, enabled,
+                                   s_bt_a2dp_role == 1U);
         /* 常显音频路径指示 (含空闲/广播/通道态, 让三态模型随时可见) */
         if (s_bt_le_status != RT_NULL && lv_obj_is_valid(s_bt_le_status) &&
             !(valid && status.last_control == FEATHERTALK_QUICK_BT_LE_ROLE &&
@@ -2691,8 +3012,8 @@ static void settings_radio_refresh(lv_timer_t *timer)
             }
             else
                 lv_snprintf(path_text, sizeof(path_text), "%s",
-                    ft_preferences_text("当前路径：空闲（A2DP 与 LE 单播互斥，广播可与 A2DP 共存）",
-                                        "Path: idle (A2DP xor LE unicast; broadcast may coexist)"));
+                    ft_preferences_text("通道：双模（经典与 BLE 发现同时开启）",
+                                        "Transport: dual (Classic and BLE discovery both on)"));
             if (strcmp(lv_label_get_text(s_bt_le_status), path_text))
                 lv_label_set_text(s_bt_le_status, path_text);
         }
@@ -2701,6 +3022,15 @@ static void settings_radio_refresh(lv_timer_t *timer)
 static void settings_radio_deleted(lv_event_t *event)
 {
     lv_timer_delete((lv_timer_t *)lv_event_get_user_data(event));
+    s_bt_source_status = RT_NULL;
+    s_bt_source_input_button = RT_NULL;
+    s_bt_source_result_caption = RT_NULL;
+    s_bt_source_scan_button = RT_NULL;
+    s_bt_source_disconnect_button = RT_NULL;
+    s_bt_source_list = RT_NULL;
+    s_bt_source_snapshot_valid = false;
+    s_bt_source_sequence = 0U;
+    s_bt_source_rendered_role = 0xFFU;
 }
 
 static void settings_radio_toggle_cb(lv_event_t *event)
@@ -2833,6 +3163,14 @@ static void settings_bt_a2dp_role_clicked_cb(lv_event_t *event)
     (void)feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_A2DP_ROLE, role);
     s_bt_a2dp_role = role;
     settings_bt_role_refresh();
+    if (role == 1U)
+    {
+        if (s_bt_source_list != RT_NULL && lv_obj_is_valid(s_bt_source_list))
+            lv_obj_scroll_to_view(s_bt_source_list, LV_ANIM_ON);
+        else if (s_bt_source_status != RT_NULL &&
+                 lv_obj_is_valid(s_bt_source_status))
+            lv_obj_scroll_to_view(s_bt_source_status, LV_ANIM_ON);
+    }
 }
 
 /* M8.x 音频通道切换回调 (0=双模 1=仅LE 2=仅经典)。
@@ -2923,7 +3261,7 @@ static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
                     (void *)(uintptr_t)FEATHERTALK_QUICK_BLUETOOTH));
     lv_obj_set_width(s_settings_radio_button, lv_pct(100));
 
-    /* -- 音频通道（M8.x: 直接选择板子发 BLE 还是经典; 开机默认经典） -- */
+    /* -- 音频通道: 双模 / 经典 / LE -- */
     caption = lv_label_create(page);
     lv_label_set_text(caption, ft_preferences_text("音频通道", "Audio transport"));
     lv_obj_set_style_text_font(caption, ft_layout_font(14), LV_PART_MAIN);
@@ -2934,24 +3272,28 @@ static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     track_object(&s_bt_transport_buttons[0],
                  create_state_button(row,
-                    ft_preferences_text("经典 A2DP", "Classic A2DP"),
-                    settings_bt_transport_clicked_cb, (void *)(uintptr_t)2U));
+                    ft_preferences_text("双模", "Dual"),
+                    settings_bt_transport_clicked_cb, (void *)(uintptr_t)0U));
     track_object(&s_bt_transport_buttons[1],
+                 create_state_button(row,
+                    ft_preferences_text("经典 A2DP", "Classic"),
+                    settings_bt_transport_clicked_cb, (void *)(uintptr_t)2U));
+    track_object(&s_bt_transport_buttons[2],
                  create_state_button(row,
                     ft_preferences_text("LE 音频", "LE audio"),
                     settings_bt_transport_clicked_cb, (void *)(uintptr_t)1U));
-    lv_obj_set_width(s_bt_transport_buttons[0], 0);
-    lv_obj_set_width(s_bt_transport_buttons[1], 0);
-    lv_obj_set_flex_grow(s_bt_transport_buttons[0], 1);
-    lv_obj_set_flex_grow(s_bt_transport_buttons[1], 1);
-    /* 选中态由 settings_radio_refresh (200ms) 按通道标志维护 */
+    for (int i = 0; i < (int)FT_BT_TRANSPORT_BUTTON_COUNT; i++)
+    {
+        lv_obj_set_width(s_bt_transport_buttons[i], 0);
+        lv_obj_set_flex_grow(s_bt_transport_buttons[i], 1);
+    }
 
     label = lv_label_create(page);
     lv_obj_set_width(label, lv_pct(100));
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(label, ft_preferences_text(
-        "经典 A2DP = 只开经典扫描（LE 可连接广播停）；LE 音频 = 只发 BLE 广播（经典扫描关）。开机默认经典。",
-        "Classic A2DP = classic scan only (LE adv off); LE audio = BLE advertising only (classic scan off). Classic by default."));
+        "双模 = 经典与 BLE 同时可发现；经典 A2DP = 只开经典发现；LE 音频 = 只发 BLE 广播。",
+        "Dual = Classic and BLE discovery together; Classic = Classic only; LE audio = BLE advertising only."));
     lv_obj_set_style_text_color(label, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
     lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
 
@@ -2982,11 +3324,71 @@ static lv_obj_t *create_settings_bluetooth_page(lv_obj_t *parent)
     lv_obj_set_width(label, lv_pct(100));
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(label, ft_preferences_text(
-        "SINK = 板子作为音箱接收手机推流；SOURCE = 板子将 USB 音频转发到蓝牙耳机。单角色互斥。",
-        "SINK = board receives audio as speaker; SOURCE = board forwards USB audio to BT headphone."\
-        " Single role at a time."));
+        "SINK = 板子作为音箱接收手机推流；SOURCE = 板子把所选音源（本地文件或 USB 音频）发给蓝牙耳机。单角色互斥。",
+        "SINK = board receives audio as speaker; SOURCE = board sends the selected source"\
+        " (local files or USB audio) to BT headphones. Single role at a time."));
     lv_obj_set_style_text_color(label, lv_color_hex(0xA8A8A8), LV_PART_MAIN);
     lv_obj_set_style_text_font(label, ft_layout_font(12), LV_PART_MAIN);
+
+    /* -- SOURCE 耳机发现与连接 -- */
+    caption = lv_label_create(page);
+    lv_label_set_text(caption, ft_preferences_text("蓝牙耳机（播放源）",
+                                                   "Bluetooth headphones (source)"));
+    lv_obj_set_style_text_font(caption, ft_layout_font(16), LV_PART_MAIN);
+    track_object(&s_bt_source_status, lv_label_create(page));
+    lv_obj_set_width(s_bt_source_status, lv_pct(100));
+    lv_label_set_long_mode(s_bt_source_status, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_bt_source_status, ft_preferences_text(
+        "选择 A2DP SOURCE 后可扫描并连接耳机。",
+        "Select A2DP SOURCE to scan for and connect headphones."));
+    lv_obj_set_style_text_font(s_bt_source_status, ft_layout_font(12), LV_PART_MAIN);
+    row = lv_obj_create(page);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), layout->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    track_object(&s_bt_source_scan_button,
+                 create_flat_button(row,
+                    ft_preferences_text("扫描耳机", "Scan headphones"),
+                    settings_bt_source_scan_cb, RT_NULL));
+    track_object(&s_bt_source_disconnect_button,
+                 create_flat_button(row,
+                    ft_preferences_text("断开耳机", "Disconnect"),
+                    settings_bt_source_disconnect_cb, RT_NULL));
+    track_object(&s_bt_source_input_button,
+                 create_flat_button(row,
+                    ft_preferences_text("音源: USB", "Source: USB"),
+                    settings_bt_source_input_cb, RT_NULL));
+    lv_obj_set_width(s_bt_source_scan_button, 0);
+    lv_obj_set_width(s_bt_source_disconnect_button, 0);
+    lv_obj_set_width(s_bt_source_input_button, 0);
+    lv_obj_set_flex_grow(s_bt_source_scan_button, 1);
+    lv_obj_set_flex_grow(s_bt_source_disconnect_button, 1);
+    lv_obj_set_flex_grow(s_bt_source_input_button, 1);
+    settings_bt_source_input_refresh(s_bt_a2dp_role == 1U);
+
+    track_object(&s_bt_source_result_caption, lv_label_create(page));
+    lv_obj_set_width(s_bt_source_result_caption, lv_pct(100));
+    lv_label_set_text(s_bt_source_result_caption,
+                      ft_preferences_text("扫描结果：等待状态…",
+                                          "Scan results: waiting..."));
+    lv_obj_set_style_text_font(s_bt_source_result_caption,
+                               ft_layout_font(12), LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_bt_source_result_caption,
+                                lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    track_object(&s_bt_source_list, lv_obj_create(page));
+    style_layout_container(s_bt_source_list);
+    lv_obj_set_width(s_bt_source_list, lv_pct(100));
+    lv_obj_set_height(s_bt_source_list, ft_layout_px(176));
+    lv_obj_set_flex_flow(s_bt_source_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(s_bt_source_list, ft_layout_px(6), LV_PART_MAIN);
+    lv_obj_set_style_pad_row(s_bt_source_list, ft_layout_px(6), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_bt_source_list, lv_color_hex(0x202020), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_bt_source_list, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_bt_source_list, ft_layout_px(4), LV_PART_MAIN);
+    lv_obj_add_flag(s_bt_source_list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_bt_source_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_bt_source_list, LV_SCROLLBAR_MODE_AUTO);
 
     /* -- LE AUDIO（M8: 单播/广播互斥, ISO handler 单值仲裁） -- */
     caption = lv_label_create(page);
@@ -4936,6 +5338,178 @@ static void media_cover_bind_tracks(void)
                                   lv_color_hex(album->accent_rgb), LV_PART_MAIN);
         media_track_name(track, name, sizeof(name));
         lv_label_set_text(s_media_cover_titles[i], name);
+        {
+            ft_player_track_t local_track;
+            bool local = ft_player_get_track(track, &local_track) == RT_EOK;
+            media_cover_update_image(i, local ? local_track.path : RT_NULL);
+        }
+    }
+}
+
+static int32_t media_cover_direction(size_t index)
+{
+    if (s_media_cover_perspective[index] < 0) return -1;
+    if (s_media_cover_perspective[index] > 0) return 1;
+    if (index < FT_MEDIA_FLOW_CENTER) return -1;
+    if (index > FT_MEDIA_FLOW_CENTER) return 1;
+    return 0;
+}
+
+static void media_cover_resize_image(size_t index)
+{
+    lv_obj_t *cover = s_media_cover_cards[index];
+    lv_obj_t *image = s_media_cover_images[index];
+    lv_obj_t *reflection = s_media_reflection_images[index];
+    lv_obj_t *fade = s_media_reflection_fades[index];
+    uint32_t source_width = s_media_cover_image_widths[index];
+    uint32_t source_height = s_media_cover_image_heights[index];
+    uint32_t scale_x;
+    uint32_t scale_y;
+    uint32_t scale;
+    uint32_t reflection_scale;
+    int32_t width;
+    int32_t height;
+    int32_t direction = media_cover_direction(index);
+    int32_t depth = s_media_cover_perspective[index];
+    int32_t front_mix;
+    depth = depth < 0 ? -depth : depth;
+    front_mix = 256 - depth * 2;
+    if (front_mix < 0) front_mix = 0;
+    if (image == RT_NULL || !lv_obj_is_valid(image) ||
+        lv_obj_has_flag(image, LV_OBJ_FLAG_HIDDEN) ||
+        cover == RT_NULL || !lv_obj_is_valid(cover) ||
+        source_width == 0U || source_height == 0U) return;
+    if (direction != s_media_cover_warp_direction[index] &&
+        s_media_cover_state != FT_MEDIA_COVER_ANIMATING &&
+        s_media_cover_state != FT_MEDIA_COVER_DRAGGING &&
+        s_media_cover_paths[index][0] != '\0')
+    {
+        ft_player_track_t track;
+        if (ft_player_get_track(s_media_cover_tracks[index], &track) == RT_EOK)
+        {
+            media_cover_update_image(index, track.path);
+            return;
+        }
+    }
+    width = lv_obj_get_content_width(cover);
+    height = lv_obj_get_content_height(cover);
+    if (width <= 0 || height <= 0) return;
+    scale_x = (uint32_t)width * 90U * 256U / (100U * source_width);
+    scale_y = (uint32_t)height * 90U * 256U / (100U * source_height);
+    scale = scale_x < scale_y ? scale_x : scale_y;
+    if (scale > 256U) scale = 256U;
+    if (scale == 0U) scale = 1U;
+    lv_obj_set_size(image, source_width, source_height);
+    lv_image_set_pivot(image, source_width / 2U, source_height / 2U);
+    lv_image_set_rotation(image, 0);
+    lv_image_set_scale(image, scale);
+    lv_obj_center(image);
+    if (s_media_front_images[index] != RT_NULL &&
+        lv_obj_is_valid(s_media_front_images[index]))
+    {
+        lv_obj_set_size(s_media_front_images[index], source_width, source_height);
+        lv_image_set_pivot(s_media_front_images[index],
+                           source_width / 2U, source_height / 2U);
+        lv_image_set_rotation(s_media_front_images[index], 0);
+        lv_image_set_scale(s_media_front_images[index], scale);
+        lv_obj_center(s_media_front_images[index]);
+    }
+    else
+    {
+        front_mix = 0;
+    }
+    lv_obj_set_style_image_opa(image,
+        (lv_opa_t)(s_media_cover_opacity[index] * (256 - front_mix) / 256),
+        LV_PART_MAIN);
+    if (s_media_front_images[index] != RT_NULL &&
+        lv_obj_is_valid(s_media_front_images[index]))
+        lv_obj_set_style_image_opa(s_media_front_images[index],
+            (lv_opa_t)(s_media_cover_opacity[index] * front_mix / 256),
+            LV_PART_MAIN);
+    if (reflection != RT_NULL && lv_obj_is_valid(reflection) &&
+        lv_obj_get_parent(reflection) != RT_NULL)
+    {
+        lv_area_t cover_area;
+        lv_area_t parent_area;
+        int32_t reflection_width;
+        int32_t reflection_height;
+        int32_t reflection_x;
+        int32_t reflection_y;
+        reflection_scale = scale * 35U / 100U;
+        if (reflection_scale == 0U) reflection_scale = 1U;
+        reflection_width = (int32_t)(source_width * scale / 256U);
+        reflection_height = (int32_t)(source_height * reflection_scale / 256U);
+        lv_obj_set_size(reflection, source_width, source_height);
+        lv_image_set_pivot(reflection, source_width / 2U, source_height / 2U);
+        lv_image_set_rotation(reflection, 0);
+        lv_image_set_scale_x(reflection, scale);
+        lv_image_set_scale_y(reflection, reflection_scale);
+        if (s_media_front_reflection_images[index] != RT_NULL &&
+            lv_obj_is_valid(s_media_front_reflection_images[index]))
+        {
+            lv_obj_set_size(s_media_front_reflection_images[index],
+                            source_width, source_height);
+            lv_image_set_pivot(s_media_front_reflection_images[index],
+                               source_width / 2U, source_height / 2U);
+            lv_image_set_rotation(s_media_front_reflection_images[index], 0);
+            lv_image_set_scale_x(s_media_front_reflection_images[index], scale);
+            lv_image_set_scale_y(s_media_front_reflection_images[index],
+                                 reflection_scale);
+        }
+        lv_obj_update_layout(lv_obj_get_parent(reflection));
+        lv_obj_get_coords(cover, &cover_area);
+        lv_obj_get_coords(lv_obj_get_parent(reflection), &parent_area);
+        reflection_x = cover_area.x1 - parent_area.x1 +
+                       (lv_area_get_width(&cover_area) - reflection_width) / 2 -
+                       ((int32_t)source_width - reflection_width) / 2;
+        reflection_y = cover_area.y2 - parent_area.y1 + 3 -
+                       ((int32_t)source_height - reflection_height) / 2;
+        lv_obj_set_pos(reflection, reflection_x, reflection_y);
+        if (s_media_front_reflection_images[index] != RT_NULL &&
+            lv_obj_is_valid(s_media_front_reflection_images[index]))
+            lv_obj_set_pos(s_media_front_reflection_images[index],
+                           reflection_x, reflection_y);
+        lv_obj_set_style_image_opa(reflection,
+            (lv_opa_t)(LV_OPA_40 * s_media_cover_opacity[index] *
+                       (256 - front_mix) / 256 / LV_OPA_COVER), LV_PART_MAIN);
+        if (s_media_front_reflection_images[index] != RT_NULL &&
+            lv_obj_is_valid(s_media_front_reflection_images[index]))
+            lv_obj_set_style_image_opa(s_media_front_reflection_images[index],
+                (lv_opa_t)(LV_OPA_40 * s_media_cover_opacity[index] *
+                           front_mix / 256 / LV_OPA_COVER), LV_PART_MAIN);
+        if (fade != RT_NULL && lv_obj_is_valid(fade))
+        {
+            lv_obj_set_size(fade, reflection_width, reflection_height);
+            lv_obj_set_pos(fade,
+                           reflection_x + ((int32_t)source_width - reflection_width) / 2,
+                           reflection_y + ((int32_t)source_height - reflection_height) / 2);
+        }
+    }
+}
+
+static void media_reflection_fade_draw_cb(lv_event_t *event)
+{
+    lv_obj_t *fade = lv_event_get_target(event);
+    lv_layer_t *layer = lv_event_get_layer(event);
+    lv_draw_rect_dsc_t draw;
+    lv_area_t area;
+    lv_area_t band_area;
+    const int32_t band_count = 12;
+    int32_t height;
+    int32_t band;
+    lv_obj_get_coords(fade, &area);
+    height = lv_area_get_height(&area);
+    if (height <= 0) return;
+    lv_draw_rect_dsc_init(&draw);
+    draw.bg_color = lv_color_black();
+    for (band = 1; band < band_count; band++)
+    {
+        band_area.x1 = area.x1;
+        band_area.x2 = area.x2;
+        band_area.y1 = area.y1 + height * band / band_count;
+        band_area.y2 = area.y1 + height * (band + 1) / band_count - 1;
+        draw.bg_opa = (lv_opa_t)(band * LV_OPA_COVER / (band_count - 1));
+        lv_draw_rect(layer, &draw, &band_area);
     }
 }
 
@@ -4988,22 +5562,23 @@ static void media_cover_refresh_visuals(void)
             lv_obj_get_height(s_media_cover_cards[i]) != height)
         {
             lv_obj_set_size(s_media_cover_cards[i], width, height);
-            lv_obj_align(s_media_cover_cards[i], LV_ALIGN_CENTER, 0, y_offset);
         }
-        /* Child alignment is defined once when the card is created.  Rewriting
-         * text and artwork coordinates for every scroll sample needlessly
-         * dirties the font layout cache and was the source of visible glyph
-         * reordering while the cover animation was active. */
-        /* Never fade the parent as a group.  A transformed/faded parent makes
-         * LVGL allocate one off-screen layer per album and breaks the
-         * one-submit frame chain.  Fade each primitive directly instead. */
+        lv_obj_align(s_media_cover_cards[i], LV_ALIGN_TOP_MID, 0,
+                     ft_layout_px(8) + y_offset);
         if (s_media_cover_opacity[i] != (uint8_t)opacity)
         {
-            lv_obj_set_style_bg_opa(s_media_cover_cards[i], (lv_opa_t)opacity, LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(s_media_cover_cards[i],
+                                    lv_obj_has_flag(s_media_cover_images[i], LV_OBJ_FLAG_HIDDEN) ?
+                                    (lv_opa_t)opacity : LV_OPA_TRANSP, LV_PART_MAIN);
             lv_obj_set_style_bg_opa(s_media_cover_bands[i], (lv_opa_t)opacity, LV_PART_MAIN);
             lv_obj_set_style_bg_opa(s_media_cover_discs[i], (lv_opa_t)opacity, LV_PART_MAIN);
             lv_obj_set_style_border_opa(s_media_cover_discs[i], (lv_opa_t)opacity, LV_PART_MAIN);
             lv_obj_set_style_bg_opa(s_media_cover_dots[i], (lv_opa_t)opacity, LV_PART_MAIN);
+            lv_obj_set_style_image_opa(s_media_cover_images[i],
+                                       (lv_opa_t)opacity, LV_PART_MAIN);
+            lv_obj_set_style_image_opa(s_media_reflection_images[i],
+                                       (lv_opa_t)(LV_OPA_40 * opacity / LV_OPA_COVER),
+                                       LV_PART_MAIN);
         }
         if (old_depth != depth)
             lv_obj_set_style_bg_opa(s_media_cover_shades[i],
@@ -5020,7 +5595,181 @@ static void media_cover_refresh_visuals(void)
         s_media_cover_perspective[i] =
             (int16_t)(signed_distance < 0 ? -depth : depth);
         s_media_cover_opacity[i] = (uint8_t)opacity;
+        media_cover_resize_image(i);
     }
+}
+
+static bool media_cover_sidecar_path(const char *track_path, char *cover_path,
+                                     size_t cover_path_size)
+{
+    static const char *const extensions[] = {".jpg", ".jpeg", ".png", ".bmp"};
+    const char *extension;
+    size_t i;
+    if (track_path == RT_NULL || cover_path == RT_NULL ||
+        cover_path_size == 0U) return false;
+    extension = strrchr(track_path, '.');
+    if (extension == RT_NULL) return false;
+    for (i = 0U; i < sizeof(extensions) / sizeof(extensions[0]); i++)
+    {
+        struct stat status;
+        int length = rt_snprintf(cover_path, cover_path_size, "%.*s%s",
+                                 (int)(extension - track_path), track_path,
+                                 extensions[i]);
+        if (length < 0 || (size_t)length >= cover_path_size) continue;
+        if (stat(cover_path, &status) == 0 && !S_ISDIR(status.st_mode)) return true;
+    }
+    return false;
+}
+
+static void media_cover_release_bitmap(size_t index)
+{
+    if (s_media_cover_bitmaps[index].draw_buf == RT_NULL &&
+        s_media_reflection_bitmaps[index].draw_buf == RT_NULL &&
+        s_media_front_bitmaps[index].draw_buf == RT_NULL &&
+        s_media_front_reflection_bitmaps[index].draw_buf == RT_NULL) return;
+    lv_gpu_batch_wait_idle();
+    ft_gallery_release_rendered_image(&s_media_cover_bitmaps[index]);
+    ft_gallery_release_rendered_image(&s_media_reflection_bitmaps[index]);
+    ft_gallery_release_rendered_image(&s_media_front_bitmaps[index]);
+    ft_gallery_release_rendered_image(&s_media_front_reflection_bitmaps[index]);
+}
+
+static void media_cover_clear_image(size_t index)
+{
+    lv_obj_t *image = s_media_cover_images[index];
+    lv_obj_t *reflection = s_media_reflection_images[index];
+    lv_obj_t *fade = s_media_reflection_fades[index];
+    if (image != RT_NULL && lv_obj_is_valid(image))
+    {
+        lv_image_set_src(image, RT_NULL);
+        lv_obj_add_flag(image, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (reflection != RT_NULL && lv_obj_is_valid(reflection))
+    {
+        lv_image_set_src(reflection, RT_NULL);
+        lv_obj_add_flag(reflection, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_media_front_images[index] != RT_NULL &&
+        lv_obj_is_valid(s_media_front_images[index]))
+    {
+        lv_image_set_src(s_media_front_images[index], RT_NULL);
+        lv_obj_add_flag(s_media_front_images[index], LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_media_front_reflection_images[index] != RT_NULL &&
+        lv_obj_is_valid(s_media_front_reflection_images[index]))
+    {
+        lv_image_set_src(s_media_front_reflection_images[index], RT_NULL);
+        lv_obj_add_flag(s_media_front_reflection_images[index], LV_OBJ_FLAG_HIDDEN);
+    }
+    if (fade != RT_NULL && lv_obj_is_valid(fade))
+        lv_obj_add_flag(fade, LV_OBJ_FLAG_HIDDEN);
+    media_cover_release_bitmap(index);
+    s_media_cover_paths[index][0] = '\0';
+    s_media_cover_warp_direction[index] = 0;
+    lv_obj_set_style_bg_opa(s_media_cover_cards[index], LV_OPA_COVER, LV_PART_MAIN);
+    s_media_cover_image_widths[index] = 0U;
+    s_media_cover_image_heights[index] = 0U;
+    if (s_media_cover_bands[index] != RT_NULL)
+        lv_obj_remove_flag(s_media_cover_bands[index], LV_OBJ_FLAG_HIDDEN);
+    if (s_media_cover_shades[index] != RT_NULL)
+        lv_obj_remove_flag(s_media_cover_shades[index], LV_OBJ_FLAG_HIDDEN);
+    if (s_media_cover_discs[index] != RT_NULL)
+        lv_obj_remove_flag(s_media_cover_discs[index], LV_OBJ_FLAG_HIDDEN);
+    if (s_media_cover_dots[index] != RT_NULL)
+        lv_obj_remove_flag(s_media_cover_dots[index], LV_OBJ_FLAG_HIDDEN);
+}
+
+static void media_cover_update_image(size_t index, const char *track_path)
+{
+    media_cover_update_image_direction(index, track_path,
+                                       media_cover_direction(index));
+}
+
+static void media_cover_update_image_direction(size_t index, const char *track_path,
+                                               int32_t direction)
+{
+    char cover_path[FT_PLAYER_PATH_MAX];
+    lv_obj_t *image = s_media_cover_images[index];
+    lv_obj_t *reflection = s_media_reflection_images[index];
+    lv_obj_t *fade = s_media_reflection_fades[index];
+    lv_draw_buf_t *bitmap;
+    if (image == RT_NULL || !lv_obj_is_valid(image)) return;
+    if (!media_cover_sidecar_path(track_path, cover_path, sizeof(cover_path)))
+    {
+        media_cover_clear_image(index);
+        return;
+    }
+    if (strcmp(s_media_cover_paths[index], cover_path) == 0 &&
+        direction == s_media_cover_warp_direction[index])
+    {
+        media_cover_resize_image(index);
+        return;
+    }
+    lv_image_set_src(image, RT_NULL);
+    if (reflection != RT_NULL && lv_obj_is_valid(reflection))
+        lv_image_set_src(reflection, RT_NULL);
+    if (s_media_front_images[index] != RT_NULL &&
+        lv_obj_is_valid(s_media_front_images[index]))
+        lv_image_set_src(s_media_front_images[index], RT_NULL);
+    if (s_media_front_reflection_images[index] != RT_NULL &&
+        lv_obj_is_valid(s_media_front_reflection_images[index]))
+        lv_image_set_src(s_media_front_reflection_images[index], RT_NULL);
+    media_cover_release_bitmap(index);
+    if (!ft_gallery_render_perspective_path(cover_path, 240U, direction,
+                                            &s_media_cover_bitmaps[index]) ||
+        !ft_gallery_render_reflection(&s_media_cover_bitmaps[index],
+                                      &s_media_reflection_bitmaps[index]))
+    {
+        media_cover_clear_image(index);
+        return;
+    }
+    if (direction != 0 &&
+        (!ft_gallery_render_perspective_path(cover_path, 240U, 0,
+                                             &s_media_front_bitmaps[index]) ||
+         !ft_gallery_render_reflection(&s_media_front_bitmaps[index],
+                                       &s_media_front_reflection_bitmaps[index])))
+    {
+        media_cover_clear_image(index);
+        return;
+    }
+    bitmap = s_media_cover_bitmaps[index].draw_buf;
+    s_media_cover_warp_direction[index] = (int8_t)direction;
+    s_media_cover_image_widths[index] = bitmap->header.w;
+    s_media_cover_image_heights[index] = bitmap->header.h;
+    rt_strncpy(s_media_cover_paths[index], cover_path,
+               sizeof(s_media_cover_paths[index]) - 1U);
+    s_media_cover_paths[index][sizeof(s_media_cover_paths[index]) - 1U] = '\0';
+    lv_image_set_src(image, bitmap);
+    if (reflection != RT_NULL && lv_obj_is_valid(reflection))
+        lv_image_set_src(reflection, s_media_reflection_bitmaps[index].draw_buf);
+    if (s_media_front_images[index] != RT_NULL &&
+        lv_obj_is_valid(s_media_front_images[index]))
+        lv_image_set_src(s_media_front_images[index],
+            s_media_front_bitmaps[index].draw_buf != RT_NULL ?
+            s_media_front_bitmaps[index].draw_buf : bitmap);
+    if (s_media_front_reflection_images[index] != RT_NULL &&
+        lv_obj_is_valid(s_media_front_reflection_images[index]))
+        lv_image_set_src(s_media_front_reflection_images[index],
+            s_media_front_reflection_bitmaps[index].draw_buf != RT_NULL ?
+            s_media_front_reflection_bitmaps[index].draw_buf :
+            s_media_reflection_bitmaps[index].draw_buf);
+    lv_obj_set_style_bg_opa(s_media_cover_cards[index], LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_remove_flag(image, LV_OBJ_FLAG_HIDDEN);
+    if (s_media_front_images[index] != RT_NULL &&
+        lv_obj_is_valid(s_media_front_images[index]))
+        lv_obj_remove_flag(s_media_front_images[index], LV_OBJ_FLAG_HIDDEN);
+    if (reflection != RT_NULL && lv_obj_is_valid(reflection))
+        lv_obj_remove_flag(reflection, LV_OBJ_FLAG_HIDDEN);
+    if (s_media_front_reflection_images[index] != RT_NULL &&
+        lv_obj_is_valid(s_media_front_reflection_images[index]))
+        lv_obj_remove_flag(s_media_front_reflection_images[index], LV_OBJ_FLAG_HIDDEN);
+    if (fade != RT_NULL && lv_obj_is_valid(fade))
+        lv_obj_remove_flag(fade, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_media_cover_bands[index], LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_media_cover_shades[index], LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_media_cover_discs[index], LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_media_cover_dots[index], LV_OBJ_FLAG_HIDDEN);
+    media_cover_resize_image(index);
 }
 
 static void update_media_labels(void)
@@ -5097,6 +5846,15 @@ static void media_cover_commit_offset(int32_t offset)
               (player.state == FT_PLAYER_PLAYING ||
                player.state == FT_PLAYER_STARTING);
     s_media_track = (int32_t)media_track_wrap(s_media_track + offset);
+    {
+        size_t i;
+        for (i = 0U; i < FT_MEDIA_FLOW_CELL_COUNT; i++)
+        {
+            int32_t slot = (int32_t)i - (int32_t)FT_MEDIA_FLOW_CENTER;
+            s_media_cover_perspective[i] = (int16_t)(slot < 0 ? -128 :
+                                                     slot > 0 ? 128 : 0);
+        }
+    }
     if (restart) (void)ft_player_play((size_t)s_media_track);
     update_media_labels();
 }
@@ -5118,6 +5876,13 @@ static bool media_cover_start_turn(int32_t offset)
     s_media_cover_anim_start_offset = s_media_cover_visual_offset;
     s_media_cover_anim_target_offset = -offset * s_media_cover_cell_width;
     s_media_cover_state = FT_MEDIA_COVER_ANIMATING;
+    {
+        ft_player_track_t track;
+        if (ft_player_get_track(s_media_cover_tracks[FT_MEDIA_FLOW_CENTER],
+                                &track) == RT_EOK)
+            media_cover_update_image_direction(FT_MEDIA_FLOW_CENTER, track.path,
+                                               offset > 0 ? -1 : 1);
+    }
     s_media_cover_state_tick = lv_tick_get();
     media_cover_wake_controller();
     return true;
@@ -5147,6 +5912,14 @@ static void media_cover_event_cb(lv_event_t *event)
         s_media_cover_visual_offset = media_clamp_i32(
             point.x - s_media_cover_drag_start_x,
             -s_media_cover_cell_width, s_media_cover_cell_width);
+        if (s_media_cover_visual_offset != 0)
+        {
+            ft_player_track_t track;
+            if (ft_player_get_track(s_media_cover_tracks[FT_MEDIA_FLOW_CENTER],
+                                    &track) == RT_EOK)
+                media_cover_update_image_direction(FT_MEDIA_FLOW_CENTER, track.path,
+                    s_media_cover_visual_offset < 0 ? -1 : 1);
+        }
         s_media_cover_visual_dirty = true;
     }
     else if ((code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) &&
@@ -5216,7 +5989,8 @@ static lv_obj_t *media_cover_create_cell(lv_obj_t *flow, size_t index,
     lv_obj_t *title = lv_label_create(cover);
     style_layout_container(cell);
     lv_obj_set_size(cell, s_media_cover_cell_width, flow_height);
-    lv_obj_add_flag(cell, LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_FLOATING);
+    lv_obj_add_flag(cell, LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_FLOATING |
+                    LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_remove_flag(cell, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_set_size(cover, s_media_cover_min_width, s_media_cover_min_height);
@@ -5224,6 +5998,7 @@ static lv_obj_t *media_cover_create_cell(lv_obj_t *flow, size_t index,
     lv_obj_set_style_border_width(cover, 0, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(cover, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(cover, 0, LV_PART_MAIN);
+    lv_obj_add_flag(cover, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_remove_flag(cover, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_set_size(band, s_media_cover_max_size * 86 / 100,
@@ -5267,10 +6042,22 @@ static lv_obj_t *media_cover_create_cell(lv_obj_t *flow, size_t index,
     lv_obj_align(title, LV_ALIGN_BOTTOM_MID, 0, -ft_layout_px(10));
     lv_obj_add_flag(title, LV_OBJ_FLAG_HIDDEN);
 
+    s_media_cover_images[index] = lv_image_create(cover);
+    lv_obj_add_flag(s_media_cover_images[index], LV_OBJ_FLAG_IGNORE_LAYOUT |
+                    LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_media_cover_images[index], LV_OBJ_FLAG_CLICKABLE |
+                       LV_OBJ_FLAG_SCROLLABLE);
+    s_media_front_images[index] = lv_image_create(cover);
+    lv_obj_add_flag(s_media_front_images[index], LV_OBJ_FLAG_IGNORE_LAYOUT |
+                    LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_media_front_images[index], LV_OBJ_FLAG_CLICKABLE |
+                       LV_OBJ_FLAG_SCROLLABLE);
+
     s_media_cover_cells[index] = cell;
     s_media_cover_cards[index] = cover;
     s_media_cover_bands[index] = band;
     s_media_cover_shades[index] = shade;
+    lv_obj_move_foreground(shade);
     s_media_cover_discs[index] = disc;
     s_media_cover_dots[index] = dot;
     s_media_cover_titles[index] = title;
@@ -5556,6 +6343,9 @@ static void media_page_deleted_cb(lv_event_t *event)
     s_media_directory_label = RT_NULL;
     s_media_loop_button = RT_NULL;
     s_media_loop_label = RT_NULL;
+    s_media_output_buttons[0] = RT_NULL;
+    s_media_output_buttons[1] = RT_NULL;
+    s_media_output_status = RT_NULL;
     for (i = 0U; i < FT_MEDIA_FLOW_CELL_COUNT; i++)
     {
         s_media_cover_cells[i] = RT_NULL;
@@ -5565,7 +6355,17 @@ static void media_page_deleted_cb(lv_event_t *event)
         s_media_cover_discs[i] = RT_NULL;
         s_media_cover_dots[i] = RT_NULL;
         s_media_cover_titles[i] = RT_NULL;
+        s_media_cover_images[i] = RT_NULL;
+        s_media_front_images[i] = RT_NULL;
+        s_media_reflection_images[i] = RT_NULL;
+        s_media_front_reflection_images[i] = RT_NULL;
+        s_media_reflection_fades[i] = RT_NULL;
+        media_cover_release_bitmap(i);
+        s_media_cover_image_widths[i] = 0U;
+        s_media_cover_image_heights[i] = 0U;
+        s_media_cover_paths[i][0] = '\0';
         s_media_cover_tracks[i] = 0U;
+        s_media_cover_warp_direction[i] = 0;
         s_media_cover_perspective[i] = 0;
         s_media_cover_opacity[i] = LV_OPA_TRANSP;
     }
@@ -5610,6 +6410,7 @@ static void media_monitor_cb(lv_timer_t *timer)
     bool playing;
     LV_UNUSED(timer);
     if (ft_player_get_status(&status) != RT_EOK) return;
+    media_output_refresh();
     playing = status.state == FT_PLAYER_PLAYING ||
               status.state == FT_PLAYER_STARTING;
     if (status.generation != s_media_player_generation)
@@ -5625,6 +6426,11 @@ static void media_monitor_cb(lv_timer_t *timer)
         if (status.state == FT_PLAYER_ERROR)
             feathertalk_ui_alert(
                 ft_preferences_text("播放失败", "Playback failed"),
+                status.output == FT_PLAYER_OUTPUT_BT_A2DP &&
+                status.last_error == -RT_ETIMEOUT ?
+                    ft_preferences_text(
+                        "蓝牙耳机没有接收音频，请检查连接后重试。",
+                        "The Bluetooth headphones stopped receiving audio. Check the connection and retry.") :
                 status.last_error == -RT_EBUSY ?
                     ft_preferences_text("扬声器正在被 USB Audio 使用。",
                                         "The speaker is in use by USB Audio.") :
@@ -5694,6 +6500,81 @@ static void media_clicked_cb(lv_event_t *event)
     }
     ft_tiles_set_live_loop(FT_PAGE_MEDIA, s_media_playing);
     update_media_labels();
+}
+
+static bool media_bt_output_peer(char *text, size_t text_size)
+{
+    ft_bt_source_shared_t source;
+    if (text == RT_NULL || text_size == 0U) return false;
+    if (feathertalk_ipc_get_bt_source(&source) != RT_EOK ||
+        (source.peer_flags & FT_BT_SOURCE_FLAG_CONNECTED) == 0U ||
+        (source.state != FT_BT_SOURCE_STATE_OPEN &&
+         source.state != FT_BT_SOURCE_STATE_PLAYING)) return false;
+    for (uint32_t i = 0U; i < source.count; i++)
+    {
+        if (memcmp(source.peer, source.devices[i].addr, 6U) == 0 &&
+            source.devices[i].name_len != 0U)
+        {
+            lv_snprintf(text, text_size, "%s", source.devices[i].name);
+            return true;
+        }
+    }
+    lv_snprintf(text, text_size, "%02X:%02X:%02X:%02X:%02X:%02X",
+                source.peer[0], source.peer[1], source.peer[2],
+                source.peer[3], source.peer[4], source.peer[5]);
+    return true;
+}
+
+static void media_output_refresh(void)
+{
+    ft_player_output_t output = FT_PLAYER_OUTPUT_SPEAKER;
+    char peer[64];
+    char text[128];
+    bool connected = media_bt_output_peer(peer, sizeof(peer));
+    (void)ft_player_get_output(&output);
+    for (int i = 0; i < 2; i++)
+        ft_state_button_apply(s_media_output_buttons[i],
+                              output == (ft_player_output_t)i ? 1 : 0);
+    if (s_media_output_status != RT_NULL &&
+        lv_obj_is_valid(s_media_output_status))
+    {
+        if (connected)
+            lv_snprintf(text, sizeof(text), ft_preferences_text(
+                "蓝牙耳机已连接：%s", "Bluetooth headphones connected: %s"),
+                peer);
+        else
+            lv_snprintf(text, sizeof(text), "%s",
+                ft_preferences_text(
+                    "蓝牙耳机未连接，请先在“设置 > 蓝牙”中扫描并连接。",
+                    "No Bluetooth headphones. Scan and connect in Settings > Bluetooth first."));
+        if (strcmp(lv_label_get_text(s_media_output_status), text))
+            lv_label_set_text(s_media_output_status, text);
+    }
+}
+
+static void media_output_cb(lv_event_t *event)
+{
+    ft_player_output_t output =
+        (ft_player_output_t)(uintptr_t)lv_event_get_user_data(event);
+    if (output == FT_PLAYER_OUTPUT_BT_A2DP &&
+        !media_bt_output_peer((char[64]){0}, 64U))
+    {
+        feathertalk_ui_alert(
+            ft_preferences_text("未连接蓝牙耳机", "No Bluetooth headphones"),
+            ft_preferences_text(
+                "请先在“设置 > 蓝牙”中选择 SOURCE，扫描并连接耳机。",
+                "Select SOURCE in Settings > Bluetooth, then scan and connect headphones."));
+        return;
+    }
+    if (ft_player_set_output(output) != RT_EOK)
+    {
+        feathertalk_ui_alert(
+            ft_preferences_text("无法切换输出", "Unable to switch output"),
+            ft_preferences_text("当前播放器无法打开所选输出设备。",
+                                "The selected output could not be opened."));
+        return;
+    }
+    media_output_refresh();
 }
 
 static void media_volume_cb(lv_event_t *event)
@@ -5840,16 +6721,17 @@ static lv_obj_t *create_media_page(lv_obj_t *parent)
                                            LV_OBJ_FLAG_SCROLL_CHAIN |
                                            LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_set_scrollbar_mode(s_media_cover_flow, LV_SCROLLBAR_MODE_OFF);
-    s_media_cover_max_size = media_clamp_i32(flow_width * 11 / 20,
-                                             ft_layout_px(150), flow_height -
-                                             ft_layout_px(24));
-    s_media_cover_min_width = s_media_cover_max_size * 46 / 100;
-    s_media_cover_min_height = s_media_cover_max_size * 78 / 100;
-    s_media_cover_cell_width = s_media_cover_max_size + ft_layout_px(10);
+    s_media_cover_max_size = media_clamp_i32(flow_width * 9 / 20,
+                                             ft_layout_px(150),
+                                             flow_height * 7 / 10);
+    s_media_cover_min_width = s_media_cover_max_size * 70 / 100;
+    s_media_cover_min_height = s_media_cover_max_size * 82 / 100;
+    s_media_cover_cell_width = s_media_cover_max_size * 66 / 100;
     lv_obj_add_event_cb(s_media_cover_flow, media_cover_event_cb,
                         LV_EVENT_ALL, RT_NULL);
     for (i = 0U; i < FT_MEDIA_FLOW_CELL_COUNT; i++)
         (void)media_cover_create_cell(s_media_cover_flow, i, flow_height);
+    lv_obj_move_foreground(s_media_cover_cells[FT_MEDIA_FLOW_CENTER]);
     s_media_cover_state = FT_MEDIA_COVER_IDLE;
     s_media_cover_visual_dirty = false;
     s_media_cover_pending_offset = 0;
@@ -5959,6 +6841,66 @@ static lv_obj_t *create_media_page(lv_obj_t *parent)
                         LV_ANIM_OFF);
     lv_obj_add_event_cb(s_media_volume, media_volume_cb,
                         LV_EVENT_VALUE_CHANGED, RT_NULL);
+
+    volume_caption = lv_label_create(details);
+    lv_label_set_text(volume_caption, ft_preferences_text("输出设备", "Output device"));
+    lv_obj_set_style_text_font(volume_caption, ft_layout_font(12), LV_PART_MAIN);
+    row = lv_obj_create(details);
+    style_layout_container(row);
+    lv_obj_set_size(row, lv_pct(100), layout->control_height);
+    lv_obj_set_style_pad_column(row, ft_layout_px(8), LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    track_object(&s_media_output_buttons[0],
+                 create_state_button(row,
+                    ft_preferences_text("板载扬声器", "Speaker"),
+                    media_output_cb,
+                    (void *)(uintptr_t)FT_PLAYER_OUTPUT_SPEAKER));
+    track_object(&s_media_output_buttons[1],
+                 create_state_button(row,
+                    ft_preferences_text("蓝牙耳机", "Bluetooth"),
+                    media_output_cb,
+                    (void *)(uintptr_t)FT_PLAYER_OUTPUT_BT_A2DP));
+    lv_obj_set_width(s_media_output_buttons[0], 0);
+    lv_obj_set_width(s_media_output_buttons[1], 0);
+    lv_obj_set_flex_grow(s_media_output_buttons[0], 1);
+    lv_obj_set_flex_grow(s_media_output_buttons[1], 1);
+    track_object(&s_media_output_status, lv_label_create(details));
+    lv_obj_set_width(s_media_output_status, lv_pct(100));
+    lv_label_set_long_mode(s_media_output_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_media_output_status, ft_layout_font(11), LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_media_output_status,
+                                lv_color_hex(0xA8A8A8), LV_PART_MAIN);
+    media_output_refresh();
+
+    for (i = 0U; i < FT_MEDIA_FLOW_CELL_COUNT; i++)
+    {
+        s_media_reflection_images[i] = lv_image_create(page);
+        s_media_front_reflection_images[i] = lv_image_create(page);
+        s_media_reflection_fades[i] = lv_obj_create(page);
+        lv_obj_add_flag(s_media_reflection_images[i], LV_OBJ_FLAG_IGNORE_LAYOUT |
+                        LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_media_front_reflection_images[i],
+                        LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_FLOATING |
+                        LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_media_reflection_fades[i], LV_OBJ_FLAG_IGNORE_LAYOUT |
+                        LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_media_reflection_images[i], LV_OBJ_FLAG_CLICKABLE |
+                           LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(s_media_front_reflection_images[i],
+                           LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(s_media_reflection_fades[i], LV_OBJ_FLAG_CLICKABLE |
+                           LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_image_opa(s_media_reflection_images[i], LV_OPA_40,
+                                   LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(s_media_reflection_fades[i], LV_OPA_TRANSP,
+                                LV_PART_MAIN);
+        lv_obj_add_event_cb(s_media_reflection_fades[i],
+                            media_reflection_fade_draw_cb, LV_EVENT_DRAW_MAIN,
+                            RT_NULL);
+        lv_obj_set_style_border_width(s_media_reflection_fades[i], 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(s_media_reflection_fades[i], 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(s_media_reflection_fades[i], 0, LV_PART_MAIN);
+    }
 
     s_media_playing = false;
     s_media_track = 0;

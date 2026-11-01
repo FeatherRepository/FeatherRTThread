@@ -59,6 +59,9 @@ extern int  bt_hcd_download_run(void);
 extern int  bt_hcd_send_raw_command(uint16_t opcode, uint8_t plen, const uint8_t *params);
 extern int  bt_uart_raw_open(uint32_t baud);
 extern int  bt_uart_raw_set_baud(uint32_t baud);
+extern void bt_uart_host_mode_reinit(void);
+extern void bt_a2dp_source_drop(void);
+extern void bt_adv_prepare_poweroff(void);
 extern const btstack_uart_block_t *btstack_uart_block_embedded_instance(void);
 /* h4 传输配置: 必须是 hci_transport_config_uart_t (首字段 type=
  * HCI_TRANSPORT_CONFIG_UART)。之前误传 btstack_uart_config_t: 该工程
@@ -360,7 +363,11 @@ int bt_bringup(void)
     btstack_run_loop_set_timer(&s_adv_keepalive_timer, 3000);
     btstack_run_loop_add_timer(&s_adv_keepalive_timer);
 
-    rt_kprintf("[BT] hci_power_on\n");
+    /* raw HCD 与 H4 host 使用不同的 UART 生命周期。每次重新打开 HCI 前
+     * 都完整重建 SCB async 上下文/IRQ，而不是复用下载阶段的残留状态。 */
+    bt_uart_host_mode_reinit();
+    s_uart_config.baudrate_init = FT_BT_RUNTIME_BAUD;
+    rt_kprintf("[BT] hci_power_on (uart host reinit)\n");
     feathertalk_ipc_send_event(9);
     s_bt_state = 1;
     rc = hci_power_control(HCI_POWER_ON);
@@ -378,6 +385,8 @@ int bt_stop_owned(void)
     if (s_stack_initialized) {
         btstack_run_loop_remove_timer(&s_notify_timer);
         btstack_run_loop_remove_timer(&s_adv_keepalive_timer);
+        bt_adv_prepare_poweroff();
+        bt_a2dp_source_drop();  /* Cancel source timers before the host loop stops. */
         bt_a2dp_sink_quiesce(); /* M55 must release sound0 even on controller loss. */
         hci_power_control(HCI_POWER_OFF);
         uint32_t start = rt_tick_get_millisecond();

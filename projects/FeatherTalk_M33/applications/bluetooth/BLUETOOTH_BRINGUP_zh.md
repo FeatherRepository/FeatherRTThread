@@ -493,5 +493,30 @@ bluetooth-rescan2-m33.log
 6. 再打开 HOST_WAKE/DEVICE_WAKE 与低功耗休眠；
 7. 最后进行长时间连接、并发 UI/存储、射频吞吐和功耗回归。
 
-在完成第 3、4 步前，当前系统只能宣称 BLE 扫描和非连接广播可用，不能宣称安全配对、
+在完成第 3、4 步前，当时系统只能宣称 BLE 扫描和非连接广播可用，不能宣称安全配对、
 Bond 或加密业务已经完成。
+
+## 10. 当前产品实现补充（BK / BlueKitchen）
+
+本文第 1-9 节保留 AIROC 上板过程作为历史记录。当前 `FeatherTalk_M33/rtconfig.h`
+选择 `FEATHERTALK_BT_STACK_BK`，产品运行时由 BK BTstack 承担 BLE、经典 A2DP、
+LE Audio 和配对业务。
+
+- GATT、SMP、Bond 持久化、LE Audio 单播/广播和经典 A2DP Sink/Source 均已编译进
+  当前镜像；实际可用性按对应 UI/命令回归，不再引用第 9 节的历史限制。
+- M55 蓝牙设置提供双模、经典 A2DP、LE 音频三种通道。SOURCE 页提供耳机扫描、
+  设备选择、连接和断开；扫描完成后不再自动连接第一台设备。
+- M33 Source 状态通过
+  `projects/FeatherTalk_Common/include/feathertalk/bt_source_shared.h` 的 512B
+  共享快照发布到 `0x261D4400`。M33 用 seqlock 写入，M55 读取前 invalidate
+  D-Cache，首尾 sequence 一致才采用。快照包含最多 8 台设备、地址、名称和连接状态。
+  Source 初始化会先把 sequence 清零，避免保留的奇偶随机值让读者永久判为写入中。
+
+- 耳机操作复用 16B quick IPC：`FEATHERTALK_QUICK_BT_SOURCE_ACTION` 的高半字节
+  表示扫描/连接/断开，低半字节表示扫描索引。
+- `bt_off -> bt_on` 热重启会在 HCI 开启前重建 UART host 模式，并在停止时取消
+  Source 媒体泵、重连定时器和扫描状态；关闭 HCI 前还会停止并移除两套扩展广播集，
+  清空注册状态，避免控制器重启后继续使用旧广播句柄。验收必须连续执行至少 3 轮，
+  每轮等待 `bt_status` 回到 `ready`，不能用一次整板复位代替。
+- M55 调试命令 `feather_bt_source status` 读取同一份共享快照，`scan`、`connect <n>`
+  和 `disconnect` 与 UI 走相同的跨核路径。

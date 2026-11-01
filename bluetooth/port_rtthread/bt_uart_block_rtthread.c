@@ -17,6 +17,12 @@ static volatile int received, sent;
 static int opened;
 static void (*receive_done)(void), (*send_done)(void);
 
+void bt_uart_host_mode_reinit(void)
+{
+    bt_uart_shutdown();
+    hal_uart_dma_init();
+}
+
 static void rx_irq(void) { received = 1; btstack_run_loop_poll_data_sources_from_irq(); }
 static void tx_irq(void) { sent = 1; btstack_run_loop_poll_data_sources_from_irq(); }
 static void poll_source(btstack_data_source_t *ds, btstack_data_source_callback_type_t type)

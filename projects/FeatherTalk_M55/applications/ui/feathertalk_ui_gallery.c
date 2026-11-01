@@ -13,10 +13,35 @@
 #include "feathertalk_ui_internal.h"
 #include "lv_image_decoder_private.h"
 #include "lv_draw_buf_private.h"
+#include "lv_vg_lite_utils.h"
+#include "lv_gpu_batch.h"
+#include "cy_pdl.h"
 
 extern struct rt_memheap *drv_hyperam_get_memheap(void);
 static lv_draw_buf_handlers_t s_gallery_draw_handlers;
 static bool s_gallery_draw_handlers_ready;
+static void gallery_flush_cache(const lv_draw_buf_t *draw_buf, const lv_area_t *area)
+{
+    uintptr_t start;
+    uintptr_t end;
+    (void)area;
+    if (draw_buf == RT_NULL || draw_buf->data == RT_NULL) return;
+    start = (uintptr_t)draw_buf->data & ~((uintptr_t)__SCB_DCACHE_LINE_SIZE - 1U);
+    end = ((uintptr_t)draw_buf->data + draw_buf->data_size +
+           __SCB_DCACHE_LINE_SIZE - 1U) & ~((uintptr_t)__SCB_DCACHE_LINE_SIZE - 1U);
+    SCB_CleanDCache_by_Addr((void *)start, (int32_t)(end - start));
+}
+static void gallery_invalidate_cache(const lv_draw_buf_t *draw_buf, const lv_area_t *area)
+{
+    uintptr_t start;
+    uintptr_t end;
+    (void)area;
+    if (draw_buf == RT_NULL || draw_buf->data == RT_NULL) return;
+    start = (uintptr_t)draw_buf->data & ~((uintptr_t)__SCB_DCACHE_LINE_SIZE - 1U);
+    end = ((uintptr_t)draw_buf->data + draw_buf->data_size +
+           __SCB_DCACHE_LINE_SIZE - 1U) & ~((uintptr_t)__SCB_DCACHE_LINE_SIZE - 1U);
+    SCB_InvalidateDCache_by_Addr((void *)start, (int32_t)(end - start));
+}
 static void *gallery_pixel_alloc(size_t size, lv_color_format_t format)
 {
     (void)format;
@@ -1500,6 +1525,8 @@ bool ft_gallery_render_image_path(const char *native_path,
         s_gallery_draw_handlers = *lv_draw_buf_get_handlers();
         s_gallery_draw_handlers.buf_malloc_cb = gallery_pixel_alloc;
         s_gallery_draw_handlers.buf_free_cb = gallery_pixel_free;
+        s_gallery_draw_handlers.flush_cache_cb = gallery_flush_cache;
+        s_gallery_draw_handlers.invalidate_cache_cb = gallery_invalidate_cache;
         s_gallery_draw_handlers_ready = true;
     }
     result.draw_buf = lv_draw_buf_create_ex(&s_gallery_draw_handlers, output_width, output_height,
@@ -1574,6 +1601,156 @@ finish:
         ft_gallery_release_rendered_image(&result);
         return false;
     }
+    *rendered = result;
+    return true;
+}
+
+static uint16_t gallery_sample_rgb565(const lv_draw_buf_t *source,
+                                      float x, float y)
+{
+    uint32_t x0;
+    uint32_t y0;
+    float fx;
+    float fy;
+    const uint16_t *row0;
+    const uint16_t *row1;
+    uint16_t c00;
+    uint16_t c10;
+    uint16_t c01;
+    uint16_t c11;
+    uint32_t red;
+    uint32_t green;
+    uint32_t blue;
+    if (x < 0.0f || y < 0.0f ||
+        x >= (float)(source->header.w - 1U) ||
+        y >= (float)(source->header.h - 1U)) return 0U;
+    x0 = (uint32_t)x;
+    y0 = (uint32_t)y;
+    fx = x - (float)x0;
+    fy = y - (float)y0;
+    row0 = (const uint16_t *)(source->data + (size_t)y0 * source->header.stride);
+    row1 = (const uint16_t *)(source->data + (size_t)(y0 + 1U) * source->header.stride);
+    c00 = row0[x0];
+    c10 = row0[x0 + 1U];
+    c01 = row1[x0];
+    c11 = row1[x0 + 1U];
+    red = (uint32_t)(((c00 >> 11) * (1.0f - fx) + (c10 >> 11) * fx) * (1.0f - fy) +
+                     ((c01 >> 11) * (1.0f - fx) + (c11 >> 11) * fx) * fy);
+    green = (uint32_t)((((c00 >> 5) & 0x3FU) * (1.0f - fx) +
+                       ((c10 >> 5) & 0x3FU) * fx) * (1.0f - fy) +
+                      (((c01 >> 5) & 0x3FU) * (1.0f - fx) +
+                       ((c11 >> 5) & 0x3FU) * fx) * fy);
+    blue = (uint32_t)(((c00 & 0x1FU) * (1.0f - fx) + (c10 & 0x1FU) * fx) * (1.0f - fy) +
+                      ((c01 & 0x1FU) * (1.0f - fx) + (c11 & 0x1FU) * fx) * fy);
+    return (uint16_t)((red << 11) | (green << 5) | blue);
+}
+
+bool ft_gallery_render_perspective_path(const char *native_path,
+                                        uint32_t size, int32_t direction,
+                                        ft_gallery_rendered_image_t *rendered)
+{
+    ft_gallery_rendered_image_t source;
+    ft_gallery_rendered_image_t result;
+    float left_height;
+    float right_height;
+    float left_y;
+    float right_y;
+    float ratio;
+    float scale_x;
+    float shear_y;
+    float perspective_x;
+    uint32_t x;
+    uint32_t y;
+    if (rendered == RT_NULL || size == 0U || (size & 15U) != 0U) return false;
+    if (direction == 0)
+        return ft_gallery_render_image_path(native_path, size, size, rendered);
+    rt_memset(&source, 0, sizeof(source));
+    rt_memset(&result, 0, sizeof(result));
+    if (!ft_gallery_render_image_path(native_path, size, size, &source))
+    {
+        rt_kprintf("[gallery] perspective decode failed direction=%ld\n", (long)direction);
+        return false;
+    }
+    result.draw_buf = lv_draw_buf_create_ex(&s_gallery_draw_handlers, size, size,
+                                            LV_COLOR_FORMAT_RGB565, LV_STRIDE_AUTO);
+    if (result.draw_buf == RT_NULL)
+    {
+        ft_gallery_release_rendered_image(&source);
+        return false;
+    }
+    left_height = direction < 0 ? size * 64.0f / 100.0f : size;
+    right_height = direction < 0 ? size : size * 64.0f / 100.0f;
+    left_y = ((float)size - left_height) / 2.0f;
+    right_y = ((float)size - right_height) / 2.0f;
+    ratio = left_height / right_height;
+    scale_x = (float)size * ratio / (float)source.draw_buf->header.w;
+    shear_y = (right_y * ratio - left_y) / (float)source.draw_buf->header.w;
+    perspective_x = (ratio - 1.0f) / (float)source.draw_buf->header.w;
+    for (y = 0U; y < size; y++)
+    {
+        uint16_t *row = (uint16_t *)(result.draw_buf->data +
+                                    (size_t)y * result.draw_buf->header.stride);
+        for (x = 0U; x < size; x++)
+        {
+            float dx = (float)x + 0.5f;
+            float dy = (float)y + 0.5f;
+            float source_x = dx / (scale_x - dx * perspective_x);
+            float source_y = (dy * (1.0f + perspective_x * source_x) -
+                              shear_y * source_x - left_y) *
+                             (float)source.draw_buf->header.h / left_height;
+            row[x] = gallery_sample_rgb565(source.draw_buf, source_x, source_y);
+        }
+    }
+    lv_draw_buf_flush_cache(result.draw_buf, RT_NULL);
+    result.source_width = source.source_width;
+    result.source_height = source.source_height;
+    *rendered = result;
+    ft_gallery_release_rendered_image(&source);
+    return true;
+}
+
+bool ft_gallery_render_reflection(const ft_gallery_rendered_image_t *source,
+                                  ft_gallery_rendered_image_t *rendered)
+{
+    ft_gallery_rendered_image_t result;
+    vg_lite_buffer_t target;
+    vg_lite_buffer_t source_buffer;
+    vg_lite_matrix_t matrix;
+    vg_lite_rectangle_t source_rect;
+    vg_lite_error_t error;
+    uint32_t width;
+    uint32_t height;
+    if (source == RT_NULL || rendered == RT_NULL ||
+        source->draw_buf == RT_NULL || !s_gallery_draw_handlers_ready)
+        return false;
+    rt_memset(&result, 0, sizeof(result));
+    width = source->draw_buf->header.w;
+    height = source->draw_buf->header.h;
+    result.draw_buf = lv_draw_buf_create_ex(&s_gallery_draw_handlers, width, height,
+                                            LV_COLOR_FORMAT_RGB565, LV_STRIDE_AUTO);
+    if (result.draw_buf == RT_NULL) return false;
+    lv_gpu_batch_wait_idle();
+    lv_vg_lite_buffer_from_draw_buf(&target, result.draw_buf);
+    lv_vg_lite_buffer_from_draw_buf(&source_buffer, source->draw_buf);
+    source_rect.x = 0;
+    source_rect.y = 0;
+    source_rect.width = (int32_t)width;
+    source_rect.height = (int32_t)height;
+    vg_lite_identity(&matrix);
+    vg_lite_translate(0.0f, (vg_lite_float_t)height, &matrix);
+    vg_lite_scale(1.0f, -1.0f, &matrix);
+    error = vg_lite_blit_rect(&target, &source_buffer, &source_rect, &matrix,
+                              VG_LITE_BLEND_NONE, 0U, VG_LITE_FILTER_BI_LINEAR);
+    if (error == VG_LITE_SUCCESS) error = vg_lite_finish();
+    if (error != VG_LITE_SUCCESS)
+    {
+        rt_kprintf("[gallery] reflection GPU error=%d\n", (int)error);
+        ft_gallery_release_rendered_image(&result);
+        return false;
+    }
+    lv_draw_buf_invalidate_cache(result.draw_buf, RT_NULL);
+    result.source_width = source->source_width;
+    result.source_height = source->source_height;
     *rendered = result;
     return true;
 }

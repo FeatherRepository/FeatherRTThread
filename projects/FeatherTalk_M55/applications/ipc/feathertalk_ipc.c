@@ -3,13 +3,17 @@
 #include <rthw.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <drv_ipc.h>
 #include <feathertalk/ipc_protocol.h>
 
 #include "feathertalk_ipc.h"
+#include "feathertalk_player.h"
 #include "feathertalk_wifi.h"
+#include "bt_audio/bt_source_route.h"
 
 /* M8.x: 音频通道选择持久化文件 (B+C 方案: UI 切换落盘, 重启恢复) */
 #define FT_TRANSPORT_CFG_FILE "/flash/ft_transport.cfg"
@@ -675,6 +679,40 @@ int feathertalk_ipc_get_quick_status(feathertalk_quick_status_t *status)
     return status->sequence != 0U ? RT_EOK : -RT_EEMPTY;
 }
 
+int feathertalk_ipc_get_bt_source(ft_bt_source_shared_t *snapshot)
+{
+    ft_bt_source_shared_t copy;
+    const uint32_t invalidate_size =
+        (sizeof(ft_bt_source_shared_t) + 31U) & ~31U;
+
+    if (snapshot == RT_NULL) return -RT_EINVAL;
+    for (uint32_t retry = 0U; retry < 3U; retry++)
+    {
+        uint32_t before;
+        uint32_t after;
+        FT_BT_SOURCE_DCACHE_INVALID((void *)FT_BT_SOURCE, invalidate_size);
+        before = FT_BT_SOURCE->sequence;
+        if ((before & 1U) != 0U) continue;
+        rt_hw_dmb();
+        memcpy(&copy, (const void *)FT_BT_SOURCE, sizeof(copy));
+        rt_hw_dmb();
+        after = FT_BT_SOURCE->sequence;
+        if (before != after || (after & 1U) != 0U) continue;
+        if (copy.magic != FT_BT_SOURCE_MAGIC ||
+            copy.version != FT_BT_SOURCE_VERSION ||
+            copy.count > FT_BT_SOURCE_MAX_DEVICES) return -RT_EEMPTY;
+        *snapshot = copy;
+        return RT_EOK;
+    }
+    return -RT_EBUSY;
+}
+
+int feathertalk_ipc_bt_source_action(uint8_t value)
+{
+    return feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_SOURCE_ACTION,
+                                             value);
+}
+
 int feathertalk_ipc_set_quick_control(uint8_t control, uint8_t value)
 {
     rt_base_t level;
@@ -709,3 +747,101 @@ int feathertalk_ipc_set_quick_control(uint8_t control, uint8_t value)
     rt_hw_interrupt_enable(level);
     return RT_EOK;
 }
+
+static void bt_source_print_status(void)
+{
+    static const char *const states[] = {
+        "closed", "connecting", "open", "playing", "error"
+    };
+    ft_bt_source_shared_t source;
+    int rc = feathertalk_ipc_get_bt_source(&source);
+
+    if (rc != RT_EOK)
+    {
+        rt_kprintf("bt source: snapshot unavailable rc=%d\n", rc);
+        return;
+    }
+    rt_kprintf("bt source: state=%s scan=%s devices=%lu input=%s\n",
+               source.state < sizeof(states) / sizeof(states[0]) ?
+               states[source.state] : "unknown",
+               source.scan_active ? "on" : "off",
+               (unsigned long)source.count,
+               ft_bt_source_input_name(ft_bt_source_input_get()));
+    if ((source.peer_flags & FT_BT_SOURCE_FLAG_CONNECTED) != 0U)
+        rt_kprintf("  peer: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                   source.peer[0], source.peer[1], source.peer[2],
+                   source.peer[3], source.peer[4], source.peer[5]);
+    for (uint32_t i = 0; i < source.count; i++)
+    {
+        const ft_bt_source_device_t *device = &source.devices[i];
+        rt_kprintf("  [%lu] %s %02X:%02X:%02X:%02X:%02X:%02X%s%s\n",
+                   (unsigned long)i,
+                   device->name_len ? device->name : "(unnamed)",
+                   device->addr[0], device->addr[1], device->addr[2],
+                   device->addr[3], device->addr[4], device->addr[5],
+                   (device->flags & FT_BT_SOURCE_FLAG_AUDIO) ? " audio" : "",
+                   (device->flags & FT_BT_SOURCE_FLAG_CONNECTED) ? " connected" : "");
+    }
+}
+
+static int feather_bt_source(int argc, char **argv)
+{
+    uint8_t value;
+    int rc;
+
+    if (argc < 2 || strcmp(argv[1], "status") == 0)
+    {
+        bt_source_print_status();
+        return 0;
+    }
+    if (strcmp(argv[1], "role") == 0)
+    {
+        uint8_t role;
+        if (argc < 3) return -1;
+        if (strcmp(argv[2], "source") == 0) role = 1U;
+        else if (strcmp(argv[2], "sink") == 0) role = 0U;
+        else return -1;
+        rc = feathertalk_ipc_set_quick_control(FEATHERTALK_QUICK_BT_A2DP_ROLE,
+                                                role);
+        rt_kprintf("bt source role %s: %s\n", argv[2],
+                   rc == RT_EOK ? "queued" : "rejected");
+        return rc == RT_EOK ? 0 : -1;
+    }
+    if (strcmp(argv[1], "input") == 0)
+    {
+        ft_bt_source_input_t input;
+        if (argc < 3) return -1;
+        if (strcmp(argv[2], "usb") == 0) input = FT_BT_SOURCE_INPUT_USB;
+        else if (strcmp(argv[2], "player") == 0) input = FT_BT_SOURCE_INPUT_PLAYER;
+        else return -1;
+        (void)ft_player_set_output(input == FT_BT_SOURCE_INPUT_PLAYER ?
+                                   FT_PLAYER_OUTPUT_BT_A2DP :
+                                   FT_PLAYER_OUTPUT_SPEAKER);
+        ft_bt_source_input_set(input);
+        rt_kprintf("bt source input %s (player output %s)\n", argv[2],
+                   input == FT_BT_SOURCE_INPUT_PLAYER ? "bt" : "speaker");
+        return 0;
+    }
+    if (strcmp(argv[1], "scan") == 0)
+        value = FEATHERTALK_BT_SOURCE_ACTION_SCAN;
+    else if (strcmp(argv[1], "disconnect") == 0)
+        value = FEATHERTALK_BT_SOURCE_ACTION_DISCONNECT;
+    else if (strcmp(argv[1], "connect") == 0)
+    {
+        if (argc < 3) return -1;
+        unsigned long index = strtoul(argv[2], RT_NULL, 0);
+        if (index >= FT_BT_SOURCE_MAX_DEVICES) return -1;
+        value = (uint8_t)(FEATHERTALK_BT_SOURCE_ACTION_CONNECT | index);
+    }
+    else
+    {
+        rt_kprintf("usage: feather_bt_source [status|role source|sink|input usb|player|scan|connect <n>|disconnect]\n");
+        return -1;
+    }
+    rc = feathertalk_ipc_bt_source_action(value);
+    rt_kprintf("bt source action 0x%02x: %s (%d)\n",
+               value, rc == RT_EOK ? "queued" : "rejected", rc);
+    return rc == RT_EOK ? 0 : -1;
+}
+MSH_CMD_EXPORT_ALIAS(feather_bt_source, feather_bt_source,
+                     M33 A2DP source scan/connect/disconnect/status);

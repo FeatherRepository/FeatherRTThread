@@ -192,19 +192,20 @@ int bt_service_set_audio_transport(int mode)
     s_le_discovery_data[2] = s_le_adv_data[2];
     if (mode == FT_TRANSPORT_LE_ONLY)
     {
-        /* 仅 LE: 经典扫描关, 断既有经典 ACL; LE 广播带 0x06 flags 重发
-         * (从开机经典默认态切来时广播集未注册, bt_adv_start 会注册) */
+        /* 仅 LE: 先启动 BLE 广播命令链，再关经典可发现/可连。反过来会在
+         * 部分控制器上触发 0x42 Different Transaction Collision，广播
+         * 使能被拒后 UI 仍显示 READY 但空中不可见。 */
+        if (!s_le_adv_registered || !s_le_discovery_registered)
+        {
+            bt_adv_start();
+        }
+        bt_adv_set_data();
         gap_discoverable_control(0);
         gap_connectable_control(0);
         if (s_classic_connected && s_classic_handle != HCI_CON_HANDLE_INVALID)
         {
             gap_disconnect(s_classic_handle);
         }
-        if (!s_le_adv_registered || !s_le_discovery_registered)
-        {
-            bt_adv_start();
-        }
-        bt_adv_set_data();
     }
     else if (mode == FT_TRANSPORT_CLASSIC_ONLY)
     {
@@ -227,14 +228,15 @@ int bt_service_set_audio_transport(int mode)
     }
     else
     {
-        /* 双模: 两套发现机制都开 (从仅经典切出时广播集未注册, 先注册) */
-        gap_discoverable_control(1);
-        gap_connectable_control(1);
+        /* 双模: 两套发现机制都开。先排 BLE 广播命令链，再打开经典
+         * 可发现/可连，顺序与 WORKING 冷启动路径一致。 */
         if (!s_le_adv_registered || !s_le_discovery_registered)
         {
             bt_adv_start();
         }
         bt_adv_set_data();
+        gap_discoverable_control(1);
+        gap_connectable_control(1);
     }
     if (mode != FT_TRANSPORT_CLASSIC_ONLY && s_le_discovery_registered)
     {
@@ -252,6 +254,34 @@ int bt_service_set_le_pairing_mode(int on)
 {
     return bt_service_set_audio_transport(on ? FT_TRANSPORT_LE_ONLY : FT_TRANSPORT_DUAL);
 }
+void bt_adv_prepare_poweroff(void)
+{
+    if (s_le_adv_registered)
+    {
+        (void)gap_extended_advertising_stop(s_le_adv_handle);
+        (void)gap_extended_advertising_remove(s_le_adv_handle);
+    }
+    if (s_le_discovery_registered)
+    {
+        (void)gap_extended_advertising_stop(s_le_discovery_handle);
+        (void)gap_extended_advertising_remove(s_le_discovery_handle);
+    }
+    s_le_adv_registered = 0U;
+    s_le_discovery_registered = 0U;
+    s_le_adv_handle = 0U;
+    s_le_discovery_handle = 0U;
+    g_adv_cc_status[ADV_CC_PARAMS] = 0xFFU;
+    g_adv_cc_status[ADV_CC_DATA] = 0xFFU;
+    g_adv_cc_status[ADV_CC_ENABLE] = 0xFFU;
+    /* Controller is still alive here. Drain the queued stop/remove commands
+     * before HCI power-off so the host set list does not outlive the handles. */
+    for (uint32_t i = 0U; i < 100U; i++)
+    {
+        btstack_run_loop_embedded_execute_once();
+        rt_thread_mdelay(1);
+    }
+}
+
 void bt_adv_enable(void)
 {
     int rc = gap_extended_advertising_start(s_le_adv_handle, 0, 0);

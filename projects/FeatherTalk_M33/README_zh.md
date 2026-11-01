@@ -1,4 +1,4 @@
-﻿# FeatherTalk M33 产品工程
+# FeatherTalk M33 产品工程
 
 **中文** | [**English**](./README.md)
 
@@ -17,9 +17,10 @@ CYW55500A1 蓝牙 Host 运行；未被产品显式接入的可选外设 demo 仍
 * 已关闭 `SOC_Enable_CM33_DeepSleep`，确保 M33 启动 M55 后继续进入 RT-Thread 和产品 MSH。
 * AHT20、LSM6DS3、Audio、ADC、RTC、SD 卡、文件系统、LCD、Wi-Fi 等可选外设 demo 均保持关闭。
 * 板级初始化会将外部 Wi-Fi/音频电源控制脚拉低，避免 Template 默认打开外设电源。
-* CYW55500A1 蓝牙已作为产品服务接入：启动时下载官方 PatchRAM，运行 AIROC BLE Host
-  Stack，并提供扫描、设备列表和非连接广播 MSH 诊断。当前尚未接入 M55 UI、连接、
-  GATT、SMP、Bond 和密钥持久化。
+* CYW55500A1 蓝牙已作为产品服务接入。当前 `rtconfig.h` 选择 **BK / BlueKitchen
+  BTstack**：启动时下载官方 PatchRAM。产品支持 BLE、经典 A2DP Sink/Source、LE Audio、
+  GATT 与配对持久化，并由 M55 蓝牙设置页控制双模/经典/LE 通道和 SOURCE 耳机扫描。
+  AIROC Host Stack 仍保留为构建期可选栈，但不是当前产品默认配置。
 * 蓝牙构建依赖两个固定版本的 Infineon 子模块。首次克隆后执行
   `git submodule update --init --recursive`；完整过程见
   [蓝牙调试与上板记录](applications/bluetooth/BLUETOOTH_BRINGUP_zh.md)。
@@ -57,6 +58,9 @@ libs/TARGET_APP_KIT_PSE84_EVAL_EPC2/config/design.modus
 * 同时更新两个镜像时，先烧写 **FeatherTalk_M55**，最后烧写已签名的 **FeatherTalk_M33**；最后一次 M33 复位会完成板级初始化并启动 M55。
 * 在 M33 MSH 使用 `feather_status` 和 `feather_ping` 查看或探测 M55；使用
   `bt_status`、`bt_scan`、`bt_scan_stop`、`bt_devices` 和 `bt_adv on|off` 验证蓝牙。
+* M33 的 `bt_src scan|connect <n>|disconnect|status` 验证 A2DP Source。M55 侧可用
+  `feather_bt_source` 走与 UI 相同的跨核命令，并用 `feather_bt_source status` 查看
+  扫描快照和连接状态。
 
 ## 启动流程
 

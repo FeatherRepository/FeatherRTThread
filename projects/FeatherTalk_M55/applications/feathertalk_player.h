@@ -24,6 +24,12 @@ typedef enum
     FT_PLAYER_ERROR
 } ft_player_state_t;
 
+typedef enum
+{
+    FT_PLAYER_OUTPUT_SPEAKER = 0,
+    FT_PLAYER_OUTPUT_BT_A2DP
+} ft_player_output_t;
+
 typedef struct
 {
     char path[FT_PLAYER_PATH_MAX];
@@ -48,6 +54,7 @@ typedef struct
     uint32_t sample_rate;
     uint8_t sample_bits;
     uint8_t channels;
+    ft_player_output_t output;
     bool folder_loop;
     uint32_t generation;
     int last_error;
@@ -66,6 +73,8 @@ int ft_player_play(size_t index);
 int ft_player_pause(void);
 int ft_player_resume(void);
 int ft_player_stop(void);
+int ft_player_set_output(ft_player_output_t output);
+int ft_player_get_output(ft_player_output_t *output);
 int ft_player_get_status(ft_player_status_t *status);
 
 #endif /* FEATHERTALK_PLAYER_H */

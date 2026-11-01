@@ -70,8 +70,16 @@ typedef enum
     FEATHERTALK_QUICK_BT_LE_ROLE   = 5,   /* value: 0=OFF 1=SERVER 2=BROADCAST (M8) */
     /* M8.x 音频通道: UI 直接选择板子发 BLE 还是经典 (value = 目标通道) */
     FEATHERTALK_QUICK_BT_TRANSPORT = 6,   /* value: 0=DUAL 1=LE_ONLY 2=CLASSIC_ONLY */
+    /* A2DP SOURCE 设备操作 (value 高半字节=动作, 低半字节=扫描索引) */
+    FEATHERTALK_QUICK_BT_SOURCE_ACTION = 7,
     FEATHERTALK_QUICK_COUNT
 } feathertalk_quick_control_t;
+
+#define FEATHERTALK_BT_SOURCE_ACTION_MASK     0xF0U
+#define FEATHERTALK_BT_SOURCE_INDEX_MASK      0x0FU
+#define FEATHERTALK_BT_SOURCE_ACTION_SCAN     0x00U
+#define FEATHERTALK_BT_SOURCE_ACTION_CONNECT  0x10U
+#define FEATHERTALK_BT_SOURCE_ACTION_DISCONNECT 0x20U
 
 /* M8.x 音频通道模式标志, 附载在 quick_status.enabled 高半字节
  * (低 4 位为能力位; 两位都清 = 双模默认态) */

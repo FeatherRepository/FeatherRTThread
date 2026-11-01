@@ -29,6 +29,8 @@
 #include "ble/sm.h"
 #include "ft_gatt.h"
 #include "bt_internal.h"
+#include <feathertalk/bt_source_shared.h>
+#include <feathertalk/ipc_protocol.h>
 
 static rt_thread_t  s_loop_thread;
 volatile int s_bt_state;
@@ -53,7 +55,12 @@ static volatile int s_iso_probe_pending;
  * 切换语义: ->SOURCE 先挂断 Sink ACL (手机/PC 链路随 AVDTP 释放);
  *           ->SINK 断开 Source 链路并停泵 (M55 编码器让位, UAC 恢复) */
 static int s_a2dp_role;
+static volatile uint8_t s_source_action_pending;
+static volatile uint8_t s_source_action_value;
 extern void bt_a2dp_source_drop(void);
+extern int bt_a2dp_source_scan(void);
+extern int bt_a2dp_source_connect_index(uint8_t index);
+extern int bt_a2dp_source_disconnect(void);
 int bt_service_enabled(void);
 int bt_service_connected(void);
 void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size)
@@ -523,6 +530,66 @@ rt_err_t bt_service_set_a2dp_role(int role)
 int bt_service_a2dp_role(void)
 {
     return s_a2dp_role;
+}
+
+static void bt_source_action_owned(void)
+{
+    uint8_t value = s_source_action_value;
+    uint8_t action = value & FEATHERTALK_BT_SOURCE_ACTION_MASK;
+    uint8_t index = value & FEATHERTALK_BT_SOURCE_INDEX_MASK;
+    int rc;
+
+    s_source_action_pending = 0U;
+    if (s_a2dp_role != 1 || s_bt_state != BT_READY)
+    {
+        rt_kprintf("[BT] source action ignored (role=%d state=%d)\n",
+                   s_a2dp_role, s_bt_state);
+        return;
+    }
+    if (action == FEATHERTALK_BT_SOURCE_ACTION_SCAN)
+        rc = bt_a2dp_source_scan();
+    else if (action == FEATHERTALK_BT_SOURCE_ACTION_CONNECT)
+        rc = bt_a2dp_source_connect_index(index);
+    else if (action == FEATHERTALK_BT_SOURCE_ACTION_DISCONNECT)
+        rc = bt_a2dp_source_disconnect();
+    else
+        rc = -RT_EINVAL;
+    if (rc != RT_EOK)
+        rt_kprintf("[BT] source action 0x%02x failed rc=%d\n", value, rc);
+}
+
+rt_err_t bt_service_source_action(uint8_t value)
+{
+    uint8_t action = value & FEATHERTALK_BT_SOURCE_ACTION_MASK;
+    rt_base_t level;
+    int rc;
+
+    if (s_bt_state != BT_READY || s_a2dp_role != 1) return -RT_EBUSY;
+    if (action != FEATHERTALK_BT_SOURCE_ACTION_SCAN &&
+        action != FEATHERTALK_BT_SOURCE_ACTION_CONNECT &&
+        action != FEATHERTALK_BT_SOURCE_ACTION_DISCONNECT) return -RT_EINVAL;
+    if (action == FEATHERTALK_BT_SOURCE_ACTION_CONNECT &&
+        (value & FEATHERTALK_BT_SOURCE_INDEX_MASK) >= FT_BT_SOURCE_MAX_DEVICES)
+        return -RT_EINVAL;
+
+    level = rt_hw_interrupt_disable();
+    if (s_source_action_pending)
+    {
+        rt_hw_interrupt_enable(level);
+        return -RT_EBUSY;
+    }
+    s_source_action_value = value;
+    s_source_action_pending = 1U;
+    rt_hw_interrupt_enable(level);
+
+    rc = bt_service_run_callback(bt_source_action_owned);
+    if (rc != RT_EOK)
+    {
+        level = rt_hw_interrupt_disable();
+        s_source_action_pending = 0U;
+        rt_hw_interrupt_enable(level);
+    }
+    return rc;
 }
 
 

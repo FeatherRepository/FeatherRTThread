@@ -404,6 +404,15 @@ static void feathertalk_ipc_receive(void)
                     bt_service_set_audio_transport((int)command.value) == RT_EOK ?
                     FEATHERTALK_QUICK_RESULT_OK : FEATHERTALK_QUICK_RESULT_FAILED;
             }
+            else if (command.control == FEATHERTALK_QUICK_BT_SOURCE_ACTION)
+            {
+                int rc = bt_service_source_action(command.value);
+                g_quick_last_result = rc == -RT_EINVAL ?
+                    FEATHERTALK_QUICK_RESULT_INVALID :
+                    rc == -RT_EBUSY ? FEATHERTALK_QUICK_RESULT_PENDING :
+                    rc != RT_EOK ? FEATHERTALK_QUICK_RESULT_FAILED :
+                    FEATHERTALK_QUICK_RESULT_OK;
+            }
             else
 #endif
             {

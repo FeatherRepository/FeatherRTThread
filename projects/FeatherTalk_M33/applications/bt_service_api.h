@@ -36,4 +36,8 @@ int bt_service_connected(void);
 rt_err_t bt_service_set_a2dp_role(int role);
 int bt_service_a2dp_role(void);
 
+/* SOURCE 模式设备操作；编码见 ipc_protocol.h 的
+ * FEATHERTALK_BT_SOURCE_ACTION_*。只允许 READY + SOURCE。 */
+rt_err_t bt_service_source_action(uint8_t value);
+
 #endif

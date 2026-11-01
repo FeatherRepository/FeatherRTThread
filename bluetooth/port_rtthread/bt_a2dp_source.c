@@ -10,8 +10,9 @@
  *   bt_src disconnect     —— 断流并断开
  *   bt_src                —— 状态/统计
  *
- * 编码格式约定 (v1): M55 固定 48k/JS/bitpool53 编码; 协商结果若不是 48k
- * 立体声则只打日志不启泵 (对端耳机几乎都支持 48k JS, btstack 选高优先)。
+ * 编码格式约定: M55 固定 48k/16 blocks/8 subbands/loudness/JS 编码。
+ * 能力集也只宣告这一组合, 避免对端选到 M55 无法生成的配置; bitpool 取
+ * 对端协商的 max (常见 39/53), 通过 ring2 flags 高字节传给 M55。
  *
  * 所有 handler 运行在 btloop 线程上下文 (非 ISR)。
  */
@@ -32,9 +33,16 @@
 #include "classic/sdp_server.h"
 
 #include <feathertalk/audio_link.h>
+#include <feathertalk/bt_source_shared.h>
 
-/* Source 端点能力: 全采样率全声道模式 (对端取交集, btstack 优先选高) */
-static uint8_t s_src_sbc_codec_capabilities[] = { 0xFF, 0xFF, 2, 53 };
+/* Source 端点能力: 48 kHz / Joint Stereo / 16 blocks / 8 subbands / Loudness。
+ * 与 M55 固定编码器一致; max bitpool 53 只是上限, 对端可协商更低值。 */
+static uint8_t s_src_sbc_codec_capabilities[] = {
+    (AVDTP_SBC_48000 << 4) | AVDTP_SBC_JOINT_STEREO,
+    (AVDTP_SBC_BLOCK_LENGTH_16 << 4) | (AVDTP_SBC_SUBBANDS_8 << 2) |
+        AVDTP_SBC_ALLOCATION_METHOD_LOUDNESS,
+    2, 53
+};
 
 static uint8_t s_sdp_a2dp_source_buffer[150];
 
@@ -53,11 +61,16 @@ static struct {
 } s_scan[FT_SRC_SCAN_MAX];
 static uint8_t  s_scan_count;
 static rt_bool_t s_scan_active;
+static uint8_t  s_name_req_next;
+static rt_bool_t s_name_req_active;
+static bd_addr_t s_name_req_addr;
 
 /* ---- 流/发送状态 ---- */
-#define FT_SRC_STATE_CLOSED   0
-#define FT_SRC_STATE_OPEN     1
-#define FT_SRC_STATE_PLAYING  2
+#define FT_SRC_STATE_CLOSED     FT_BT_SOURCE_STATE_CLOSED
+#define FT_SRC_STATE_CONNECTING FT_BT_SOURCE_STATE_CONNECTING
+#define FT_SRC_STATE_OPEN       FT_BT_SOURCE_STATE_OPEN
+#define FT_SRC_STATE_PLAYING    FT_BT_SOURCE_STATE_PLAYING
+#define FT_SRC_STATE_ERROR      FT_BT_SOURCE_STATE_ERROR
 
 static volatile int s_src_state;
 static uint16_t     s_src_a2dp_cid;
@@ -76,6 +89,115 @@ static rt_uint8_t               s_reconnect_retry;
 static btstack_timer_source_t   s_reconnect_timer;
 
 static void bt_src_reconnect_timer_cb(btstack_timer_source_t *ts);
+
+static uint8_t bt_src_scan_find(const uint8_t *addr)
+{
+    for (uint8_t i = 0U; i < s_scan_count; i++)
+    {
+        if (memcmp(s_scan[i].addr, addr, 6U) == 0) return i;
+    }
+    return 0xFFU;
+}
+
+static uint8_t bt_src_scan_reserve(const uint8_t *addr, uint32_t cod)
+{
+    uint8_t index = bt_src_scan_find(addr);
+    rt_bool_t audio = ((cod & 0x001F00U) == 0x000400U) ? RT_TRUE : RT_FALSE;
+
+    if (index != 0xFFU)
+    {
+        s_scan[index].cod = cod;
+        s_scan[index].is_audio = audio;
+        return index;
+    }
+    if (s_scan_count < FT_SRC_SCAN_MAX)
+    {
+        index = s_scan_count++;
+    }
+    else if (audio)
+    {
+        for (uint8_t i = 0U; i < s_scan_count; i++)
+        {
+            if (!s_scan[i].is_audio)
+            {
+                index = i;
+                break;
+            }
+        }
+    }
+    if (index == 0xFFU) return index;
+
+    memset(&s_scan[index], 0, sizeof(s_scan[index]));
+    memcpy(s_scan[index].addr, addr, 6U);
+    s_scan[index].cod = cod;
+    s_scan[index].is_audio = audio;
+    return index;
+}
+
+static void bt_src_publish(void)
+{
+    volatile ft_bt_source_shared_t *shared = FT_BT_SOURCE;
+    uint32_t peer_flags =
+        (s_src_state == FT_SRC_STATE_OPEN || s_src_state == FT_SRC_STATE_PLAYING) ?
+        FT_BT_SOURCE_FLAG_CONNECTED : 0U;
+
+    if (shared->magic != FT_BT_SOURCE_MAGIC ||
+        shared->version != FT_BT_SOURCE_VERSION)
+        shared->sequence = 0U;
+    shared->sequence++;
+    __DMB();
+    shared->magic = FT_BT_SOURCE_MAGIC;
+    shared->version = FT_BT_SOURCE_VERSION;
+    shared->scan_active = s_scan_active ? 1U : 0U;
+    shared->state = (uint32_t)s_src_state;
+    shared->count = s_scan_count;
+    memcpy((void *)shared->peer, s_src_peer, 6U);
+    shared->peer_flags = (uint8_t)peer_flags;
+    shared->reserved = 0U;
+    for (uint8_t i = 0U; i < s_scan_count; i++)
+    {
+        volatile ft_bt_source_device_t *dst = &shared->devices[i];
+        size_t name_len = strlen(s_scan[i].name);
+        if (name_len >= FT_BT_SOURCE_NAME_LEN) name_len = FT_BT_SOURCE_NAME_LEN - 1U;
+        memcpy((void *)dst->addr, s_scan[i].addr, 6U);
+        dst->flags = (uint8_t)((s_scan[i].is_audio ? FT_BT_SOURCE_FLAG_AUDIO : 0U) |
+            ((peer_flags != 0U && memcmp(s_scan[i].addr, s_src_peer, 6U) == 0) ?
+             FT_BT_SOURCE_FLAG_CONNECTED : 0U));
+        dst->name_len = (uint8_t)name_len;
+        memset((void *)dst->name, 0, FT_BT_SOURCE_NAME_LEN);
+        memcpy((void *)dst->name, s_scan[i].name, name_len);
+    }
+    __DMB();
+    shared->sequence++;
+    __DMB();
+}
+
+/* Classic inquiry often returns an audio device without its remote name.
+ * Resolve names one at a time after the inquiry so the UI does not have to
+ * show "(unnamed)" for every headphone that omits EIR name data. */
+static void bt_src_request_next_name(void)
+{
+    while (!s_name_req_active && s_name_req_next < s_scan_count)
+    {
+        uint8_t index = s_name_req_next++;
+        if (s_scan[index].name[0] != '\0') continue;
+        memcpy(s_name_req_addr, s_scan[index].addr, 6U);
+        if (gap_remote_name_request(s_name_req_addr, 0, 0) != 0)
+        {
+            rt_kprintf("[SRC] name request rejected for %s\n",
+                       bd_addr_to_str(s_scan[index].addr));
+            continue;
+        }
+        s_name_req_active = RT_TRUE;
+    }
+}
+
+static void bt_src_cancel_name_request(void)
+{
+    if (!s_name_req_active) return;
+    (void)hci_send_cmd(&hci_remote_name_request_cancel, s_name_req_addr);
+    s_name_req_active = RT_FALSE;
+}
 
 /* 调度下一次重连 (指数退避; 超过最大次数放弃) */
 static void bt_src_schedule_reconnect(void)
@@ -214,12 +336,21 @@ static void bt_src_ring2_publish(rt_uint32_t rate);
 /* M6-BT: 角色切回 SINK 时由 bt_main 调用 —— 断开 Source 链路并停泵 */
 void bt_a2dp_source_drop(void)
 {
+    btstack_run_loop_remove_timer(&s_reconnect_timer);
+    s_reconnect_valid = RT_FALSE;
+    s_reconnect_retry = 0U;
     if (s_src_a2dp_cid != 0U)
     {
         a2dp_source_disconnect(s_src_a2dp_cid);
+        s_src_a2dp_cid = 0U;
     }
+    s_src_state = FT_SRC_STATE_CLOSED;
+    s_scan_active = RT_FALSE;
+    s_scan_count = 0U;
+    memset(s_src_peer, 0, sizeof(s_src_peer));
     bt_src_pump_stop();
     bt_src_ring2_publish(0U);   /* M55 编码器停 -> UAC 本地播放恢复 */
+    bt_src_publish();
 }
 
 /* ---- 媒体泵: 10ms 兜底节拍 (防空转后链路停摆), 主驱动在 CAN_SEND 事件 ---- */
@@ -237,6 +368,7 @@ static void bt_src_pump_handler(btstack_timer_source_t *ts)
         s_src_state = FT_SRC_STATE_CLOSED;
         bt_src_ring2_publish(0U);   /* M55 编码器停 -> UAC 本地播放恢复 */
         bt_src_pump_stop();
+        bt_src_publish();
     }
 }
 
@@ -274,6 +406,14 @@ static void bt_src_pump_stop(void)
 /* 流状态 -> ring2 控制块换代 (M55 编码器线程据此启停, 与 Sink 方向同款约定) */
 static void bt_src_ring2_publish(rt_uint32_t rate)
 {
+    rt_uint32_t bitpool = 0U;
+    if (rate != 0U)
+    {
+        bitpool = s_neg_bitpool_max;
+        if (bitpool < 2U || bitpool > 53U) bitpool = 53U;
+    }
+    FT_ALINK2->flags = (bitpool << FT_ALINK_FLAGS_BITPOOL_SHIFT) &
+                       FT_ALINK_FLAGS_BITPOOL_MASK;
     FT_ALINK2->fmt_rate = rate;
     FT_ALINK2->fmt_bits = 16U;
     FT_ALINK2->fmt_ch   = 2U;
@@ -306,6 +446,8 @@ static void bt_src_packet_handler(uint8_t packet_type, uint16_t channel,
             rt_kprintf("[SRC] establish failed, status 0x%02x\n",
                        a2dp_subevent_stream_established_get_status(packet));
             s_src_a2dp_cid = 0;
+            s_src_state = FT_SRC_STATE_ERROR;
+            bt_src_publish();
             break;
         }
         s_src_a2dp_cid = a2dp_subevent_stream_established_get_a2dp_cid(packet);
@@ -315,8 +457,21 @@ static void bt_src_packet_handler(uint8_t packet_type, uint16_t channel,
         memcpy(s_reconnect_peer, s_src_peer, 6);
         s_reconnect_valid = RT_TRUE;
         s_reconnect_retry = 0;
+        bt_src_publish();
         rt_kprintf("[SRC] established cid 0x%02x seid %u, starting...\n",
                    s_src_a2dp_cid, s_src_local_seid);
+        /* The peer was usually discovered without its name; try once now so
+         * the connected-device row can show a real name. */
+        bt_src_cancel_name_request();
+        {
+            uint8_t name_index = bt_src_scan_find(s_src_peer);
+            if (name_index != 0xFFU && s_scan[name_index].name[0] == '\0')
+            {
+                memcpy(s_name_req_addr, s_src_peer, 6U);
+                if (gap_remote_name_request(s_name_req_addr, 0, 0) == 0)
+                    s_name_req_active = RT_TRUE;
+            }
+        }
         a2dp_source_start_stream(s_src_a2dp_cid, s_src_local_seid);
         break;
 
@@ -324,11 +479,14 @@ static void bt_src_packet_handler(uint8_t packet_type, uint16_t channel,
         /* v1 编码恒 48k: 协商结果非 48k 不起泵 (对端罕见; 打日志明示) */
         if (s_neg_rate != 48000U)
         {
+            s_src_state = FT_SRC_STATE_ERROR;
+            bt_src_publish();
             rt_kprintf("[SRC] negotiated %lu Hz != 48k, 编码器暂不支持, 不出声\n",
                        (unsigned long)s_neg_rate);
             break;
         }
         s_src_state = FT_SRC_STATE_PLAYING;
+        bt_src_publish();
         rt_kprintf("[SRC] stream started -> ring2 gen %lu\n",
                    (unsigned long)(FT_ALINK2->fmt_gen + 1));
         bt_src_ring2_publish(48000U);   /* M55 编码器启动信号 */
@@ -341,6 +499,7 @@ static void bt_src_packet_handler(uint8_t packet_type, uint16_t channel,
                       ? FT_SRC_STATE_OPEN : FT_SRC_STATE_CLOSED;
         bt_src_ring2_publish(0U);       /* M55 编码器停止信号 */
         bt_src_pump_stop();
+        bt_src_publish();
         rt_kprintf("[SRC] stream %s (tx %lu pkts/%lu B, fail %lu)\n",
                    (packet[2] == A2DP_SUBEVENT_STREAM_SUSPENDED) ? "suspended" : "released",
                    (unsigned long)s_stat_sent_pkts, (unsigned long)s_stat_sent_bytes,
@@ -352,6 +511,7 @@ static void bt_src_packet_handler(uint8_t packet_type, uint16_t channel,
         s_src_a2dp_cid = 0;
         bt_src_ring2_publish(0U);
         bt_src_pump_stop();
+        bt_src_publish();
         rt_kprintf("[SRC] signaling released\n");
         bt_src_schedule_reconnect();
         break;
@@ -401,14 +561,10 @@ static void bt_src_gap_handler(uint8_t packet_type, uint16_t channel,
     {
     case GAP_EVENT_INQUIRY_RESULT:
     {
-        if (s_scan_count >= FT_SRC_SCAN_MAX) break;
         gap_event_inquiry_result_get_bd_addr(packet, addr);
         uint32_t cod = gap_event_inquiry_result_get_class_of_device(packet);
-        uint8_t idx = s_scan_count++;
-        memcpy(s_scan[idx].addr, addr, 6);
-        s_scan[idx].cod = cod;
-        s_scan[idx].name[0] = 0;
-        s_scan[idx].is_audio = ((cod & 0x001F00U) == 0x000400U) ? RT_TRUE : RT_FALSE; /* A/V 主类 */
+        uint8_t idx = bt_src_scan_reserve(addr, cod);
+        if (idx == 0xFFU) break;
         if (gap_event_inquiry_result_get_name_available(packet))
         {
             uint8_t nl = gap_event_inquiry_result_get_name_len(packet);
@@ -416,41 +572,115 @@ static void bt_src_gap_handler(uint8_t packet_type, uint16_t channel,
             memcpy(s_scan[idx].name, gap_event_inquiry_result_get_name(packet), nl);
             s_scan[idx].name[nl] = 0;
         }
+        bt_src_publish();
         rt_kprintf("[SRC] [%u] %s cod=%06lx%s\n", idx, bd_addr_to_str(addr),
                    (unsigned long)cod, s_scan[idx].is_audio ? " (audio)" : "");
         break;
     }
     case GAP_EVENT_INQUIRY_COMPLETE:
         s_scan_active = RT_FALSE;
+        s_name_req_next = 0U;
+        s_name_req_active = RT_FALSE;
+        bt_src_publish();
         rt_kprintf("[SRC] scan done, %u found\n", s_scan_count);
-        /* M6-BT: 角色切到 SOURCE 后自动扫描, 扫完自动连第一个音频设备 */
-        if (s_scan_count > 0U)
-        {
-            for (uint8_t i = 0U; i < s_scan_count; i++)
-            {
-                if (s_scan[i].is_audio)
-                {
-                    memcpy(s_src_peer, s_scan[i].addr, 6);
-                    rt_kprintf("[SRC] auto-connect: %s (%s)\n",
-                               bd_addr_to_str(s_src_peer),
-                               s_scan[i].name[0] ? s_scan[i].name : "unknown");
-                    a2dp_source_establish_stream(s_src_peer, &s_src_a2dp_cid);
-                    return;
-                }
-            }
-            rt_kprintf("[SRC] no audio device in scan results\n");
-        }
+        bt_src_request_next_name();
         break;
+    case HCI_EVENT_REMOTE_NAME_REQUEST_COMPLETE:
+    {
+        bd_addr_t addr;
+        const char *name;
+        uint8_t idx;
+        s_name_req_active = RT_FALSE;
+        if (hci_event_remote_name_request_complete_get_status(packet) == 0)
+        {
+            hci_event_remote_name_request_complete_get_bd_addr(packet, addr);
+            name = hci_event_remote_name_request_complete_get_remote_name(packet);
+            idx = bt_src_scan_find(addr);
+            if (idx != 0xFFU && name != RT_NULL && name[0] != '\0')
+            {
+                size_t len = strlen(name);
+                if (len >= sizeof(s_scan[idx].name)) len = sizeof(s_scan[idx].name) - 1U;
+                memcpy(s_scan[idx].name, name, len);
+                s_scan[idx].name[len] = 0;
+                rt_kprintf("[SRC] name %s -> %s\n", bd_addr_to_str(addr),
+                           s_scan[idx].name);
+                bt_src_publish();
+            }
+        }
+        bt_src_request_next_name();
+        break;
+    }
     default:
         break;
     }
+}
+
+int bt_a2dp_source_scan(void)
+{
+    if (s_scan_active) return RT_EOK;
+    if (s_src_state != FT_SRC_STATE_CLOSED && s_src_state != FT_SRC_STATE_ERROR)
+        return -RT_EBUSY;
+    bt_src_cancel_name_request();
+    s_name_req_next = 0U;
+    s_scan_count = 0U;
+    s_scan_active = RT_TRUE;
+    bt_src_publish();
+    rt_kprintf("[SRC] scanning 8s ...\n");
+    gap_inquiry_start(7);
+    return RT_EOK;
+}
+
+int bt_a2dp_source_connect_index(uint8_t index)
+{
+    if (index >= s_scan_count) return -RT_EINVAL;
+    if (s_src_state != FT_SRC_STATE_CLOSED && s_src_state != FT_SRC_STATE_ERROR)
+        return -RT_EBUSY;
+    if (s_src_a2dp_cid != 0U) return -RT_EBUSY;
+    if (s_scan_active)
+    {
+        gap_inquiry_stop();
+        s_scan_active = RT_FALSE;
+    }
+    bt_src_cancel_name_request();
+    memcpy(s_src_peer, s_scan[index].addr, 6U);
+    s_src_state = FT_SRC_STATE_CONNECTING;
+    bt_src_publish();
+    uint8_t rc = a2dp_source_establish_stream(s_src_peer, &s_src_a2dp_cid);
+    rt_kprintf("[SRC] establish %s -> rc=0x%02x cid=0x%x\n",
+               bd_addr_to_str(s_src_peer), rc, s_src_a2dp_cid);
+    if (rc != 0U)
+    {
+        s_src_a2dp_cid = 0U;
+        s_src_state = FT_SRC_STATE_ERROR;
+        bt_src_publish();
+        return -RT_ERROR;
+    }
+    return RT_EOK;
+}
+
+int bt_a2dp_source_disconnect(void)
+{
+    btstack_run_loop_remove_timer(&s_reconnect_timer);
+    s_reconnect_valid = RT_FALSE;
+    s_reconnect_retry = 0U;
+    if (s_src_a2dp_cid != 0U)
+    {
+        a2dp_source_disconnect(s_src_a2dp_cid);
+        s_src_a2dp_cid = 0U;
+    }
+    s_src_state = FT_SRC_STATE_CLOSED;
+    bt_src_pump_stop();
+    bt_src_ring2_publish(0U);
+    bt_src_publish();
+    return RT_EOK;
 }
 
 /* M6-BT: 角色切到 SOURCE 时由 bt_main.c 调用——自动扫描耳机 */
 void bt_a2dp_source_start_scan(void)
 {
     rt_kprintf("[SRC] auto-scan for headphones\n");
-    gap_inquiry_start(7);
+    if (bt_a2dp_source_scan() != RT_EOK)
+        rt_kprintf("[SRC] auto-scan skipped (source busy)\n");
 }
 
 /* ---- setup: bt_main.c 在 sdp_init 之后调 ---- */
@@ -488,35 +718,28 @@ int bt_a2dp_source_setup(void)
 
     rt_kprintf("[SRC] source ready (seid %u, SBC 48k preferred)\n",
                s_src_sep.local_seid);
+    FT_BT_SOURCE->magic = 0U;
+    FT_BT_SOURCE->sequence = 0U;
+    __DMB();
+    bt_src_publish();
     return 0;
 }
 
 /* ---- msh ---- */
 static int bt_src(int argc, char **argv)
 {
-    static const char *const names[] = { "closed", "open", "playing" };
+    static const char *const names[] = {
+        "closed", "connecting", "open", "playing", "error"
+    };
 
     if (argc > 1 && strcmp(argv[1], "scan") == 0)
     {
-        if (s_scan_active)
-        {
-            rt_kprintf("[SRC] scan already active\n");
-            return 0;
-        }
-        s_scan_count = 0;
-        s_scan_active = RT_TRUE;
-        rt_kprintf("[SRC] scanning 8s ...\n");
-        gap_inquiry_start(7);   /* 7 * 1.28s ≈ 9s */
+        int rc = bt_a2dp_source_scan();
+        if (rc != RT_EOK) rt_kprintf("[SRC] scan rejected rc=%d\n", rc);
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "connect") == 0)
     {
-        if (s_src_state != FT_SRC_STATE_CLOSED || s_src_a2dp_cid != 0)
-        {
-            rt_kprintf("[SRC] busy, state=%s cid=0x%x\n",
-                       names[s_src_state & 3], s_src_a2dp_cid);
-            return 0;
-        }
         if (argc < 3)
         {
             rt_kprintf("usage: bt_src connect <scan-index|xx:xx:xx:xx:xx:xx>\n");
@@ -524,33 +747,52 @@ static int bt_src(int argc, char **argv)
         }
         if (strlen(argv[2]) >= 17U && argv[2][2] == ':')
         {
-            sscanf_bd_addr(argv[2], s_src_peer);   /* 直接按 MAC 连 (如对端已挂着 ACL) */
+            if (s_src_state != FT_SRC_STATE_CLOSED &&
+                s_src_state != FT_SRC_STATE_ERROR)
+            {
+                rt_kprintf("[SRC] busy, state=%s cid=0x%x\n",
+                           names[s_src_state], s_src_a2dp_cid);
+                return 0;
+            }
+            if (s_scan_active)
+            {
+                gap_inquiry_stop();
+                s_scan_active = RT_FALSE;
+            }
+            bt_src_cancel_name_request();
+            sscanf_bd_addr(argv[2], s_src_peer);
+            s_src_state = FT_SRC_STATE_CONNECTING;
+            bt_src_publish();
+            uint8_t rc = a2dp_source_establish_stream(s_src_peer, &s_src_a2dp_cid);
+            rt_kprintf("[SRC] establish %s -> rc=0x%02x cid=0x%x\n",
+                       bd_addr_to_str(s_src_peer), rc, s_src_a2dp_cid);
+            if (rc != 0U)
+            {
+                s_src_a2dp_cid = 0U;
+                s_src_state = FT_SRC_STATE_ERROR;
+                bt_src_publish();
+            }
         }
         else
         {
             uint32_t idx = strtoul(argv[2], RT_NULL, 0);
-            if (idx >= s_scan_count)
+            if (idx > 0xFFU)
             {
                 rt_kprintf("[SRC] bad index (have %u)\n", s_scan_count);
                 return 0;
             }
-            memcpy(s_src_peer, s_scan[idx].addr, 6);
+            int rc = bt_a2dp_source_connect_index((uint8_t)idx);
+            if (rc != RT_EOK) rt_kprintf("[SRC] connect rejected rc=%d\n", rc);
         }
-        uint8_t rc = a2dp_source_establish_stream(s_src_peer, &s_src_a2dp_cid);
-        rt_kprintf("[SRC] establish %s -> rc=0x%02x cid=0x%x\n",
-                   bd_addr_to_str(s_src_peer), rc, s_src_a2dp_cid);
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "disconnect") == 0)
     {
-        if (s_src_a2dp_cid != 0)
-        {
-            a2dp_source_disconnect(s_src_a2dp_cid);
-        }
+        (void)bt_a2dp_source_disconnect();
         return 0;
     }
     rt_kprintf("[SRC] state=%s cid=0x%x peer=%s\n",
-               names[s_src_state & 3], s_src_a2dp_cid, bd_addr_to_str(s_src_peer));
+               names[s_src_state], s_src_a2dp_cid, bd_addr_to_str(s_src_peer));
     rt_kprintf("[SRC] negotiated: %lu Hz %u ch bitpool_max=%u\n",
                (unsigned long)s_neg_rate, s_neg_channels, s_neg_bitpool_max);
     rt_kprintf("[SRC] tx: pkts=%lu bytes=%lu frames=%lu fail=%lu, pump_idle=%lu, ring2 used=%lu\n",

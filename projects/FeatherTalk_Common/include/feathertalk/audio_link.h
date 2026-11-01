@@ -62,6 +62,10 @@ typedef struct
  * bit0 = LE Audio LC3 帧模式 (帧化: [len16][ch u8][LC3 帧]);
  * 0 = SBC 模式 (帧化: [len16][SBC 载荷]) */
 #define FT_ALINK_FLAGS_MODE_LE_AUDIO 0x01U
+/* ring2 only: bits 8..15 carry the SBC max bitpool negotiated by AVDTP.
+ * 0 means "not published"; the M55 encoder then falls back to its 53 default. */
+#define FT_ALINK_FLAGS_BITPOOL_SHIFT 8U
+#define FT_ALINK_FLAGS_BITPOOL_MASK  0xFF00U
 
 #if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1)
 #define FT_ALINK_DCACHE_CLEAN(addr, size)     SCB_CleanDCache_by_Addr((uint32_t *)(addr), (int32_t)(size))

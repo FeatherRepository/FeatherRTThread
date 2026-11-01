@@ -16,8 +16,9 @@
 #include <feathertalk/audio_link.h>   /* FT_ALINK2 + cache 维护宏 */
 
 #include "classic/btstack_sbc.h"
-#include "feathertalk_audio.h"        /* claim 仲裁 */
 #include "feathertalk_usb_uac.h"      /* ft_usb_uac_output_read (A3 §2 tap) */
+#include "bt_source_route.h"          /* USB audio / local player selection */
+#include "player_bt_tap.h"            /* local player -> SBC source */
 
 /* 与 M33 侧自测同一图案: 1kHz @48kHz 正弦表 (一周期 48 样点, 免 libm) */
 static const rt_int16_t ft_sine_1k_48k[48] =
@@ -130,26 +131,39 @@ static int ft_sbc_enc_test(int argc, char **argv)
 MSH_CMD_EXPORT_ALIAS(ft_sbc_enc_test, ft_sbc_enc_test,
                      M5: encode 1kHz sine to SBC frames into reverse ring2);
 
-/* ---- M5-4 Source 模式: UAC tap -> SBC 编码 -> ring2 (自动跟随 M33 流状态) ----
+/* ---- M5-4 Source 模式: selected tap -> SBC 编码 -> ring2 ----
  * M33 a2dp_source 流开时在 ring2 控制块写 fmt_rate=48000 并换代; 本线程据此
- * claim 音频输出 (A3 §2 互斥: UAC worker 拿不到 sound0, PCM 只走 BT),
- * 起编码循环;  fmt_rate=0 换代即停。 */
+ * 起编码循环;  fmt_rate=0 换代即停。
+ *
+ * The input is user-selectable: USB host audio (UAC tap) or the local player
+ * tap.  USB forwarding still mutes the UAC worker's sound0 path so the same
+ * PCM is not played twice; local-player mode releases that claim because the
+ * player already sits on a private tap. */
 static btstack_sbc_encoder_state_t s_src_enc;
 static rt_bool_t   s_src_active;
-static rt_bool_t   s_src_claimed;
+static ft_bt_source_input_t s_src_input = FT_BT_SOURCE_INPUT_USB;
 static rt_uint32_t s_src_last_gen;
 static rt_uint32_t s_src_stat_frames;
 static rt_uint32_t s_src_stat_bytes;
 static rt_uint32_t s_src_stat_idle;     /* tap 无数据空转次数 */
 static rt_uint32_t s_pcm_have;          /* 拼帧暂存进度 (字节) */
 
+static void ft_src_route_apply(void)
+{
+    if (ft_bt_source_input_get() == FT_BT_SOURCE_INPUT_PLAYER)
+    {
+        ft_usb_uac_set_bt_tap(RT_FALSE);
+        return;
+    }
+    /* USB forwarding: mute the UAC worker's sound0 path so the same PCM is
+     * not played twice.  The encoder reads the tap directly and does not own
+     * sound0, so local speaker playback and USB-to-BT can coexist. */
+    ft_usb_uac_set_bt_tap(RT_TRUE);
+    rt_thread_mdelay(30);              /* 给 UAC worker 一个让位窗口 */
+}
+
 static void ft_src_encode_stop(void)
 {
-    if (s_src_claimed)
-    {
-        ft_audio_release_output(FT_AUDIO_OUTPUT_OWNER_BT_A2DP);
-        s_src_claimed = RT_FALSE;
-    }
     ft_usb_uac_set_bt_tap(RT_FALSE);   /* 本地播放恢复 */
     if (s_src_active)
     {
@@ -160,21 +174,32 @@ static void ft_src_encode_stop(void)
     s_src_active = RT_FALSE;
 }
 
+static uint8_t ft_src_negotiated_bitpool(void)
+{
+    uint32_t bitpool;
+    FT_ALINK_DCACHE_INVALID(FT_ALINK2_BASE, 32);
+    bitpool = (FT_ALINK2->flags & FT_ALINK_FLAGS_BITPOOL_MASK) >>
+              FT_ALINK_FLAGS_BITPOOL_SHIFT;
+    if (bitpool < 2U || bitpool > 53U) bitpool = 53U;
+    return (uint8_t)bitpool;
+}
+
 static void ft_src_encode_start(void)
 {
-    /* A3 §2 互斥: 先让 UAC 本地播放让位 (放 claim 关 sound0), 再抢仲裁位 */
-    ft_usb_uac_set_bt_tap(RT_TRUE);
-    rt_thread_mdelay(30);              /* 给 UAC worker 一个让位窗口 */
-    s_src_claimed = (ft_audio_claim_output(FT_AUDIO_OUTPUT_OWNER_BT_A2DP) == RT_EOK);
+    uint8_t bitpool;
+    s_src_input = ft_bt_source_input_get();
+    ft_src_route_apply();
+    bitpool = ft_src_negotiated_bitpool();
     btstack_sbc_encoder_init(&s_src_enc, SBC_MODE_STANDARD, 16, 8,
-                             SBC_ALLOCATION_METHOD_LOUDNESS, 48000, 53,
+                             SBC_ALLOCATION_METHOD_LOUDNESS, 48000, bitpool,
                              SBC_CHANNEL_MODE_JOINT_STEREO);
     s_src_stat_frames = 0U;
     s_src_stat_bytes = 0U;
     s_src_stat_idle = 0U;
     s_pcm_have = 0U;                    /* 拼帧暂存清零 (换流不带上次尾巴) */
     s_src_active = RT_TRUE;
-    rt_kprintf("[SRC-enc] start: 48k/16/2 JS53, claim=%d\n", (int)s_src_claimed);
+    rt_kprintf("[SRC-enc] start: 48k/16/2 JS%u input=%s\n",
+               bitpool, ft_bt_source_input_name(s_src_input));
 }
 
 static void ft_sbc_src_thread_entry(void *parameter)
@@ -213,11 +238,21 @@ static void ft_sbc_src_thread_entry(void *parameter)
             continue;
         }
 
-        /* tap UAC: 攒满 512B (一帧 128 立体声样本) 才编码。
+        if (ft_bt_source_input_get() != s_src_input)
+        {
+            s_src_input = ft_bt_source_input_get();
+            s_pcm_have = 0U;           /* never concatenate two sources */
+            ft_src_route_apply();
+        }
+
+        /* Selected tap: 攒满 512B (一帧 128 立体声样本) 才编码。
          * 关键: 部分读必须留到下轮拼接 —— 曾直接把不足 512B 的读数丢弃,
          * 每 2ms 白吞 ~384B, 编码器饿死 (实测 48MB 进 ring 只出 528 帧) */
-        s_pcm_have += ft_usb_uac_output_read(pcm + s_pcm_have,
-                                             sizeof(pcm) - s_pcm_have);
+        s_pcm_have += s_src_input == FT_BT_SOURCE_INPUT_PLAYER ?
+            ft_player_bt_tap_read(pcm + s_pcm_have,
+                                  sizeof(pcm) - s_pcm_have) :
+            ft_usb_uac_output_read(pcm + s_pcm_have,
+                                   sizeof(pcm) - s_pcm_have);
         if (s_pcm_have < sizeof(pcm))
         {
             s_src_stat_idle++;
@@ -239,6 +274,11 @@ static void ft_sbc_src_thread_entry(void *parameter)
     }
 }
 
+bool ft_bt_a2dp_source_active(void)
+{
+    return s_src_active != RT_FALSE;
+}
+
 static int ft_sbc_src_init(void)
 {
     rt_thread_t t = rt_thread_create("ft_senc", ft_sbc_src_thread_entry, RT_NULL,
@@ -257,8 +297,8 @@ static int ft_sbc_enc_stats(int argc, char **argv)
 {
     (void)argc; (void)argv;
     FT_ALINK_DCACHE_INVALID(FT_ALINK2_BASE, 128);
-    rt_kprintf("[SRC-enc] active=%d claim=%d frames=%lu bytes=%lu idle=%lu | ring2 used=%lu overrun=%lu\n",
-               (int)s_src_active, (int)s_src_claimed,
+    rt_kprintf("[SRC-enc] active=%d input=%s frames=%lu bytes=%lu idle=%lu | ring2 used=%lu overrun=%lu\n",
+               (int)s_src_active, ft_bt_source_input_name(s_src_input),
                (unsigned long)s_src_stat_frames, (unsigned long)s_src_stat_bytes,
                (unsigned long)s_src_stat_idle,
                (unsigned long)ft_alink_used(FT_ALINK2),

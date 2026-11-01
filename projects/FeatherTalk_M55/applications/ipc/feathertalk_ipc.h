@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <feathertalk/bt_source_shared.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,6 +40,8 @@ void feathertalk_ipc_set_lvgl_ready(void);
 int feathertalk_ipc_get_system_status(feathertalk_system_status_t *status);
 int feathertalk_ipc_get_quick_status(feathertalk_quick_status_t *status);
 int feathertalk_ipc_set_quick_control(uint8_t control, uint8_t value);
+int feathertalk_ipc_bt_source_action(uint8_t value);
+int feathertalk_ipc_get_bt_source(ft_bt_source_shared_t *snapshot);
 void feathertalk_ipc_set_periodic_report_enabled(bool enabled);
 
 /* KWS 唤醒事件（M55 -> M33）。
